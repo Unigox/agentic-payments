@@ -12,8 +12,8 @@ Welcome to Agentic Payments, powered by UNIGOX.
 
 To get started, you need a UNIGOX account.
 
-- **If your agent has an email:** Sign up at unigox.com using the agent's email.
-- **No email?** Create an account with a web3 wallet (MetaMask, Phantom, etc.) and connect it to the agent.
+- **If your agent has an email:** The agent signs up itself. It sends an OTP to its own email, reads the code from its inbox, and completes signup automatically.
+- **No email?** Create an account with a web3 wallet (MetaMask, Phantom, etc.) and give the agent the exported private key.
 
 Already have an account? Great, let's connect it.
 

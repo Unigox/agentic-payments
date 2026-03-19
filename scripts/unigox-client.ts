@@ -212,7 +212,7 @@ export class UnigoxClient {
 
   /**
    * Step 1: Request a one-time password sent to the agent's email.
-   * The owner must provide the OTP code to the agent.
+   * The agent reads the code from its own inbox.
    */
   async requestEmailOTP(): Promise<void> {
     if (!this.email) throw new Error("No email configured");
@@ -224,7 +224,7 @@ export class UnigoxClient {
   }
 
   /**
-   * Step 2: Verify the OTP code and get an auth token.
+   * Step 2: Verify the OTP code (agent reads it from its own inbox) and get an auth token.
    * After this, the agent is logged into UNIGOX.
    */
   async verifyEmailOTP(code: string): Promise<string> {
