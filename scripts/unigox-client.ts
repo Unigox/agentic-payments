@@ -919,3 +919,73 @@ export async function getPaymentNetworksForCurrency(currency: string): Promise<C
     })),
   };
 }
+
+// ── Network Field Config (from API) ─────────────────────────
+
+export interface NetworkFieldConfig {
+  field: string;
+  label: string;
+  description: string;
+  placeholder: string;
+  type: string;
+  required: boolean;
+}
+
+export interface NetworkConfig {
+  slug: string;
+  name: string;
+  description: string;
+  countryCode?: string;
+  fields: NetworkFieldConfig[];
+}
+
+export interface NetworkFormat {
+  id: string;
+  name: string;
+  fields: NetworkFieldConfig[];
+}
+
+/**
+ * Fetch required input fields for a payment network (public, no auth needed).
+ * Returns top-level fields if present, otherwise returns formats (e.g. "banks", "mobile-money").
+ * The agent should pick the right format based on the payment method type.
+ */
+export async function getNetworkFieldConfig(networkSlug: string): Promise<NetworkConfig & { formats: NetworkFormat[] }> {
+  const res = await jsonFetch(
+    `${APIS.offers}/payment-networks/${networkSlug}`,
+    { method: "GET" }
+  );
+  const data = res?.data?.network || res?.network || res?.data || res;
+
+  const mapFields = (fields: any[]) => (fields || []).map((f: any) => ({
+    field: f.field,
+    label: f.label,
+    description: f.description || "",
+    placeholder: f.placeholder || "",
+    type: f.type || "text",
+    required: !!f.required,
+  }));
+
+  const topFields = mapFields(data.fields);
+  const formats = (data.formats || []).map((fmt: any) => ({
+    id: fmt.id,
+    name: fmt.name,
+    fields: mapFields(fmt.fields),
+  }));
+
+  // If no top-level fields, flatten all format fields as a fallback
+  const effectiveFields = topFields.length > 0
+    ? topFields
+    : formats.length > 0
+      ? formats[0].fields
+      : [];
+
+  return {
+    slug: data.slug || networkSlug,
+    name: data.name || networkSlug,
+    description: data.description || "",
+    countryCode: data.countryCode,
+    fields: effectiveFields,
+    formats,
+  };
+}
