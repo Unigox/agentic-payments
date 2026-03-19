@@ -12,8 +12,11 @@ Welcome to Agentic Payments, powered by UNIGOX.
 
 To get started, you need a UNIGOX account.
 
-- **If your agent has an email:** The agent signs up itself. It sends an OTP to its own email, reads the code from its inbox, and completes signup automatically.
-- **No email?** Create an account with a web3 wallet (MetaMask, Phantom, etc.) and give the agent the exported private key.
+You have three options:
+
+- **Use your agent's email** (recommended) - The agent handles everything autonomously. It sends itself an OTP, reads it from its own inbox, and logs in whenever a payment is needed. No action required from you after setup.
+- **Use your own email** - You receive the OTP each time the agent needs to log in. More control, but you'll need to provide the code when prompted.
+- **Use a web3 wallet** - Create an account with MetaMask, Phantom, etc. Export the private key and give it to the agent. No OTP needed after setup.
 
 Already have an account? Great, let's connect it.
 
