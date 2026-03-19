@@ -1,0 +1,9 @@
+{
+  "tradePartner": "licensed",
+  "_options": {
+    "tradePartner": ["licensed", "p2p", "all"]
+  },
+  "_description": {
+    "tradePartner": "Which exchange partners to use. 'licensed' = regulated businesses only (default, safest). 'p2p' = peer-to-peer traders only. 'all' = both."
+  }
+}

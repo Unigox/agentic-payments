@@ -519,6 +519,7 @@ export class UnigoxClient {
     paymentMethodId: number;
     paymentNetworkId: number;
     preferredVendor?: string;
+    tradePartner?: "licensed" | "p2p" | "all";
   }): Promise<TradeRequest> {
     const body = {
       crypto_currency_code: params.cryptoCurrencyCode || "USDC",
@@ -530,7 +531,7 @@ export class UnigoxClient {
       best_deal_crypto_amount: params.cryptoAmount,
       payment_method_id: params.paymentMethodId,
       payment_network_id: params.paymentNetworkId,
-      trade_partner: "all",
+      trade_partner: params.tradePartner || "licensed",
       ...(params.preferredVendor && { preferred_vendor_username: params.preferredVendor }),
     };
 
@@ -811,3 +812,110 @@ export class UnigoxClient {
 
 // ── Default export ──────────────────────────────────────────────────
 export default UnigoxClient;
+
+// ── Settings ─────────────────────────────────────────────────
+
+export interface AgenticPaymentsSettings {
+  /** Trade partner preference: "licensed" (default), "p2p", or "all" */
+  tradePartner: "licensed" | "p2p" | "all";
+}
+
+const DEFAULT_SETTINGS: AgenticPaymentsSettings = {
+  tradePartner: "licensed",
+};
+
+// ── Dynamic Payment Methods (from API) ───────────────────────
+
+export interface PaymentMethodInfo {
+  id: number;
+  name: string;
+  slug: string;
+  type: string;
+  typeSlug: string;
+  fiatCurrencyCodes: string[];
+  networks: PaymentNetworkInfo[];
+}
+
+export interface PaymentNetworkInfo {
+  id: number;
+  name: string;
+  slug: string;
+  fiatCurrencyCode: string;
+  default: boolean;
+}
+
+export interface CurrencyPaymentData {
+  currency: { code: string; name: string };
+  paymentMethods: PaymentMethodInfo[];
+}
+
+export interface NetworkWithMethods {
+  id: number;
+  name: string;
+  slug: string;
+  fiatCurrencyCode: string;
+  methods: PaymentMethodInfo[];
+}
+
+export interface CurrencyNetworkData {
+  currency: { code: string; name: string };
+  networks: NetworkWithMethods[];
+}
+
+/**
+ * Fetch available payment methods for a currency (public, no auth needed).
+ */
+export async function getPaymentMethodsForCurrency(currency: string): Promise<CurrencyPaymentData> {
+  const res = await jsonFetch(
+    `${APIS.offers}/get-currency-and-payment-methods-with-networks?currency=${currency}`,
+    { method: "GET" }
+  );
+  const data = res?.data || res;
+  return {
+    currency: { code: data.currency?.code || currency, name: data.currency?.name || currency },
+    paymentMethods: (data.payment_methods || []).map((m: any) => ({
+      id: m.id,
+      name: m.name,
+      slug: m.slug,
+      type: m.payment_method_type?.name || "",
+      typeSlug: m.payment_method_type?.slug || "",
+      fiatCurrencyCodes: m.fiat_currency_codes || [],
+      networks: (m.payment_networks || []).map((n: any) => ({
+        id: n.id,
+        name: n.name,
+        slug: n.slug,
+        fiatCurrencyCode: n.fiat_currency_code || currency,
+        default: !!n.default,
+      })),
+    })),
+  };
+}
+
+/**
+ * Fetch payment networks with their methods for a currency (public, no auth needed).
+ */
+export async function getPaymentNetworksForCurrency(currency: string): Promise<CurrencyNetworkData> {
+  const res = await jsonFetch(
+    `${APIS.offers}/get-currency-and-payment-networks-with-methods?currency=${currency}`,
+    { method: "GET" }
+  );
+  const data = res?.data || res;
+  return {
+    currency: { code: data.currency?.code || currency, name: data.currency?.name || currency },
+    networks: (data.payment_networks || []).map((n: any) => ({
+      id: n.id,
+      name: n.name,
+      slug: n.slug,
+      fiatCurrencyCode: n.fiat_currency_code || currency,
+      methods: (n.payment_methods || []).map((m: any) => ({
+        id: m.id,
+        name: m.name,
+        slug: m.slug,
+        type: m.payment_method_type?.name || "",
+        typeSlug: m.payment_method_type?.slug || "",
+        fiatCurrencyCodes: [m.fiat_currency_code || currency],
+        networks: [],
+      })),
+    })),
+  };
+}
