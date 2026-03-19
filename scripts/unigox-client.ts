@@ -81,7 +81,8 @@ const FORWARD_REQUEST_TYPES = {
 // ── Types ───────────────────────────────────────────────────────────
 
 export interface UnigoxClientConfig {
-  privateKey: string;
+  privateKey?: string;
+  email?: string;
   frontendUrl?: string;
 }
 
@@ -186,24 +187,106 @@ function sleep(ms: number): Promise<void> {
 // ── Client ──────────────────────────────────────────────────────────
 
 export class UnigoxClient {
-  private wallet: Wallet;
+  private wallet: Wallet | null;
+  private email: string | null;
   private frontendUrl: string;
   private token: string | null = null;
   private tokenExpiresAt: number = 0;
   private userProfile: UserProfile | null = null;
 
   constructor(config: UnigoxClientConfig) {
-    this.wallet = new Wallet(config.privateKey);
+    if (!config.privateKey && !config.email) {
+      throw new Error("Either privateKey or email is required");
+    }
+    this.wallet = config.privateKey ? new Wallet(config.privateKey) : null;
+    this.email = config.email || null;
     this.frontendUrl = config.frontendUrl || DEFAULT_FRONTEND_URL;
   }
 
   get address(): string {
+    if (!this.wallet) throw new Error("No wallet configured. Complete email signup first.");
     return this.wallet.address;
+  }
+
+  // ── Email Auth ──────────────────────────────────────────────
+
+  /**
+   * Step 1: Request a one-time password sent to the agent's email.
+   * The owner must provide the OTP code to the agent.
+   */
+  async requestEmailOTP(): Promise<void> {
+    if (!this.email) throw new Error("No email configured");
+    await jsonFetch(`${this.frontendUrl}/api/passwordless-start`, {
+      method: "POST",
+      body: JSON.stringify({ connection: "email", email: this.email }),
+    });
+    console.log(`[UNIGOX] OTP sent to ${this.email}`);
+  }
+
+  /**
+   * Step 2: Verify the OTP code and get an auth token.
+   * After this, the agent is logged into UNIGOX.
+   */
+  async verifyEmailOTP(code: string): Promise<string> {
+    const res = await jsonFetch(`${this.frontendUrl}/api/verify-code`, {
+      method: "POST",
+      body: JSON.stringify({ username: this.email, otp: code, realm: "email" }),
+    });
+    if (!res.id_token) {
+      throw new Error(`Email verification failed: ${JSON.stringify(res)}`);
+    }
+    this.token = res.id_token as string;
+    this.tokenExpiresAt = Date.now() + 50 * 60 * 1000;
+
+    // Register with account service
+    await jsonFetch(`${APIS.account}/account/login`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: JSON.stringify({}),
+    });
+
+    console.log("[UNIGOX] Email login successful");
+    return this.token;
+  }
+
+  /**
+   * Step 3: Generate a local wallet and link it to the email account.
+   * Returns the private key - the agent must store this securely.
+   */
+  async generateAndLinkWallet(): Promise<{ address: string; privateKey: string }> {
+    if (!this.token) throw new Error("Must be logged in first (call verifyEmailOTP)");
+    const newWallet = Wallet.createRandom();
+
+    // Sign SIWE message for wallet linking
+    const domain = new URL(this.frontendUrl).host;
+    const nonce = Math.random().toString(36).substring(7);
+    const issuedAt = new Date().toISOString();
+    const message = `${domain} wants you to sign in with your Ethereum account:\n${newWallet.address}\n\nSign in to Unigox\n\nURI: https://${domain}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
+    const signature = await newWallet.signMessage(message);
+
+    const res = await jsonFetch(`${this.frontendUrl}/api/link-wallet`, {
+      method: "POST",
+      body: JSON.stringify({
+        wallet_address: newWallet.address,
+        signature,
+        message,
+        primary_token: this.token,
+      }),
+    });
+
+    if (!res.success) {
+      throw new Error(`Wallet linking failed: ${JSON.stringify(res)}`);
+    }
+
+    this.wallet = newWallet;
+    console.log(`[UNIGOX] Wallet linked: ${newWallet.address}`);
+    return { address: newWallet.address, privateKey: newWallet.privateKey };
   }
 
   // ── Auth ────────────────────────────────────────────────────────
 
   private async loginOnce(): Promise<string> {
+    if (!this.wallet) throw new Error("No wallet configured. Use email login flow instead.");
     const domain = new URL(this.frontendUrl).host;
     const nonce = Math.random().toString(36).substring(7);
     const issuedAt = new Date().toISOString();
