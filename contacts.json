@@ -1,20 +1,6 @@
 {
-  "contacts": {
-    "mom": {
-      "name": "Svetlana Example",
-      "aliases": ["mom", "mother", "mama", "mum"],
-      "paymentMethods": {
-        "EUR": {
-          "method": "Revolut",
-          "methodId": 2,
-          "networkId": 47,
-          "network": "Revolut Username",
-          "details": {}
-        }
-      }
-    }
-  },
+  "contacts": {},
   "_meta": {
-    "lastUpdated": "2026-03-18"
+    "lastUpdated": ""
   }
 }

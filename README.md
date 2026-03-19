@@ -1,0 +1,105 @@
+# Agentic Payments
+
+Agents can browse. Agents can code. Now they can pay.
+
+Turn any OpenClaw agent into a payment terminal. Send money across borders with a single sentence.
+
+```
+> send €50 to john on revolut
+```
+
+## What Agentic Payments unlocks
+
+**💸 Cross-border transfers**
+Send fiat to 17+ countries. Revolut, Wise, SEPA, M-PESA, and local bank transfers.
+
+**🗣️ Natural language**
+No forms, no dashboards. Tell your agent who to pay and how much.
+
+**📇 Saved contacts**
+Add recipients once. Pay them instantly every time after.
+
+**🔐 Confirm before send**
+Your agent never moves money without your explicit approval.
+
+### Supported Currencies
+
+EUR, GBP, USD, AUD, NGN, KES, GHS, INR, ZAR, UGX, ARS, ETB, RWF, XAF, KWD, EGP, SAR
+
+More coming soon.
+
+## How It Works
+
+### 1. Sign up on UNIGOX
+Create an account at [unigox.com](https://www.unigox.com) using a **web3 wallet or your agent's email**, not your personal email. This account belongs to the agent.
+
+Don't have a web3 wallet? Create one for free using [MetaMask](https://metamask.io/) or [Phantom](https://phantom.app/).
+
+You can customize your username in the settings.
+
+### 2. Request access
+Send an email to **hello@unigox.com** requesting access to Agentic Payments. Include your UNIGOX username so we can enable your account.
+
+### 3. Export the wallet
+Inside UNIGOX, export your agent's wallet private key. This key is what the skill uses to authenticate and execute payments.
+
+⚠️ **Security:**
+- Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
+- Secure your private key. If someone gains access to it, they can withdraw funds.
+- We are building more secure key management options for agents. For now, standard precautions apply.
+
+### 4. Install the skill
+Add Agentic Payments to your OpenClaw agent.
+
+### 5. Initialize the agent
+On first run, the skill walks you through setup: linking your wallet, configuring payment methods, and adding your first contacts. More details in the setup guide.
+
+### 6. Fund your wallet
+Two options:
+
+- **Already have crypto?** Send USDC or USDT to your UNIGOX wallet. Your agent will provide the deposit address on your preferred chain, or you can find it on the [UNIGOX website](https://www.unigox.com) or mobile app. We support EVM chains (Ethereum, Polygon, Base, Arbitrum, Optimism, Unichain, Avalanche, BSC, HyperEVM), Solana, Tron, and TON.
+- **No crypto?** Use the skill to top up your wallet from your bank account. On-ramp is currently available in EUR, NGN, and KES, with more currencies coming soon.
+
+### 7. Send money
+
+```
+> send €200 to john on revolut
+```
+
+Your agent checks the balance, finds the recipient, and executes. You confirm. Recipient gets paid.
+
+## Why UNIGOX?
+
+UNIGOX is a Canadian-regulated money service business built from the ground up to be agent-friendly.
+
+- **Non-custodial** - your wallet, your keys, your funds
+- **API-first** - designed for programmatic access, not just humans clicking buttons
+- **P2P + Licensed providers** - your agent gets the best rate from both sides automatically
+- **17+ currencies** - Africa, Europe, Asia, Americas
+- **12 blockchains** - deposit from wherever your crypto lives
+- **Trades under 2 minutes** - 24/7/365
+
+## For Businesses
+
+Building a product that needs to move money? UNIGOX offers a B2B API for payouts to 17+ countries. Integrate once, pay out everywhere.
+
+**Coming soon:**
+- 🏦 Virtual EUR and GBP bank accounts - receive and send payments without a traditional bank
+- 🌍 More on-ramp currencies - top up with local bank accounts from additional countries
+
+Reach out at **hello@unigox.com** to learn more.
+
+---
+
+## Contact
+
+- 🌐 [unigox.com](https://www.unigox.com)
+- ✉️ hello@unigox.com
+- ✈️ [@unigox_global](https://t.me/unigox_global) on Telegram
+- 💼 [linkedin.com/company/unigox](https://linkedin.com/company/unigox)
+
+---
+
+## License
+
+MIT
