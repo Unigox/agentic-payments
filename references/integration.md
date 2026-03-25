@@ -82,6 +82,48 @@ await client.verifyEmailOTP(code);
 await client.linkTonWallet();
 ```
 
+## Resolving dynamic payment fields before save / send
+
+The frontend/payment-network config is the source of truth here:
+- `getPaymentMethodFieldConfig()` resolves fields using the same format-mapping strategy the frontend uses
+- `validatePaymentDetailInput()` applies the field validators exposed by the API and falls back to frontend validator-name behavior only when the API omits a regex pattern
+
+```typescript
+import {
+  getPaymentMethodsForCurrency,
+  getPaymentMethodFieldConfig,
+  validatePaymentDetailInput,
+} from "./unigox-client";
+
+const methods = await getPaymentMethodsForCurrency("KES");
+const selectedMethod = methods.paymentMethods.find((m) => m.slug === "mpesa-paybill");
+
+if (!selectedMethod) throw new Error("mpesa-paybill not available for KES");
+
+const fieldConfig = await getPaymentMethodFieldConfig({
+  currency: "KES",
+  methodSlug: selectedMethod.slug,
+  networkSlug: selectedMethod.networks[0]?.slug,
+});
+
+const validation = validatePaymentDetailInput(
+  {
+    paybill: "247247",
+    account_number: "INV-1024",
+    full_name: "Jane Doe",
+  },
+  fieldConfig.fields,
+  {
+    countryCode: fieldConfig.networkConfig.countryCode,
+    formatId: fieldConfig.selectedFormatId,
+  }
+);
+
+if (!validation.valid) {
+  throw new Error(JSON.stringify(validation.errors));
+}
+```
+
 ## Send Money Flow
 
 ```typescript
@@ -95,14 +137,14 @@ if (balance.totalUsd < amount * 1.05) {
 const pd = await client.ensurePaymentDetail({
   paymentMethodId: contact.methodId,
   paymentNetworkId: contact.networkId,
-  fiatCurrencyCode: "EUR",
+  fiatCurrencyCode: contact.currency,
   details: contact.details,
 });
 
 // 3. Create trade request
 const tr = await client.createTradeRequest({
   tradeType: "SELL",
-  fiatCurrencyCode: "EUR",
+  fiatCurrencyCode: contact.currency,
   fiatAmount: amount,
   cryptoAmount: amount,
   paymentDetailsId: pd.id,

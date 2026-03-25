@@ -6,7 +6,7 @@ description: >
   (2) user wants to manage payment contacts (add, list, update, remove),
   (3) user asks about supported payment methods or currencies,
   (4) user wants to check UNIGOX wallet balance before sending.
-  Supports EUR (Revolut, Wise, SEPA, N26, LHV, Coop Pank) with extensible currency support.
+  Supports EUR plus API-driven payout methods for INR, NGN, KES, GHS, and other currencies exposed by UNIGOX.
   Requires a UNIGOX account and at least one auth path: EVM private key, TON wallet auth, or email OTP during onboarding.
 ---
 
@@ -50,18 +50,28 @@ Read `contacts.json` from skill directory. Match by `name` or `aliases` (case-in
 
 ### 3. Collect Missing Info
 
-EUR payment methods and required fields:
+Do **not** assume EUR-only payout methods anymore.
 
-| Method | Key | Required Fields |
-|--------|-----|----------------|
-| Revolut | `revolut` | `revtag` (e.g. `@username`) |
-| Wise | `wise` | `iban`, `full_name` |
-| N26 | `n26` | `iban`, `full_name` |
-| LHV Bank | `lhv` | `iban`, `full_name` |
-| Coop Pank | `coop` | `iban`, `full_name` |
-| Other SEPA | `sepa` | `iban`, `full_name`, `bank_name` |
+Preferred flow:
 
-Full method IDs and network IDs: see `references/payment-methods.md`.
+1. Detect or confirm the target fiat currency
+2. Fetch live options with `getPaymentMethodsForCurrency(currency)`
+3. Pick the exact payment method + network from the API result
+4. Resolve the required fields with `getPaymentMethodFieldConfig({ currency, methodSlug, networkSlug? })`
+5. Validate user input with `validatePaymentDetailInput(details, fields, { countryCode, formatId })`
+6. Save the normalized details to the contact and proceed
+
+Rule: the frontend/payment-network config is the source of truth for both field selection and validation. Do not add country-specific validation guesses unless the frontend/API does not expose enough detail.
+
+Examples of now-supported live flows:
+
+- **EUR** — Revolut username, Wise, SEPA banks
+- **INR** — UPI and IMPS / NEFT transfer
+- **NGN** — NIP Nigeria bank and digital-bank payouts (API-driven institution list)
+- **KES** — M-PESA, Airtel Money, M-PESA Paybill, Kenyan banks
+- **GHS** — MTN MoMo, Vodafone Cash, Telecel Cash, Ghana banks
+
+Static EUR IDs are still documented for convenience. For non-EUR flows, prefer the live API response over hardcoded IDs. Full method + field notes: see `references/payment-methods.md` and `references/field-validators.md`.
 
 ### 4. Confirm
 

@@ -1200,6 +1200,12 @@ export async function getPaymentNetworksForCurrency(currency: string): Promise<C
 
 // ── Network Field Config (from API) ─────────────────────────
 
+export interface NetworkFieldValidator {
+  validatorName: string;
+  pattern?: string;
+  message?: string;
+}
+
 export interface NetworkFieldConfig {
   field: string;
   label: string;
@@ -1207,6 +1213,7 @@ export interface NetworkFieldConfig {
   placeholder: string;
   type: string;
   required: boolean;
+  validators: NetworkFieldValidator[];
 }
 
 export interface NetworkConfig {
@@ -1215,11 +1222,14 @@ export interface NetworkConfig {
   description: string;
   countryCode?: string;
   fields: NetworkFieldConfig[];
+  paymentMethodFormats?: Record<string, string>;
+  paymentMethodTypeFormats?: Record<string, string>;
 }
 
 export interface NetworkFormat {
   id: string;
   name: string;
+  description?: string;
   fields: NetworkFieldConfig[];
 }
 
@@ -1242,19 +1252,30 @@ export async function getNetworkFieldConfig(networkSlug: string): Promise<Networ
     placeholder: f.placeholder || "",
     type: f.type || "text",
     required: !!f.required,
+    validators: Array.isArray(f.validators)
+      ? f.validators.map((validator: any) => ({
+          validatorName: validator.validatorName || validator.validator_name,
+          pattern: validator.pattern,
+          message: validator.message,
+        })).filter((validator: NetworkFieldValidator) => !!validator.validatorName)
+      : [],
   }));
 
   const topFields = mapFields(data.fields);
   const formats = (data.formats || []).map((fmt: any) => ({
     id: fmt.id,
     name: fmt.name,
+    description: fmt.description,
     fields: mapFields(fmt.fields),
   }));
 
-  // If no top-level fields, flatten all format fields as a fallback
+  // Only expose fallback fields when the network has a single unambiguous format.
+  // If a network exposes multiple formats (for example Pesalink supports bank,
+  // mobile money, and M-PESA Paybill), callers should resolve the correct fields
+  // for the specific payment method via `getPaymentMethodFieldConfig()` below.
   const effectiveFields = topFields.length > 0
     ? topFields
-    : formats.length > 0
+    : formats.length === 1
       ? formats[0].fields
       : [];
 
@@ -1262,8 +1283,290 @@ export async function getNetworkFieldConfig(networkSlug: string): Promise<Networ
     slug: data.slug || networkSlug,
     name: data.name || networkSlug,
     description: data.description || "",
-    countryCode: data.countryCode,
+    countryCode: data.countryCode || data.country_code,
     fields: effectiveFields,
     formats,
+    paymentMethodFormats: data.paymentMethodFormats || data.payment_method_formats,
+    paymentMethodTypeFormats: data.paymentMethodTypeFormats || data.payment_method_type_formats,
+  };
+}
+
+const FRONTEND_VALIDATOR_FALLBACKS: Record<
+  string,
+  { pattern?: RegExp; message: string; customValidator?: (value: string) => boolean | { valid: boolean; message: string } }
+> = {
+  iban: {
+    pattern: /^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$/,
+    message: "Invalid IBAN format",
+  },
+  swiftCode: {
+    pattern: /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/,
+    message: "Invalid SWIFT/BIC code format",
+  },
+  email: {
+    pattern: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
+    message: "Invalid email format",
+  },
+  fullName: {
+    pattern: /^[a-zA-ZÀ-ÿ\u0100-\u017F\u0400-\u04FF\s'-]{2,50}$/,
+    message: "Full name should be 2-50 characters and contain only letters, spaces, hyphens, and apostrophes",
+  },
+  upiId: {
+    pattern: /^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$/,
+    message: "UPI ID must be in format user@bank (e.g., user@icici)",
+  },
+  ifscCode: {
+    pattern: /^[A-Z]{4}0[A-Z0-9]{6}$/,
+    message: "IFSC code must be 11 characters (e.g., HDFC0001234)",
+  },
+  internationalPhone: {
+    customValidator: (value: string) => {
+      const cleanValue = value.replace(/[^\d+]/g, "");
+      const e164Pattern = /^\+[1-9]\d{6,14}$/;
+      if (!e164Pattern.test(cleanValue)) {
+        return {
+          valid: false,
+          message: "Phone number must be in international format (+country code followed by 7-15 digits)",
+        };
+      }
+      return { valid: true, message: "" };
+    },
+    message: "Invalid international phone number format",
+  },
+  indiaPhone: {
+    customValidator: (value: string) => {
+      const cleanValue = value.replace(/[^\d+]/g, "");
+      const indiaPattern = /^(\+91\d{10}|91\d{10}|\d{10})$/;
+      if (!indiaPattern.test(cleanValue)) {
+        return {
+          valid: false,
+          message: "Phone number must be in India format (+91 XXXXX XXXXX, 91 XXXXX XXXXX, or XXXXX XXXXX)",
+        };
+      }
+      return { valid: true, message: "" };
+    },
+    message: "Invalid India phone number format",
+  },
+  indiaBankAccount: {
+    customValidator: (value: string) => {
+      const cleanValue = value.replace(/\D/g, "");
+      if (cleanValue.length >= 10 && cleanValue.length <= 16 && /^\d+$/.test(cleanValue)) {
+        return { valid: true, message: "" };
+      }
+      return {
+        valid: false,
+        message: "Account number must be 10-16 digits",
+      };
+    },
+    message: "Invalid India bank account number format",
+  },
+};
+
+const FIELD_NORMALIZERS: Record<string, (value: string) => string> = {
+  iban: (value: string) => value.replace(/\s+/g, "").toUpperCase(),
+  swift_code: (value: string) => value.replace(/\s+/g, "").toUpperCase(),
+  ifsc_code: (value: string) => value.replace(/\s+/g, "").toUpperCase(),
+  revtag: (value: string) => value.trim().replace(/^@/, ""),
+};
+
+export interface ResolvedPaymentMethodFieldConfig {
+  currency: { code: string; name: string };
+  method: PaymentMethodInfo;
+  network: PaymentNetworkInfo;
+  networkConfig: NetworkConfig & { formats: NetworkFormat[] };
+  selectedFormatId?: string;
+  fields: NetworkFieldConfig[];
+}
+
+export interface PaymentFieldValidationError {
+  field: string;
+  message: string;
+}
+
+export interface PaymentFieldValidationResult {
+  valid: boolean;
+  normalizedDetails: Record<string, string>;
+  errors: PaymentFieldValidationError[];
+}
+
+function normalizeSlug(value: string | undefined): string {
+  return (value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function findNormalizedMapValue(map: Record<string, string> | undefined, key: string | undefined): string | undefined {
+  if (!map || !key) return undefined;
+  const normalizedKey = normalizeSlug(key);
+  const entry = Object.entries(map).find(([candidate]) => normalizeSlug(candidate) === normalizedKey);
+  return entry?.[1];
+}
+
+function findFormatById(formats: NetworkFormat[], formatId: string | undefined): NetworkFormat | undefined {
+  if (!formatId) return undefined;
+  const normalizedId = normalizeSlug(formatId);
+  return formats.find((format) => normalizeSlug(format.id) === normalizedId);
+}
+
+export function selectFieldsForPaymentMethod(
+  method: Pick<PaymentMethodInfo, "slug" | "typeSlug">,
+  networkConfig: NetworkConfig & { formats: NetworkFormat[] }
+): { selectedFormatId?: string; fields: NetworkFieldConfig[] } {
+  if (networkConfig.formats.length > 0) {
+    const methodFormatId = findNormalizedMapValue(networkConfig.paymentMethodFormats, method.slug);
+    const methodFormat = findFormatById(networkConfig.formats, methodFormatId);
+    if (methodFormat) {
+      return {
+        selectedFormatId: methodFormat.id,
+        fields: methodFormat.fields,
+      };
+    }
+
+    const typeFormatId = findNormalizedMapValue(networkConfig.paymentMethodTypeFormats, method.typeSlug);
+    const typeFormat = findFormatById(networkConfig.formats, typeFormatId);
+    if (typeFormat) {
+      return {
+        selectedFormatId: typeFormat.id,
+        fields: typeFormat.fields,
+      };
+    }
+
+    if (networkConfig.formats.length === 1) {
+      return {
+        selectedFormatId: networkConfig.formats[0].id,
+        fields: networkConfig.formats[0].fields,
+      };
+    }
+  }
+
+  if (networkConfig.fields.length > 0) {
+    return { fields: networkConfig.fields };
+  }
+
+  return { fields: [] };
+}
+
+export async function getPaymentMethodFieldConfig(params: {
+  currency: string;
+  methodSlug?: string;
+  methodId?: number;
+  networkSlug?: string;
+}): Promise<ResolvedPaymentMethodFieldConfig> {
+  const currencyData = await getPaymentMethodsForCurrency(params.currency);
+  const method = currencyData.paymentMethods.find((entry) =>
+    params.methodId ? entry.id === params.methodId : normalizeSlug(entry.slug) === normalizeSlug(params.methodSlug)
+  );
+
+  if (!method) {
+    throw new Error(
+      `Payment method ${params.methodSlug || params.methodId || "<unknown>"} not found for ${params.currency}`
+    );
+  }
+
+  const network = params.networkSlug
+    ? method.networks.find((entry) => normalizeSlug(entry.slug) === normalizeSlug(params.networkSlug))
+    : method.networks.find((entry) => entry.default) || method.networks[0];
+
+  if (!network) {
+    throw new Error(`No payment network found for method ${method.name} (${params.currency})`);
+  }
+
+  const networkConfig = await getNetworkFieldConfig(network.slug);
+  const resolved = selectFieldsForPaymentMethod(method, networkConfig);
+
+  return {
+    currency: currencyData.currency,
+    method,
+    network,
+    networkConfig,
+    selectedFormatId: resolved.selectedFormatId,
+    fields: resolved.fields,
+  };
+}
+
+function normalizeFieldValue(field: string, value: string): string {
+  const normalizer = FIELD_NORMALIZERS[field];
+  return normalizer ? normalizer(value) : value;
+}
+
+function validateAgainstApiValidator(value: string, validator: NetworkFieldValidator): string | undefined {
+  if (validator.pattern) {
+    try {
+      const regex = new RegExp(validator.pattern);
+      if (!regex.test(value)) {
+        return validator.message || `Invalid ${validator.validatorName} format`;
+      }
+      return undefined;
+    } catch {
+      // Fall through to frontend-style named validator fallback.
+    }
+  }
+
+  const fallback = FRONTEND_VALIDATOR_FALLBACKS[validator.validatorName];
+  if (!fallback) {
+    return undefined;
+  }
+
+  if (fallback.pattern && !fallback.pattern.test(value)) {
+    return validator.message || fallback.message;
+  }
+
+  if (fallback.customValidator) {
+    const result = fallback.customValidator(value);
+    if (typeof result === "boolean") {
+      if (!result) return validator.message || fallback.message;
+    } else if (!result.valid) {
+      return result.message || validator.message || fallback.message;
+    }
+  }
+
+  return undefined;
+}
+
+export function validatePaymentDetailInput(
+  details: Record<string, string>,
+  fields: NetworkFieldConfig[],
+  options: { countryCode?: string; formatId?: string } = {}
+): PaymentFieldValidationResult {
+  const errors: PaymentFieldValidationError[] = [];
+  const normalizedDetails: Record<string, string> = {};
+
+  for (const fieldConfig of fields) {
+    const rawValue = details[fieldConfig.field];
+    const trimmedValue = typeof rawValue === "string" ? rawValue.trim() : "";
+    const normalizedValue = normalizeFieldValue(fieldConfig.field, trimmedValue);
+
+    if (normalizedValue) {
+      normalizedDetails[fieldConfig.field] = normalizedValue;
+    }
+
+    if (!normalizedValue) {
+      if (fieldConfig.required) {
+        errors.push({
+          field: fieldConfig.field,
+          message: `${fieldConfig.label || fieldConfig.field} is required`,
+        });
+      }
+      continue;
+    }
+
+    for (const validator of fieldConfig.validators || []) {
+      const error = validateAgainstApiValidator(normalizedValue, validator);
+      if (error) {
+        errors.push({
+          field: fieldConfig.field,
+          message: error,
+        });
+        break;
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    normalizedDetails,
+    errors,
   };
 }

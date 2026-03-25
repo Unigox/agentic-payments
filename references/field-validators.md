@@ -1,83 +1,101 @@
 # Payment Detail Field Validators
 
-Use these patterns to validate user input before calling the UNIGOX API.
-Fields and their required formats are returned by `getNetworkFieldConfig(networkSlug)`.
-This file provides the validation rules the agent should apply client-side.
+For this skill, the **frontend + payment-network API are the source of truth** for both:
+1. which fields to request
+2. how those fields should be validated
 
-## Universal Validators
+Do not invent country-specific rules when the network config already exposes them.
 
-| Field | Pattern / Rule | Error Message |
-|-------|---------------|---------------|
-| `full_name` | `^[a-zA-ZÀ-ÿ\u0100-\u017F\u0400-\u04FF\s'-]{2,50}$` | 2-50 chars, letters/spaces/hyphens/apostrophes only |
-| `email` | `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$` | Standard email format |
-| `iban` | `^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$` | Country code + check digits + account (uppercase, no spaces) |
-| `swift_code` | `^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$` | 8 or 11 char SWIFT/BIC code |
-| `revtag` | `^[a-zA-Z0-9_-]+$` | Revolut username (no @, letters/numbers/underscores/hyphens) |
-| `account_number` | `^\d+$` | Digits only |
+## Source of Truth Flow
 
-## Country-Specific Phone Validators
+Use this order:
 
-| Country | Format | Example |
-|---------|--------|---------|
-| International | `+` followed by 7-15 digits | +254712345678 |
-| Nigeria (+234) | +234 followed by 10 digits | +2348012345678 |
-| Kenya (+254) | +254 followed by 9 digits | +254712345678 |
-| Uganda (+256) | +256 7XXXXXXXX | +256712345678 |
-| India (+91) | +91 followed by 10 digits | +919876543210 |
-| Egypt (+20) | +20 followed by 10 digits | +201234567890 |
-| Kuwait (+965) | +965 followed by 8 digits | +96512345678 |
-| UAE (+971) | +971 followed by 9 digits | +971501234567 |
-| Philippines (+63) | 63 followed by 8-12 digits | 639171234567 |
-| Kazakhstan (+7/+997) | +7 or +997, starts with 0XX/6XX/7XX | +77012345678 |
-| Sierra Leone (+232) | +232 7/8 followed by 7 digits | +2327812345678 |
-| Morocco (+212) | +212 6/7 followed by 8 digits | +212612345678 |
-| Malaysia (+60) | +60 followed by 9-10 digits | +60123456789 |
-| China (+86) | +86 followed by 11 digits | +8613812345678 |
+1. `getPaymentMethodsForCurrency(currency)`
+2. `getPaymentMethodFieldConfig({ currency, methodSlug, networkSlug? })`
+3. `validatePaymentDetailInput(details, fields, { countryCode, formatId })`
 
-## Country-Specific Account Validators
+What the helper does:
+- resolves the correct format using the same frontend rules:
+  - `paymentMethodFormats`
+  - `paymentMethodTypeFormats`
+  - single-format fallback
+- validates against each field’s API-exposed `validators[]`
+- falls back to frontend validator-name behavior only when the API gives a `validatorName` without a regex `pattern`
 
-| Country | Field | Pattern / Rule | Example |
-|---------|-------|---------------|---------|
-| US | `routing_number` | Exactly 9 digits | 021000089 |
-| UK | `sort_code` | Format XX-XX-XX (6 digits with dashes) | 12-34-56 |
-| UK | `account_number` | Exactly 8 digits | 12345678 |
-| Nigeria | `account_number` (NUBAN) | Exactly 10 digits | 0123456789 |
-| Argentina | `cbu_cvu` | Exactly 22 digits | 0000000000000000000000 |
-| Mexico | `clabe` | Exactly 18 digits | 012345678901234567 |
-| Turkey | `iban` | TR + 24 digits (26 total) | TR330006100519786457841326 |
-| India | `account_number` | 10-16 digits | 1234567890 |
-| India | `ifsc_code` | 4 letters + 0 + 6 alphanumeric (11 chars) | HDFC0001234 |
-| India | `upi_id` | user@bank format | user@icici |
-| Philippines | `account_number` | 10, 12, or 16 digits | 1234567890 |
-| Australia | `bsb` | Format XXX-XXX (6 digits with dash) | 123-456 |
-| Australia | `account_number` | 1-9 digits | 12345678 |
-| Vietnam | `account_number` | 12-14 digits | 123456789012 |
-| Kazakhstan | `card_number` | 16-19 digits (spaces/dashes OK) | 4400 1234 5678 9012 |
+## Frontend-Aligned Validation Behavior
 
-## Other Validators
+Validation is field-config driven.
+For each field:
+- if `required=true`, non-empty input is mandatory
+- if `validators[]` is present, apply those validators in order
+- if no validators are present, accept the non-empty value as-is
 
-| Field | Pattern / Rule | Notes |
-|-------|---------------|-------|
-| `paypal_username` | Email OR @username (3-20 chars) | PayPal accepts both |
-| `alias` (Argentina) | 6-20 chars, letters/numbers/dots | CVU/CBU alias |
+## Named Validator Fallbacks
 
-## How to Use
+These are only used when the API returns a validator name without an inline regex pattern.
+That mirrors how the frontend adapter resolves validator names.
 
-1. Call `getNetworkFieldConfig(networkSlug)` to get required fields
-2. For each field, check if it has a known validator from this list
-3. Validate user input before calling `createPaymentDetail()`
-4. If validation fails, show the error message and ask the user to correct
-5. For fields not in this list, accept any non-empty string
+Currently relevant fallback names for this skill expansion:
 
-## Payment Method Type to Format Mapping
+| Validator Name | Frontend-Aligned Rule |
+|---|---|
+| `indiaBankAccount` | digits only, length 10-16 |
+| `indiaPhone` | accepts `+91XXXXXXXXXX`, `91XXXXXXXXXX`, or `XXXXXXXXXX` |
+| `ifscCode` | `^[A-Z]{4}0[A-Z0-9]{6}$` |
+| `upiId` | `^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$` |
+| `fullName` | `^[a-zA-ZÀ-ÿ\u0100-\u017F\u0400-\u04FF\s'-]{2,50}$` |
 
-When a network returns `formats` instead of top-level `fields`, pick the right format based on the payment method type:
+When the API already sends a regex pattern, that regex wins.
 
-| Method Type Slug | Format ID |
-|-----------------|-----------|
-| `traditional-banks` | `banks` |
-| `digital-banks` | `banks` |
-| `mobile-money` | `mobile-money` |
-| `mobile-wallets` | `mobile-money` |
+## What This Means for Current Currencies
 
-If the method type doesn't match, default to `banks`.
+### INR
+- `upi-india` exposes frontend/API validators for:
+  - `upi_id`
+  - `full_name`
+  - `mobile_number` via `indiaPhone`
+- `imps-neft-india` exposes frontend/API validators for:
+  - `ifsc_code`
+  - `account_number` via `indiaBankAccount`
+  - `full_name`
+
+### NGN
+- `nip-nigeria` exposes frontend/API validators for:
+  - `phone_number` on mobile-money formats
+  - `full_name`
+- Bank-account `account_number` currently has **no explicit validator** in the frontend/API config, so the skill should not impose extra hardcoded length rules.
+
+### KES
+- `pesalink` exposes frontend/API validators for:
+  - `phone_number` on mobile-money formats
+  - `paybill` on `mpesa-paybill`
+  - `full_name`
+- `mpesa-paybill.account_number` currently has **no explicit validator** in the frontend/API config, so it remains free-form.
+
+### GHS
+- `ghipss` exposes frontend/API validators for:
+  - `phone_number` on mobile-money formats
+  - `full_name`
+- Bank-account `account_number` currently has **no explicit validator** in the frontend/API config.
+
+## Minimal Normalization
+
+The helper performs a few safe normalizations before validation/storage:
+- `revtag` → strips leading `@`
+- `iban` → removes spaces, uppercases
+- `swift_code` → removes spaces, uppercases
+- `ifsc_code` → removes spaces, uppercases
+
+These are convenience normalizations only; validation still follows the frontend/API-derived rules above.
+
+## Important Gap to Call Out
+
+The backend API does **not** always serialize the full validator implementation.
+Sometimes it only sends:
+- `validatorName`
+- `message`
+
+without a regex `pattern`.
+
+In those cases, the skill uses the existing frontend validator semantics for that validator name.
+That is the only place where validation is not fully API-serialized, and it stays aligned to the frontend instead of ad-hoc local guesses.

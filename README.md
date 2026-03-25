@@ -11,7 +11,7 @@ Turn any OpenClaw agent into a payment terminal. Send money across borders with 
 ## What Agentic Payments unlocks
 
 **💸 Cross-border transfers**
-Send fiat to 17+ countries. Revolut, Wise, SEPA, M-PESA, and local bank transfers.
+Send fiat to 17+ countries. Revolut, Wise, SEPA, UPI / IMPS, NIP Nigeria, M-PESA, GHIPSS, and local bank transfers.
 
 **🗣️ Natural language**
 No forms, no dashboards. Tell your agent who to pay and how much.

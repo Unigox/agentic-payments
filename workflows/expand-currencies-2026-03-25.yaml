@@ -1,0 +1,77 @@
+goal: "Expand skills/send-money to support INR IMPS/NEFT, NGN, KES, and GHS via dynamic UNIGOX payment method + field config helpers, with minimal clean changes and updated docs."
+run_id: "send_money_expand_currencies_20260325"
+constraints:
+  - "prefer_api_driven_payment_config"
+  - "minimal_clean_changes"
+  - "no_unnecessary_country_hardcoding"
+  - "align_with_existing_field_validators_doc"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "api_findings"
+  - "design_notes"
+  - "changed_files"
+  - "tests_run"
+  - "test_results"
+  - "docs_updated"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_current_flow"
+    name: "Inspect send-money docs, client helpers, and live API-driven payment config"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:api_findings"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_minimal_changes"
+    name: "Define minimal implementation plan with dynamic field-selection and validation updates"
+    required_predecessors:
+      - "inspect_current_flow"
+    required_checks:
+      - "api_findings_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:summary"
+    external_action: false
+
+  - id: "implement_changes"
+    name: "Implement helper, validation, and docs changes"
+    required_predecessors:
+      - "design_minimal_changes"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_locally"
+    name: "Run local checks against dynamic payment configs and validators"
+    required_predecessors:
+      - "implement_changes"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_changes"
+    name: "Commit the workspace changes with a clear message"
+    required_predecessors:
+      - "validate_locally"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false
