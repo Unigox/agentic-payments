@@ -49,11 +49,14 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 
 - **EVM login key** — the private key for the wallet you already use to sign in on UNIGOX. Do not ask for it until the user confirms they have already signed in on unigox.com with that wallet.
 - **UNIGOX-exported EVM signing key** — a separate internal wallet key exported from unigox.com settings. This is the key the skill needs for signed actions like receipt confirmation / escrow release, escrow withdrawals, and bridge-outs. Save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (`UNIGOX_PRIVATE_KEY` still works as a legacy alias).
+- **Before requesting either EVM key, show a hard warning**: 🚨 use a **NEWLY CREATED / ISOLATED wallet only** for UNIGOX / agent use, and **never** the user's main wallet.
+- **After a user pastes either EVM key, the safest flow is required**: try to delete the key-containing message if the runtime/channel supports it; otherwise stop and tell the user to delete that message themselves before continuing.
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
+- Use a newly created / isolated wallet for UNIGOX agent setup and key sharing. Do **not** use your main wallet.
 - Secure your login key, signing key, or TON mnemonic. If someone gains access to them, they can authenticate or sign as the agent.
 - TON auth only covers login / JWT acquisition. Advanced EVM-signed actions still require the exported EVM signing key.
 - The skill can verify login with the first EVM key, but it does not currently auto-export the second key from UNIGOX. That export still has to happen manually on unigox.com.
@@ -63,7 +66,7 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 Add Agentic Payments to your OpenClaw agent.
 
 ### 5. Initialize the agent
-On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then ask which login wallet key you used and verify login with it, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
+On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then show the isolated-wallet warning, then ask which login wallet key you used and verify login with it, surface your current UNIGOX username, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. After the user pastes either EVM key, the flow tries to delete that message if the runtime supports it; otherwise it pauses and asks the user to delete the message themselves before continuing. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
 
 ### 6. Fund your wallet
 Two options:
@@ -77,9 +80,9 @@ Two options:
 > send €200 to john on revolut
 ```
 
-Your agent checks the balance, finds the recipient, and executes. You confirm. Recipient gets paid.
+Your agent resolves the recipient, walks method selection step by step, checks the balance early, and only then asks for final confirmation. Recipient gets paid only after you confirm.
 
-The orchestration layer also handles the real chat edges: saved vs new recipients, live payment-method/network selection, field-by-field validation, stale contact updates, save-contact-only mode, insufficient balance, and no-vendor-match follow-up. See `references/transfer-flow.md`.
+The orchestration layer also handles the real chat edges: saved vs new recipients, live payment-method/network selection, provider-first then network-specific detail collection, field-by-field validation, stale contact updates, save-contact-only mode, insufficient balance before trade creation, and no-vendor-match follow-up. See `references/transfer-flow.md`.
 
 ## Why UNIGOX?
 

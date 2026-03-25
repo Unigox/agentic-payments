@@ -13,7 +13,11 @@ This document defines the higher-level chat/orchestration flow implemented in `s
      - **EVM wallet connection**
      - **TON wallet connection**
      - fallback: **email OTP**
-   - If the user chooses **EVM**, first confirm they have already signed in on unigox.com with that wallet (and stop there if they have not), then ask for the **login wallet key**, verify login, and only then ask for the separate **UNIGOX-exported EVM signing key**.
+   - If the user chooses **EVM**, first confirm they have already signed in on unigox.com with that wallet (and stop there if they have not).
+   - Before requesting **either** EVM key, show the isolated-wallet warning: newly created / isolated wallet only, never the user's main wallet.
+   - After the user pastes either EVM key, try to delete that message if the runtime/channel supports it.
+   - If automatic deletion is unavailable, block the flow, tell the user to delete the key-containing message themselves, and require explicit `deleted` confirmation before continuing.
+   - Verify the **login wallet key**, surface the current UNIGOX username, and only then ask for the separate **UNIGOX-exported EVM signing key**.
    - If EVM login is configured but the exported signing key is still missing, block transfer execution before recipient collection.
    - Do not continue to execution until auth/onboarding is completed.
 
@@ -28,8 +32,9 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 
 5. **Payment-method gate**
    - Fetch live methods from `getPaymentMethodsForCurrency(currency)`.
+   - Ask for the payout provider / bank / method first.
    - Match the user's chosen method against the live API list.
-   - If the method exposes multiple payout networks (for example Revolut SEPA vs Revolut Username), ask for the exact network.
+   - If the method exposes multiple payout networks (for example Revolut SEPA vs Revolut Username, or Wise Tag vs SEPA), ask for the exact network as a separate step.
 
 6. **Field-collection gate**
    - Resolve the authoritative field schema with `getPaymentMethodFieldConfig({ currency, methodId/methodSlug, networkId/networkSlug })`.
@@ -37,6 +42,7 @@ This document defines the higher-level chat/orchestration flow implemented in `s
    - Validate each field with `validatePaymentDetailInput()`.
    - Normalize values before storing (for example `@revtag` → `revtag`).
    - Optional fields can be skipped.
+   - If the selected bank-like route requires `bank_name`, collect it explicitly before moving on.
 
 7. **Saved-contact revalidation**
    - If an existing contact already has payout details for the selected currency, re-validate them against the current API/frontend field schema.
@@ -51,18 +57,23 @@ This document defines the higher-level chat/orchestration flow implemented in `s
    - Collect the amount if missing.
    - If the user changes amount later, keep the recipient/method details but require re-confirmation.
 
-10. **Confirmation gate**
-    - Summarize recipient, currency, payment method/network, and normalized details.
+10. **Balance / identity preflight gate**
+    - Fetch the current UNIGOX username when available.
+    - Fetch `getWalletBalance()` before any trade creation.
+    - Surface the balance in-chat before the final confirmation prompt.
+    - If the balance is insufficient, stop here and do **not** place a trade request.
+
+11. **Confirmation gate**
+    - Summarize username (when available), current balance, recipient, currency, payment method/network, and normalized details.
     - Require explicit confirmation before any money movement.
 
-11. **Execution gate**
-    - `getWalletBalance()`
+12. **Execution gate**
     - `ensurePaymentDetail()`
     - `createTradeRequest()`
     - `waitForTradeMatch()`
     - initialize post-match settlement monitoring
 
-12. **Post-match monitoring gate**
+13. **Post-match monitoring gate**
     - Poll `getTradeRequest()` / `getTrade()` for real settlement status transitions.
     - Keep the flow open after vendor match instead of closing immediately.
     - Normalize backend statuses into chat stages:
@@ -73,7 +84,7 @@ This document defines the higher-level chat/orchestration flow implemented in `s
       - terminal refunded / cancelled
       - safe deferred placeholder for unsupported post-match states
 
-13. **Receipt confirmation gate**
+14. **Receipt confirmation gate**
     - Ask the user to confirm whether the recipient actually received fiat.
     - Supported user outcomes in this phase:
       - `received` → call `confirmFiatReceived()` / backend `confirm-payment`
@@ -81,20 +92,21 @@ This document defines the higher-level chat/orchestration flow implemented in `s
       - anything else → safe deferred placeholder, keep escrow locked
     - Reminder / timeout timestamps are tracked inside the session so later `status` checks can re-prompt if the user never answered.
 
-14. **Status / resolution gate**
+15. **Status / resolution gate**
     - If pending timeout, keep the flow open for later status checks.
     - If no vendor match, offer retry / amount change / method change / currency change.
     - If released or refunded / cancelled, end the settlement flow with the final trade status.
 
 ## Happy Path Summary
 
-`intent -> recipient -> currency -> method -> network? -> details -> save/update? -> amount -> confirm -> balance check -> payment detail ensure -> trade request -> vendor match -> settlement monitor -> receipt confirmed -> release started -> released`
+`intent -> auth gate -> recipient -> currency -> method -> network? -> details -> save/update? -> amount -> balance/identity preflight -> confirm -> payment detail ensure -> trade request -> vendor match -> settlement monitor -> receipt confirmed -> release started -> released`
 
 ## Main Unhappy Paths
 
 ### Missing auth
 - Block execution and ask for wallet sign-in path before continuing.
-- For EVM, first confirm the user has already signed in on unigox.com with that wallet, then collect the login wallet key, verify login, and only after that ask for the separate exported signing key.
+- For EVM, first confirm the user has already signed in on unigox.com with that wallet, then show the isolated-wallet warning, collect the login wallet key, verify login, surface the username, and only after that ask for the separate exported signing key.
+- After either EVM key is pasted, try to delete that message; if the runtime cannot do it, require the user to delete it manually before continuing.
 - If the exported signing key is missing, keep the flow blocked before execution.
 
 ### Invalid field
@@ -105,6 +117,7 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 - Re-collect only what needs fixing.
 
 ### Insufficient balance
+- Surface the current balance in the same chat flow before confirmation.
 - Stop before `ensurePaymentDetail()` / `createTradeRequest()`.
 - Ask the user to fund the wallet or change the amount.
 

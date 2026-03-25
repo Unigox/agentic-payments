@@ -63,6 +63,29 @@ const PAYMENT_DATA: Record<string, CurrencyPaymentData> = {
           { id: 47, name: "Revolut Username", slug: "revolut-username", fiatCurrencyCode: "EUR", default: false },
         ],
       },
+      {
+        id: 1,
+        name: "Wise",
+        slug: "wise",
+        type: "Digital Banks",
+        typeSlug: "digital-banks",
+        fiatCurrencyCodes: ["EUR"],
+        networks: [
+          { id: 46, name: "Wise Tag", slug: "wise-tag", fiatCurrencyCode: "EUR", default: true },
+          { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: false },
+        ],
+      },
+      {
+        id: 519,
+        name: "Other Bank",
+        slug: "other-bank",
+        type: "Traditional Banks",
+        typeSlug: "traditional-banks",
+        fiatCurrencyCodes: ["EUR"],
+        networks: [
+          { id: 49, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: true },
+        ],
+      },
     ],
   },
   NGN: {
@@ -143,6 +166,162 @@ const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
             message: "RevTag must contain only letters, numbers, underscores or hyphens",
           },
         ],
+      },
+    ],
+  },
+  "EUR:wise:wise-tag": {
+    currency: PAYMENT_DATA.EUR.currency,
+    method: PAYMENT_DATA.EUR.paymentMethods[1],
+    network: PAYMENT_DATA.EUR.paymentMethods[1].networks[0],
+    selectedFormatId: undefined,
+    networkConfig: {
+      slug: "wise-tag",
+      name: "Wise Tag",
+      description: "Wise Tag",
+      fields: [
+        {
+          field: "email",
+          label: "Wise Email",
+          description: "Email linked to the recipient's Wise account",
+          placeholder: "name@example.com",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "email", message: "Invalid email format" }],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "email",
+        label: "Wise Email",
+        description: "Email linked to the recipient's Wise account",
+        placeholder: "name@example.com",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "email", message: "Invalid email format" }],
+      },
+    ],
+  },
+  "EUR:wise:iban-sepa": {
+    currency: PAYMENT_DATA.EUR.currency,
+    method: PAYMENT_DATA.EUR.paymentMethods[1],
+    network: PAYMENT_DATA.EUR.paymentMethods[1].networks[1],
+    selectedFormatId: undefined,
+    networkConfig: {
+      slug: "iban-sepa",
+      name: "European Transfer (SEPA)",
+      description: "European Transfer (SEPA)",
+      fields: [
+        {
+          field: "iban",
+          label: "IBAN",
+          description: "Recipient IBAN",
+          placeholder: "EE382200221020145685",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
+        },
+        {
+          field: "full_name",
+          label: "Full Name",
+          description: "Recipient legal name",
+          placeholder: "Recipient full name",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "iban",
+        label: "IBAN",
+        description: "Recipient IBAN",
+        placeholder: "EE382200221020145685",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
+      },
+      {
+        field: "full_name",
+        label: "Full Name",
+        description: "Recipient legal name",
+        placeholder: "Recipient full name",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+      },
+    ],
+  },
+  "EUR:other-bank:iban-sepa": {
+    currency: PAYMENT_DATA.EUR.currency,
+    method: PAYMENT_DATA.EUR.paymentMethods[2],
+    network: PAYMENT_DATA.EUR.paymentMethods[2].networks[0],
+    selectedFormatId: undefined,
+    networkConfig: {
+      slug: "iban-sepa",
+      name: "European Transfer (SEPA)",
+      description: "European Transfer (SEPA)",
+      fields: [
+        {
+          field: "iban",
+          label: "IBAN",
+          description: "Recipient IBAN",
+          placeholder: "EE382200221020145685",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
+        },
+        {
+          field: "full_name",
+          label: "Full Name",
+          description: "Recipient legal name",
+          placeholder: "Recipient full name",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+        },
+        {
+          field: "bank_name",
+          label: "Bank Name",
+          description: "Receiving bank name",
+          placeholder: "Bank name",
+          type: "text",
+          required: true,
+          validators: [],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "iban",
+        label: "IBAN",
+        description: "Recipient IBAN",
+        placeholder: "EE382200221020145685",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
+      },
+      {
+        field: "full_name",
+        label: "Full Name",
+        description: "Recipient legal name",
+        placeholder: "Recipient full name",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+      },
+      {
+        field: "bank_name",
+        label: "Bank Name",
+        description: "Receiving bank name",
+        placeholder: "Bank name",
+        type: "text",
+        required: true,
+        validators: [],
       },
     ],
   },
@@ -274,16 +453,22 @@ function makeClient(options: {
   getTradeStatuses?: string[];
   confirmFiatReceivedStatus?: string;
   confirmFiatReceivedError?: string;
+  username?: string;
 } = {}): TransferExecutionClient & { calls: string[] } {
   const calls: string[] = [];
   const balance = options.balance ?? 1000;
   const waitMode = options.waitMode ?? "matched";
+  const username = options.username ?? "grape404";
   let currentTradeStatus = options.matchedTradeStatus ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
   const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
   let tradeStatusIndex = 0;
 
   return {
     calls,
+    async getProfile() {
+      calls.push("getProfile");
+      return { username };
+    },
     async getWalletBalance(): Promise<WalletBalance> {
       calls.push("getWalletBalance");
       return { usdc: balance, usdt: 0, totalUsd: balance };
@@ -381,6 +566,8 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
 
   res = await advanceTransferFlow(res.session, "50", deps);
   assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /Current wallet balance: 1000\.00 USD/i);
+  assert.match(res.reply, /@grape404/i);
 
   res = await advanceTransferFlow(res.session, "confirm", deps);
   assert.equal(res.session.stage, "awaiting_trade_settlement");
@@ -389,7 +576,7 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
   assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
   assert.match(res.reply, /keep escrow locked/i);
-  assert.deepEqual(client.calls.slice(0, 6), ["getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
+  assert.deepEqual(client.calls.slice(0, 7), ["getProfile", "getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
@@ -468,7 +655,58 @@ test("save-contact-only flow collects details, allows skip on optional field, an
   assert.deepEqual(client.calls, []);
 });
 
-test("insufficient balance blocks execution after confirmation", async () => {
+
+test("payment method collection stays stepwise for providers with multiple payout routes", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("save a new contact", deps);
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  res = await advanceTransferFlow(res.session, "Wise Person", deps);
+  res = await advanceTransferFlow(res.session, "EUR", deps);
+
+  assert.equal(res.session.stage, "awaiting_payment_method");
+  assert.match(res.reply, /provider \/ bank first/i);
+
+  res = await advanceTransferFlow(res.session, "Wise", deps);
+  assert.equal(res.session.stage, "awaiting_payment_network");
+  assert.match(res.reply, /Wise has multiple payout routes/i);
+  assert.match(res.reply, /username\/tag or a bank account \/ IBAN/i);
+
+  res = await advanceTransferFlow(res.session, "European Transfer (SEPA)", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /IBAN \/ bank account/i);
+
+  res = await advanceTransferFlow(res.session, "EE382200221020145685", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /Full Name/i);
+});
+
+test("bank-style SEPA flows collect bank name when required", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("save a contact", deps);
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  res = await advanceTransferFlow(res.session, "Bank Person", deps);
+  res = await advanceTransferFlow(res.session, "EUR", deps);
+  res = await advanceTransferFlow(res.session, "Other Bank", deps);
+
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /IBAN \/ bank account/i);
+
+  res = await advanceTransferFlow(res.session, "EE382200221020145685", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /Full Name/i);
+
+  res = await advanceTransferFlow(res.session, "Bank Person", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /Which bank should receive this payout/i);
+});
+
+test("insufficient balance blocks before trade creation and before confirmation", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -492,13 +730,13 @@ test("insufficient balance blocks execution after confirmation", async () => {
   const client = makeClient({ balance: 10 });
   const deps = makeDeps(file, client);
 
-  let res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_confirmation");
-
-  res = await advanceTransferFlow(res.session, "confirm", deps);
+  const res = await startTransferFlow("send 25 EUR to mom", deps);
   assert.equal(res.session.stage, "awaiting_balance_resolution");
   assert.equal(res.session.status, "blocked");
+  assert.ok(res.events.some((event) => event.type === "balance_checked"));
   assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
+  assert.match(res.reply, /will not place the trade/i);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance"]);
 });
 
 test("changing currency mid-flow resets payment selection and asks for a new method", async () => {
@@ -721,18 +959,18 @@ test("detectAuthState recognizes split EVM login and signing keys", () => {
   assert.equal(result.emailFallbackAvailable, true);
 });
 
-test("loadUnigoxConfigFromEnv returns split EVM config with legacy signing alias fallback", () => {
+test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are available", () => {
   const result = withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: "0xlegacySign",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_EMAIL: "agent@example.com",
   }, () => loadUnigoxConfigFromEnv());
 
   assert.equal(result.authMode, "evm");
   assert.equal(result.evmLoginPrivateKey, "0xlogin");
-  assert.equal(result.evmSigningPrivateKey, "0xlegacySign");
+  assert.equal(result.evmSigningPrivateKey, "0xsign");
   assert.equal(result.email, "agent@example.com");
 });
 
@@ -754,7 +992,8 @@ test("missing EVM auth asks the user to sign in on unigox.com before requesting 
   const afterSignin = await advanceTransferFlow(chooseEvm.session, "done", deps);
   assert.equal(afterSignin.session.stage, "awaiting_evm_login_key");
   assert.match(afterSignin.reply, /Which wallet key did you use to sign in on UNIGOX/i);
-  assert.match(afterSignin.reply, /login wallet private key/i);
+  assert.match(afterSignin.reply, /NEWLY CREATED \/ ISOLATED wallet/i);
+  assert.match(afterSignin.reply, /must NOT be your main wallet/i);
 });
 
 test("EVM login without exported signing key blocks before transfer execution", async () => {
@@ -789,7 +1028,10 @@ test("failed EVM login verification stays on the login-key step and does not ask
   res = await advanceTransferFlow(res.session, "evm", deps);
   res = await advanceTransferFlow(res.session, "done", deps);
   res = await advanceTransferFlow(res.session, "0xbadlogin", deps);
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+  assert.match(res.reply, /delete the message/i);
 
+  res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.equal(res.session.stage, "awaiting_evm_login_key");
   assert.match(res.reply, /didn't work/i);
   assert.doesNotMatch(res.reply, /UNIGOX EVM signing key/i);
@@ -815,13 +1057,56 @@ test("successful EVM login verification asks for the separate signing key and th
   res = await advanceTransferFlow(res.session, "done", deps);
   res = await advanceTransferFlow(res.session, "0xgoodlogin", deps);
 
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+  assert.match(res.reply, /delete the message/i);
+  assert.deepEqual(persisted.login, []);
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /Login works/i);
+  assert.match(res.reply, /@grape404/i);
   assert.match(res.reply, /separate UNIGOX EVM signing key/i);
+  assert.match(res.reply, /must NOT be your main wallet/i);
   assert.deepEqual(persisted.login, ["0xgoodlogin"]);
 
   res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+  assert.match(res.reply, /UNIGOX-exported signing key/i);
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
   assert.equal(res.session.stage, "awaiting_payment_method");
   assert.match(res.reply, /Which payout method should mom receive in EUR/i);
+});
+
+
+test("automatic secret deletion hook skips manual cleanup confirmation", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { login: [] as string[], signing: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === "0xgoodlogin", username: "autodelete" }),
+    persistEvmLoginKey: async (loginKey) => {
+      persisted.login.push(loginKey);
+    },
+    persistEvmSigningKey: async (signingKey) => {
+      persisted.signing.push(signingKey);
+    },
+    handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "evm", deps);
+  res = await advanceTransferFlow(res.session, "done", deps);
+  res = await advanceTransferFlow(res.session, "0xgoodlogin", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
+  assert.deepEqual(persisted.login, ["0xgoodlogin"]);
+
+  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+  assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
+  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
 });

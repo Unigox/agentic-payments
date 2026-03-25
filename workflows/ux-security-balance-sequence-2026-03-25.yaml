@@ -1,0 +1,77 @@
+goal: "Implement send-money UX/security fixes for onboarding secrets, username surfacing, stepwise payment collection, and balance-first preflight"
+run_id: "send_money_ux_security_balance_2026_03_25"
+constraints:
+  - "no_secret_echo"
+  - "same_chat_state_machine"
+  - "respect_existing_live_payment_config"
+  - "avoid_unrelated_scope_expansion"
+allowed_scope:
+  - "status"
+  - "plan"
+  - "code_files"
+  - "doc_files"
+  - "test_files"
+  - "count"
+  - "commit_sha"
+  - "notes"
+  - "validation"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "plan"
+    name: "Audit current send-money flow and lock scope for the requested UX/security fixes"
+    required_predecessors: []
+    acceptance_criteria:
+      - "has_key:plan"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "code"
+    name: "Implement orchestrator and client changes for warnings, secret hygiene, username surfacing, and balance-first preflight"
+    required_predecessors:
+      - "plan"
+    acceptance_criteria:
+      - "has_key:code_files"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "docs"
+    name: "Update skill docs and prompts to reflect the new onboarding and payment-detail collection sequence"
+    required_predecessors:
+      - "code"
+    acceptance_criteria:
+      - "has_key:doc_files"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "tests"
+    name: "Add or update automated tests for secret handling, username surfacing, payment sequencing, and balance-first behavior"
+    required_predecessors:
+      - "code"
+    acceptance_criteria:
+      - "has_key:test_files"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate"
+    name: "Run the test suite and verify the workflow changes stay within scope"
+    required_predecessors:
+      - "docs"
+      - "tests"
+    acceptance_criteria:
+      - "has_key:validation"
+      - "has_key:status"
+    external_action: false
+
+  - id: "commit"
+    name: "Commit the send-money skill changes with a descriptive message"
+    required_predecessors:
+      - "validate"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false

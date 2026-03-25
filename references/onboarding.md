@@ -4,8 +4,9 @@
 
 Run this flow when no replayable wallet sign-in path is configured yet:
 - no `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
-- no legacy single-key `UNIGOX_PRIVATE_KEY`
 - no `UNIGOX_TON_MNEMONIC`
+
+Also check separately whether the signed-action key exists as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`).
 
 Email-only (`UNIGOX_EMAIL`) counts as recovery / bootstrap, not a replayable wallet path.
 
@@ -36,20 +37,30 @@ Use this exact sequence:
 
 1. First ask whether they have **already signed in on unigox.com with that EVM wallet**.
 2. If not, stop there and tell them to sign in on unigox.com with the wallet first.
-3. Only after they confirm that sign-in already happened, ask for the **wallet key already used to sign in on UNIGOX**.
-4. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
-5. Clear `UNIGOX_AUTH_MODE` if it was set to `ton`.
-6. Call `login()` to verify EVM sign-in works.
-7. If login fails:
+3. Before requesting **either** EVM key, show this warning:
+   > 🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨 Use a **NEWLY CREATED / ISOLATED** wallet for UNIGOX agent setup. **Do NOT use your main wallet.** Do not paste a wallet that holds long-term funds.
+4. Only after they confirm that sign-in already happened, ask for the **wallet key already used to sign in on UNIGOX**.
+5. As soon as they paste that key, try to delete the key-containing message if the runtime/channel supports it.
+6. If automatic deletion is unavailable, immediately tell the user to delete that message themselves and wait for explicit `deleted` confirmation before continuing.
+7. Save the cleaned-up login key as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+8. Clear `UNIGOX_AUTH_MODE` if it was set to `ton`.
+9. Call `login()` to verify EVM sign-in works.
+10. If login fails:
    - say: "That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again."
    - do **not** ask for the export key yet.
-8. If login succeeds, ask for the **separate UNIGOX-exported EVM signing key** from unigox.com settings.
-9. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY` still works).
-10. Explain that this second key is required for signed actions such as receipt confirmation / escrow release, escrow withdrawals, and bridge-outs.
-11. Proceed to Step 3.
+11. If login succeeds, tell the user their current UNIGOX username and remind them they can change it later in the agent flow or on unigox.com.
+12. Then ask for the **separate UNIGOX-exported EVM signing key** from unigox.com settings, with the same isolated-wallet warning.
+13. After they paste the signing key, apply the same delete-message / manual-delete-confirmation rule before continuing.
+14. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY` still works).
+15. Explain that this second key is required for signed actions such as receipt confirmation / escrow release, escrow withdrawals, and bridge-outs.
+16. Proceed to Step 3.
 
 Prompt wording for the signing-key step:
 
+> You're currently signed in as @[username] on UNIGOX. You can change that username later in this agent flow or on unigox.com.
+>
+> 🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨 Use a **NEWLY CREATED / ISOLATED** wallet for this key. **Do NOT use your main wallet.**
+>
 > Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here. I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release.
 >
 > If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.
@@ -117,14 +128,20 @@ Once they provide the email:
 
 > Have you already signed in on unigox.com with the EVM wallet you want me to reuse? If not, do that first.
 >
+> 🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨 Use a **NEWLY CREATED / ISOLATED** wallet for UNIGOX agent setup. **Do NOT use your main wallet.**
+>
 > After you confirm that sign-in is done, give me the private key for the wallet you actually use to sign in on UNIGOX so I can verify login.
 >
-> Once that works, I'll ask for the separate UNIGOX-exported signing key from account settings.
+> Once that works, I'll tell you your current UNIGOX username and then ask for the separate UNIGOX-exported signing key from account settings.
 
 When the user provides the login key:
+- Try to delete the key-containing message immediately if the runtime/channel supports it
+- If not, require the user to delete that message themselves and reply `deleted` before continuing
 - Save `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
 - Call `login()` and verify it works
+- Tell the user their current UNIGOX username and remind them they can change it in the agent flow or on the web
 - Only after success, ask for the separate exported signing key and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
+- Apply the same secret-cleanup rule to the signing key message
 - Proceed to Step 3
 
 ### If they choose TON wallet
@@ -144,10 +161,15 @@ When the user provides TON credentials:
 
 ## Step 3: Add contacts
 
-> You're in! Let's add some people you want to send money to. Just tell me their name and how they receive payments. For example:
+> You're in! Let's add some people you want to send money to.
 >
-> "Add Mom - Revolut @momname"
-> "Add John - Wise, IBAN EE1234..."
+> We'll do this step by step: **recipient name first**, then **payment method / bank**, then the **method-specific details**.
+>
+> Example sequence:
+> 1. "Add Mom"
+> 2. "Revolut" or "Wise"
+> 3. If needed, choose the route (for example username/tag vs SEPA / bank account)
+> 4. Then give the requested detail fields one at a time
 >
 > Who do you want to add first?
 
@@ -170,7 +192,9 @@ If they want to top up later: that's fine, proceed to Step 5.
 
 ## Step 5: Ready
 
-> You're good to go. Just say "send €50 to mom" and I'll handle the rest. I'll always confirm with you before sending.
+> You're good to go. Just say "send €50 to mom" and I'll handle the rest.
+>
+> Before any trade is created, I'll show your current balance and do the preflight checks in the same chat flow. I'll always ask for final confirmation before sending.
 
 ---
 
@@ -203,6 +227,7 @@ When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
 Don't dump these all at once. Mention naturally during setup and periodically after every ~10 transfers:
 
 - "Quick reminder: this is a spending wallet. If your balance is getting high, consider moving some out."
+- "Use a newly created / isolated wallet for UNIGOX agent setup. Never use your main wallet for this flow."
 - "Your login wallet key, signing key, or TON mnemonic is on this machine. Keep your machine secure."
 
 ## High Balance Warning

@@ -20,6 +20,7 @@ import type {
   ResolvedPaymentMethodFieldConfig,
   TradeRequest,
   UnigoxClientConfig,
+  UserProfile,
   WalletBalance,
 } from "./unigox-client.ts";
 import {
@@ -51,6 +52,7 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 
 type AuthChoice = "evm" | "ton" | "email";
+type SecretKind = "evm_login_key" | "evm_signing_key";
 
 export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
@@ -59,6 +61,7 @@ export type TransferStage =
   | "awaiting_evm_wallet_signin"
   | "awaiting_evm_login_key"
   | "awaiting_evm_signing_key"
+  | "awaiting_secret_cleanup_confirmation"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
   | "awaiting_currency"
@@ -96,6 +99,9 @@ export interface TransferFlowEvent {
     | "blocked_missing_auth"
     | "blocked_insufficient_balance"
     | "blocked_no_vendor_match"
+    | "secret_message_deleted"
+    | "secret_cleanup_required"
+    | "balance_checked"
     | "settlement_monitor_started"
     | "settlement_status_changed"
     | "receipt_confirmation_requested"
@@ -111,6 +117,7 @@ export interface TransferFlowEvent {
 }
 
 export interface TransferExecutionClient {
+  getProfile?(): Promise<Pick<UserProfile, "username"> | UserProfile>;
   getWalletBalance(): Promise<WalletBalance>;
   ensurePaymentDetail(params: {
     paymentMethodId: number;
@@ -149,9 +156,15 @@ export interface TransferFlowDeps {
   client?: TransferExecutionClient;
   clientFactory?: () => Promise<TransferExecutionClient>;
   clientConfig?: UnigoxClientConfig;
-  verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string } | void>;
+  verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
+  handleSensitiveInput?: (params: {
+    kind: SecretKind;
+    secret: string;
+    turn: TransferTurn;
+    session: TransferSession;
+  }) => Promise<{ deleted?: boolean; note?: string } | void> | { deleted?: boolean; note?: string } | void;
   getPaymentMethodsForCurrency?: (currency: string) => Promise<CurrencyPaymentData>;
   getPaymentMethodFieldConfig?: (params: {
     currency: string;
@@ -172,6 +185,20 @@ export interface AuthState {
   authMode?: "evm" | "ton" | "email";
   emailFallbackAvailable: boolean;
   evmSigningKeyAvailable?: boolean;
+  username?: string;
+}
+
+export interface SecretSubmissionState {
+  kind: SecretKind;
+  value: string;
+  note?: string;
+}
+
+export interface ExecutionPreflightState {
+  balanceUsd: number;
+  amount: number;
+  currency: string;
+  checkedAt: string;
 }
 
 export interface SelectedPaymentMethod {
@@ -216,9 +243,12 @@ export interface TransferSession {
     mode?: "evm" | "ton" | "email";
     choice?: AuthChoice;
     evmSigningKeyAvailable?: boolean;
+    username?: string;
+    pendingSecret?: SecretSubmissionState;
   };
   execution: {
     confirmed: boolean;
+    preflight?: ExecutionPreflightState;
     paymentDetailsId?: number;
     tradeRequestId?: number;
     tradeId?: number;
@@ -285,6 +315,7 @@ const NO_RE = /^(no|n|don'?t|not now|skip save)$/i;
 const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
 const SIGNIN_READY_RE = /^(yes|y|done|ready|already signed in|already logged in|signed in|logged in|i signed in|i have signed in|i already signed in|i logged in|i have logged in)$/i;
 const NOT_READY_RE = /^(no|n|not yet|haven'?t|have not|didn'?t|did not)$/i;
+const DELETED_RE = /^(deleted|i deleted it|deleted it|it'?s deleted|removed it|done deleting)$/i;
 
 function nowIso(deps: TransferFlowDeps): string {
   return (deps.now ? deps.now() : new Date()).toISOString();
@@ -603,13 +634,14 @@ async function getExecutionClient(deps: TransferFlowDeps): Promise<TransferExecu
   return new UnigoxClient(deps.clientConfig || loadUnigoxConfigFromEnv());
 }
 
-async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps): Promise<{ success: boolean; message?: string }> {
+async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps): Promise<{ success: boolean; message?: string; username?: string }> {
   if (deps.verifyEvmLoginKey) {
     const result = await deps.verifyEvmLoginKey(loginKey);
     if (!result) return { success: true };
     return {
       success: result.success ?? result.ok ?? true,
       message: result.message,
+      username: result.username,
     };
   }
 
@@ -636,13 +668,185 @@ async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps):
       ...(frontendUrl ? { frontendUrl } : {}),
     });
     await client.login();
-    return { success: true };
+
+    let username: string | undefined;
+    try {
+      username = (await client.getProfile())?.username;
+    } catch {
+      // Username is helpful but optional for a successful verification.
+    }
+
+    return { success: true, username };
   } catch (error) {
     return {
       success: false,
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function clearExecutionPreflight(session: TransferSession): void {
+  session.execution.preflight = undefined;
+}
+
+function formatUsername(username: string | undefined): string | undefined {
+  if (!username) return undefined;
+  return username.startsWith("@") ? username : `@${username}`;
+}
+
+function buildUsernameReminder(username: string | undefined): string | undefined {
+  const formatted = formatUsername(username);
+  if (!formatted) return undefined;
+  return `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
+}
+
+function buildEvmKeySecurityWarning(kind: SecretKind): string {
+  const keyLabel = kind === "evm_login_key"
+    ? "login wallet key"
+    : "UNIGOX-exported signing key";
+  return [
+    "🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨",
+    `Use a NEWLY CREATED / ISOLATED wallet for this ${keyLabel}.`,
+    "❌ This must NOT be your main wallet.",
+    "❌ Do NOT paste a wallet that holds long-term funds.",
+    "✅ Use a dedicated UNIGOX / agent wallet only.",
+  ].join(" ");
+}
+
+function buildEvmLoginKeyPrompt(): string {
+  return [
+    buildEvmKeySecurityWarning("evm_login_key"),
+    "Great. Which wallet key did you use to sign in on UNIGOX? Paste the login wallet private key and I’ll verify login with that key first.",
+  ].join(" ");
+}
+
+function buildEvmSigningKeyPrompt(username: string | undefined): string {
+  return [
+    buildUsernameReminder(username),
+    buildEvmKeySecurityWarning("evm_signing_key"),
+    "Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here.",
+    "I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release.",
+    "If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildMissingSigningKeyPrompt(username: string | undefined): string {
+  return [
+    buildUsernameReminder(username),
+    buildEvmKeySecurityWarning("evm_signing_key"),
+    "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release.",
+    "Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).",
+  ].filter(Boolean).join(" ");
+}
+
+function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
+  const label = secret.kind === "evm_login_key"
+    ? "login wallet key"
+    : "UNIGOX-exported signing key";
+  return [
+    secret.note,
+    `⚠️ For safety, please delete the message that contains your ${label} from this chat right now.`,
+    "If this channel/runtime cannot delete your message automatically, I need you to delete it yourself before I continue.",
+    "Reply 'deleted' once that message is gone.",
+  ].filter(Boolean).join(" ");
+}
+
+async function maybeHydrateAuthIdentity(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client?: TransferExecutionClient
+): Promise<void> {
+  if (!session.auth.available || session.auth.username) return;
+  const executionClient = client || await getExecutionClient(deps);
+  if (!executionClient.getProfile) return;
+  try {
+    const profile = await executionClient.getProfile();
+    if (profile?.username) {
+      session.auth.username = profile.username;
+    }
+  } catch {
+    // Username is a nice UX enhancement, not a hard blocker.
+  }
+}
+
+async function maybeHandleSensitiveInput(
+  session: TransferSession,
+  kind: SecretKind,
+  secret: string,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<{ needsManualCleanup: boolean; note?: string; deleted?: boolean }> {
+  const result = await deps.handleSensitiveInput?.({ kind, secret, turn, session });
+  if (result?.deleted) {
+    return { needsManualCleanup: false, deleted: true, note: result.note || "✅ I deleted that key-containing message from the chat before continuing." };
+  }
+
+  session.auth.pendingSecret = {
+    kind,
+    value: secret,
+    note: result?.note,
+  };
+  session.stage = "awaiting_secret_cleanup_confirmation";
+  session.status = "blocked";
+  return {
+    needsManualCleanup: true,
+    note: result?.note,
+  };
+}
+
+async function finalizeEvmLoginKey(
+  session: TransferSession,
+  loginKey: string,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  session.auth.pendingSecret = undefined;
+  const verification = await verifyEvmLoginKeyInput(loginKey, deps);
+  if (!verification.success) {
+    session.stage = "awaiting_evm_login_key";
+    const failure = `That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again.${verification.message ? ` (${verification.message})` : ""}`;
+    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: failure,
+    }]);
+  }
+
+  await deps.persistEvmLoginKey?.(loginKey);
+  session.auth.available = true;
+  session.auth.mode = "evm";
+  session.auth.choice = "evm";
+  session.auth.evmSigningKeyAvailable = false;
+  session.auth.username = verification.username || session.auth.username;
+  if (!session.auth.username) {
+    await maybeHydrateAuthIdentity(session, deps);
+  }
+  session.stage = "awaiting_evm_signing_key";
+  const followUp = buildEvmSigningKeyPrompt(session.auth.username);
+  return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
+    type: "blocked_missing_auth",
+    message: followUp,
+  }]);
+}
+
+async function finalizeEvmSigningKey(
+  session: TransferSession,
+  signingKey: string,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  session.auth.pendingSecret = undefined;
+  await deps.persistEvmSigningKey?.(signingKey);
+  session.auth.available = true;
+  session.auth.mode = "evm";
+  session.auth.choice = "evm";
+  session.auth.evmSigningKeyAvailable = true;
+  session.status = "active";
+  session.stage = "resolving";
+  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
+  if (prefixEvents.length) {
+    resumed.events = [...prefixEvents, ...resumed.events];
+  }
+  return resumed;
 }
 
 async function maybeHandleAuthOnboardingTurn(
@@ -654,6 +858,30 @@ async function maybeHandleAuthOnboardingTurn(
 
   const responseText = cleanText(turn.option || turn.text);
   const hintedChoice = parseIntentHints(responseText).authChoice;
+
+  if (session.stage === "awaiting_secret_cleanup_confirmation") {
+    session.status = "blocked";
+    const pendingSecret = session.auth.pendingSecret;
+    if (!pendingSecret) {
+      session.stage = "awaiting_auth_choice";
+      return reply(withUpdate(session, deps), getUnigoxWalletConnectionPrompt(), ["EVM wallet connection", "TON wallet connection", "email OTP"], [{
+        type: "blocked_missing_auth",
+        message: getUnigoxWalletConnectionPrompt(),
+      }]);
+    }
+
+    if (!DELETED_RE.test(responseText)) {
+      return reply(withUpdate(session, deps), buildSecretCleanupPrompt(pendingSecret), ["deleted"], [{
+        type: "secret_cleanup_required",
+        message: buildSecretCleanupPrompt(pendingSecret),
+      }]);
+    }
+
+    if (pendingSecret.kind === "evm_login_key") {
+      return finalizeEvmLoginKey(session, pendingSecret.value, deps);
+    }
+    return finalizeEvmSigningKey(session, pendingSecret.value, deps);
+  }
 
   if (session.stage === "awaiting_evm_wallet_signin") {
     session.status = "blocked";
@@ -672,7 +900,7 @@ async function maybeHandleAuthOnboardingTurn(
 
     if (SIGNIN_READY_RE.test(responseText) || /signed in|logged in/i.test(responseText)) {
       session.stage = "awaiting_evm_login_key";
-      const followUp = "Great. Which wallet key did you use to sign in on UNIGOX? Please paste the login wallet private key and I’ll verify login with that key first.";
+      const followUp = buildEvmLoginKeyPrompt();
       return reply(withUpdate(session, deps), followUp, undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
@@ -691,52 +919,51 @@ async function maybeHandleAuthOnboardingTurn(
   if (session.stage === "awaiting_evm_login_key") {
     session.status = "blocked";
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = "Which wallet key did you use to sign in on UNIGOX? Please paste the login wallet private key and I’ll verify login with that key first.";
+      const prompt = buildEvmLoginKeyPrompt();
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
       }]);
     }
 
-    const verification = await verifyEvmLoginKeyInput(responseText, deps);
-    if (!verification.success) {
-      const failure = `That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again.${verification.message ? ` (${verification.message})` : ""}`;
-      return reply(withUpdate(session, deps), failure, undefined, [{
-        type: "blocked_missing_auth",
-        message: failure,
+    const secretHandling = await maybeHandleSensitiveInput(session, "evm_login_key", responseText, turn, deps);
+    if (secretHandling.needsManualCleanup) {
+      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+        type: "secret_cleanup_required",
+        message: prompt,
       }]);
     }
 
-    await deps.persistEvmLoginKey?.(responseText);
-    session.auth.available = true;
-    session.auth.mode = "evm";
-    session.auth.choice = "evm";
-    session.auth.evmSigningKeyAvailable = false;
-    session.stage = "awaiting_evm_signing_key";
-    const followUp = "Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here. I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release. If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.";
-    return reply(withUpdate(session, deps), followUp, undefined, [{
-      type: "blocked_missing_auth",
-      message: followUp,
-    }]);
+    const events = secretHandling.deleted
+      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the login-key message from chat." } as TransferFlowEvent]
+      : [];
+    return finalizeEvmLoginKey(session, responseText, deps, events);
   }
 
   if (session.stage === "awaiting_evm_signing_key" && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release. Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).";
+      const prompt = buildMissingSigningKeyPrompt(session.auth.username);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
       }]);
     }
 
-    await deps.persistEvmSigningKey?.(responseText);
-    session.auth.available = true;
-    session.auth.mode = "evm";
-    session.auth.choice = "evm";
-    session.auth.evmSigningKeyAvailable = true;
-    session.status = "active";
-    return advanceTransferFlow(session, { text: "" }, deps);
+    const secretHandling = await maybeHandleSensitiveInput(session, "evm_signing_key", responseText, turn, deps);
+    if (secretHandling.needsManualCleanup) {
+      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+        type: "secret_cleanup_required",
+        message: prompt,
+      }]);
+    }
+
+    const events = secretHandling.deleted
+      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the signing-key message from chat." } as TransferFlowEvent]
+      : [];
+    return finalizeEvmSigningKey(session, responseText, deps, events);
   }
 
   return undefined;
@@ -749,6 +976,7 @@ function resetPaymentSelection(session: TransferSession): void {
   session.saveContactDecision = undefined;
   session.contactSaveAction = session.contactExists ? "update" : "create";
   session.execution.confirmed = false;
+  clearExecutionPreflight(session);
 }
 
 function setCurrency(session: TransferSession, currency: string): void {
@@ -762,11 +990,16 @@ function summarizePayment(session: TransferSession): string {
 }
 
 function buildConfirmationMessage(session: TransferSession): string {
+  const balanceLine = typeof session.execution.preflight?.balanceUsd === "number"
+    ? `Current wallet balance: ${session.execution.preflight.balanceUsd.toFixed(2)} USD.`
+    : undefined;
   return [
+    buildUsernameReminder(session.auth.username),
+    balanceLine,
     `Send ${session.amount} ${session.currency} to ${session.recipientName} via ${summarizePayment(session)}?`,
     `Details: ${maskDetailMap(session.details)}`,
-    "Reply 'confirm' to proceed, or tell me what to change.",
-  ].join(" ");
+    "Reply 'confirm' to place the trade, or tell me what to change.",
+  ].filter(Boolean).join(" ");
 }
 
 function buildSavePrompt(session: TransferSession): string {
@@ -779,8 +1012,41 @@ function buildSavePrompt(session: TransferSession): string {
   return `Do you want me to save ${session.recipientName} as a contact for future ${session.currency} transfers? Reply yes or no.`;
 }
 
+function isBankLikeMethod(method: PaymentMethodInfo): boolean {
+  const haystack = [method.name, method.type, method.slug, method.typeSlug].join(" ").toLowerCase();
+  return /bank|iban|sepa|wise|revolut/.test(haystack);
+}
+
+function buildPaymentMethodPrompt(session: TransferSession, currencyData: CurrencyPaymentData, ambiguity?: string): string {
+  const suggestions = currencyData.paymentMethods.slice(0, 6).map((method) => method.name);
+  const bankLikeExamples = currencyData.paymentMethods.filter(isBankLikeMethod).slice(0, 4).map((method) => method.name);
+  const guidance = bankLikeExamples.length
+    ? `Start with the provider / bank first (for example ${bankLikeExamples.join(", ")}). If that provider has multiple routes, I'll ask the next clarification separately — for example username/tag vs SEPA / bank account.`
+    : "Tell me the payout method first and I'll collect the exact details step by step.";
+  return [
+    `Which payout method should ${session.recipientName} receive in ${session.currency}?`,
+    ambiguity,
+    `Available examples for ${session.currency}: ${suggestions.join(", ")}.`,
+    guidance,
+  ].filter(Boolean).join(" ");
+}
+
+function buildPaymentNetworkPrompt(method: PaymentMethodInfo, currency: string): string {
+  const networkNames = method.networks.map((network) => network.name).join(", ");
+  const clarification = isBankLikeMethod(method)
+    ? "If you're unsure, tell me whether the recipient uses a username/tag or a bank account / IBAN and I'll guide the next step."
+    : "I'll ask for the route-specific details right after you choose one.";
+  return `${method.name} has multiple payout routes for ${currency}: ${networkNames}. Which one should I use? ${clarification}`;
+}
+
 function currentFieldPrompt(field: NetworkFieldConfig): string {
   const optional = field.required ? "" : " Optional — you can say 'skip'.";
+  if (field.field === "bank_name") {
+    return `Which bank should receive this payout? Please provide the bank name.${optional}`.trim();
+  }
+  if (field.field === "iban") {
+    return `Please provide the recipient's IBAN / bank account for this payout.${optional}`.trim();
+  }
   const hint = field.placeholder ? ` ${field.placeholder}.` : field.description ? ` ${field.description}.` : "";
   return `Please provide ${field.label || field.field}.${hint}${optional}`.trim();
 }
@@ -1136,6 +1402,7 @@ function applyMidFlowChanges(session: TransferSession, hints: ParsedHints): bool
   if (typeof hints.changeAmount === "number") {
     session.amount = hints.changeAmount;
     session.execution.confirmed = false;
+    clearExecutionPreflight(session);
     changed = true;
   }
   return changed;
@@ -1273,23 +1540,65 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
   return undefined;
 }
 
+async function ensureExecutionPreflight(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<{ events: TransferFlowEvent[]; blockedResult?: TransferFlowResult }> {
+  const events: TransferFlowEvent[] = [];
+  const amount = session.amount || 0;
+  await maybeHydrateAuthIdentity(session, deps, client);
+
+  if (session.execution.preflight && session.execution.preflight.amount === amount && session.execution.preflight.currency === session.currency) {
+    return { events };
+  }
+
+  const balance = await client.getWalletBalance();
+  session.execution.preflight = {
+    balanceUsd: balance.totalUsd,
+    amount,
+    currency: session.currency || "",
+    checkedAt: nowIso(deps),
+  };
+  events.push({
+    type: "balance_checked",
+    message: `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
+    data: { balance: balance.totalUsd, amount, currency: session.currency },
+  });
+
+  if (balance.totalUsd < amount) {
+    session.status = "blocked";
+    session.stage = "awaiting_balance_resolution";
+    const message = [
+      buildUsernameReminder(session.auth.username),
+      `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
+      `That is below the requested ${amount} ${session.currency}, so I will not place the trade. Fund the wallet or change the amount first.`,
+    ].filter(Boolean).join(" ");
+    events.push({
+      type: "blocked_insufficient_balance",
+      message,
+      data: { balance: balance.totalUsd, amount },
+    });
+    return {
+      events,
+      blockedResult: reply(withUpdate(session, deps), message, ["change amount", "fund wallet"], events),
+    };
+  }
+
+  return { events };
+}
+
 async function handleExecution(session: TransferSession, deps: TransferFlowDeps): Promise<TransferFlowResult> {
   const events: TransferFlowEvent[] = [];
   const client = await getExecutionClient(deps);
   const settings = loadSendMoneySettings(deps.settingsFilePath || DEFAULT_SETTINGS_FILE);
   const amount = session.amount || 0;
 
-  const balance = await client.getWalletBalance();
-  if (balance.totalUsd < amount) {
-    session.status = "blocked";
-    session.stage = "awaiting_balance_resolution";
-    const message = `Your wallet balance is ${balance.totalUsd.toFixed(2)} USD, which is below the requested ${amount} ${session.currency}. Fund the wallet or change the amount.`;
-    events.push({
-      type: "blocked_insufficient_balance",
-      message,
-      data: { balance: balance.totalUsd, amount },
-    });
-    return reply(withUpdate(session, deps), message, ["change amount", "fund wallet"], events);
+  const preflight = await ensureExecutionPreflight(session, deps, client);
+  events.push(...preflight.events);
+  if (preflight.blockedResult) {
+    preflight.blockedResult.events = [...events.filter((event) => !preflight.blockedResult!.events.includes(event)), ...preflight.blockedResult.events];
+    return preflight.blockedResult;
   }
 
   const paymentDetail = await client.ensurePaymentDetail({
@@ -1438,7 +1747,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -1478,6 +1787,7 @@ export async function advanceTransferFlow(
       mode: auth.authMode,
       choice: session.auth.choice,
       evmSigningKeyAvailable: auth.evmSigningKeyAvailable,
+      username: auth.username,
     };
   }
 
@@ -1516,9 +1826,10 @@ export async function advanceTransferFlow(
   }
 
   if (session.goal === "transfer" && session.auth.available && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
+    await maybeHydrateAuthIdentity(session, deps);
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";
-    const followUp = "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release. Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).";
+    const followUp = buildMissingSigningKeyPrompt(session.auth.username);
     return reply(withUpdate(session, deps), followUp, undefined, [{
       type: "blocked_missing_auth",
       message: followUp,
@@ -1612,7 +1923,7 @@ export async function advanceTransferFlow(
         session.stage = "awaiting_payment_network";
         return reply(
           withUpdate(session, deps),
-          `${method.name} has multiple payout routes for ${session.currency}: ${method.networks.map((network) => network.name).join(", ")}. Which one should I use?`,
+          buildPaymentNetworkPrompt(method, session.currency!),
           method.networks.map((network) => network.name)
         );
       }
@@ -1630,11 +1941,10 @@ export async function advanceTransferFlow(
       session.contactSaveAction = session.contactExists ? "update" : "create";
     } else {
       session.stage = "awaiting_payment_method";
-      const suggestions = currencyData.paymentMethods.slice(0, 6).map((method) => method.name);
       const ambiguity = selection.ambiguous?.length
         ? `I found multiple matches: ${selection.ambiguous.map((method) => method.name).join(", ")}.`
-        : `Available examples for ${session.currency}: ${suggestions.join(", ")}.`;
-      return reply(withUpdate(session, deps), `Which payout method should ${session.recipientName} receive in ${session.currency}? ${ambiguity}`);
+        : undefined;
+      return reply(withUpdate(session, deps), buildPaymentMethodPrompt(session, currencyData, ambiguity));
     }
   }
 
@@ -1651,7 +1961,7 @@ export async function advanceTransferFlow(
       session.stage = "awaiting_payment_network";
       return reply(
         withUpdate(session, deps),
-        `${method.name} supports: ${method.networks.map((entry) => entry.name).join(", ")}. Which network should I use?`,
+        buildPaymentNetworkPrompt(method, session.currency!),
         method.networks.map((entry) => entry.name)
       );
     }
@@ -1714,6 +2024,13 @@ export async function advanceTransferFlow(
     }
   }
 
+  const client = await getExecutionClient(deps);
+  const preflight = await ensureExecutionPreflight(session, deps, client);
+  events.push(...preflight.events);
+  if (preflight.blockedResult) {
+    return preflight.blockedResult;
+  }
+
   if (!session.execution.confirmed) {
     session.stage = "awaiting_confirmation";
     if (hints.confirm) {
@@ -1723,5 +2040,5 @@ export async function advanceTransferFlow(
     }
   }
 
-  return handleExecution(session, deps);
+  return handleExecution(session, { ...deps, client });
 }
