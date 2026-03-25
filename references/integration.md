@@ -244,6 +244,19 @@ If the user says anything other than explicit `received` / `not received`, or if
 | USDC | `0x37BF70ee0dC89a408De31B79cCCC3152F0C8AF43` | 6 |
 | USDT | `0xf86Cc81F4E480CF54Eb013FFe6929a0C2Ad5EdCA` | 6 |
 
+## Deposit Route Source of Truth
+
+For conversational wallet top-ups, mirror the frontend wallet flow instead of inventing deposit routes from raw backend data. The current rule set is:
+
+- start from `getBridgeTokens()`
+- keep only `chain.enabled_for_deposit === true` routes
+- keep only user-facing main assets (`USDT`, `USDC`) and their frontend token groups
+- exclude XAI / internal-only routes from deposit choice prompts
+- exclude chain types that do not map to a real single deposit address (`EVM`, `Solana`, `TVM`/Tron, `TON` are currently supported)
+- after the user chooses token + chain, resolve exactly one address with `describeDepositSelection(...)`
+
+This is how the skill avoids showing unsupported options such as NEAR / intent-style routes when they are not actually selectable in the frontend deposit UI.
+
 ## Client Methods Reference
 
 | Method | Description |
@@ -255,6 +268,9 @@ If the user says anything other than explicit `received` / `not received`, or if
 | `getWalletBalance()` | USDC + USDT on XAI chain |
 | `getEscrowBalance(token)` | Escrow balance (available, reserved) |
 | `getDepositAddresses()` | EVM, Solana, Tron, TON addresses |
+| `getBridgeTokens()` | Raw bridge token + chain metadata from the backend |
+| `getSupportedDepositOptions()` | Frontend-style deposit asset/network options after filtering unsupported routes |
+| `describeDepositSelection({ assetCode, chainId })` | Resolve one token+chain choice to the single relevant deposit address |
 | `listPaymentDetails()` | All saved payment methods |
 | `createPaymentDetail(params)` | Add new payment method |
 | `updatePaymentDetail(id, details)` | Update details |
@@ -264,7 +280,6 @@ If the user says anything other than explicit `received` / `not received`, or if
 | `waitForTradeMatch(id, timeout)` | Poll until vendor accepts |
 | `getTrade(id)` | Get trade status |
 | `confirmFiatReceived(tradeId)` | Sign + call backend `confirm-payment` to release after explicit receipt confirmation |
-| `getBridgeTokens()` | Supported chains + tokens |
 | `getBridgeQuote(params)` | Get bridge quote |
 | `bridgeOut(params)` | Withdraw to external chain (requires EVM key) |
 | `withdrawFromEscrow(token, amount)` | Escrow → wallet (requires EVM key) |

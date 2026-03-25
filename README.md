@@ -71,7 +71,7 @@ On first run, the skill walks you through setup by first asking which wallet con
 ### 6. Fund your wallet
 Two options:
 
-- **Already have crypto?** Send USDC or USDT to your UNIGOX wallet. Your agent will provide the deposit address on your preferred chain, or you can find it on the [UNIGOX website](https://www.unigox.com) or mobile app. We support EVM chains (Ethereum, Polygon, Base, Arbitrum, Optimism, Unichain, Avalanche, BSC, HyperEVM), Solana, Tron, and TON.
+- **Already have crypto?** Send USDC or USDT to your UNIGOX wallet. The agent should do this conversationally: first ask which token you want to deposit, then show the frontend-supported networks for that token, and only after you choose the network show the single matching deposit address. Those options come from the same frontend `bridge-cryptocurrencies` data the wallet UI uses, filtered by `enabled_for_deposit`, main user-facing assets, XAI exclusion, and supported address families (EVM, Solana, Tron, TON). Example of the current split: USDC supports EVM chains plus Solana, while USDT supports a different set that includes Tron and TON but not every USDC chain.
 - **No crypto?** Use the skill to top up your wallet from your bank account. On-ramp is currently available in EUR, NGN, and KES, with more currencies coming soon.
 
 ### 7. Send money

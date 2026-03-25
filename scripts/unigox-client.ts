@@ -153,6 +153,37 @@ export interface TokenOnChain {
   };
 }
 
+export const FRONTEND_DEPOSIT_TOKEN_GROUPS = {
+  USDT: ["USDT", "USDT0"],
+  USDC: ["USDC"],
+} as const;
+
+export const FRONTEND_DEPOSIT_ASSETS = Object.keys(FRONTEND_DEPOSIT_TOKEN_GROUPS) as Array<keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS>;
+
+export type DepositAddressKey = keyof Pick<DepositAddresses, "evmAddress" | "solanaAddress" | "tronAddress" | "tonAddress">;
+
+export interface SupportedDepositChainOption {
+  assetCode: keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS;
+  tokenCode: string;
+  tokenName: string;
+  tokenAddress: string;
+  chainId: number;
+  chainName: string;
+  chainType: string;
+  addressKey: DepositAddressKey;
+}
+
+export interface SupportedDepositAssetOption {
+  assetCode: keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS;
+  tokenCodes: string[];
+  chains: SupportedDepositChainOption[];
+}
+
+export interface DepositFlowSelection {
+  assetCode: keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS;
+  chainId: number;
+}
+
 export interface WalletBalance {
   usdc: number;
   usdt: number;
@@ -192,6 +223,107 @@ export interface UserProfile {
   linked_ton_address?: string;
   automated_escrow_address?: string;
   username?: string;
+}
+
+const DEPOSIT_ADDRESS_KEY_BY_CHAIN_TYPE: Record<string, DepositAddressKey> = {
+  EVM: "evmAddress",
+  Solana: "solanaAddress",
+  TVM: "tronAddress",
+  TON: "tonAddress",
+};
+
+function getFrontendDepositAssetCode(tokenCode: string): keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS | undefined {
+  return FRONTEND_DEPOSIT_ASSETS.find((assetCode) => (FRONTEND_DEPOSIT_TOKEN_GROUPS[assetCode] as readonly string[]).includes(tokenCode));
+}
+
+function isFrontendSupportedDepositToken(token: TokenOnChain): boolean {
+  const assetCode = getFrontendDepositAssetCode(token.code);
+  const addressKey = DEPOSIT_ADDRESS_KEY_BY_CHAIN_TYPE[token.chain.type];
+  const enabledForDeposit = token.chain.enabled_for_deposit !== undefined ? token.chain.enabled_for_deposit : true;
+  return Boolean(assetCode && addressKey && token.chain.id !== XAI_CHAIN_ID && enabledForDeposit);
+}
+
+function compareDepositChainOptions(a: SupportedDepositChainOption, b: SupportedDepositChainOption): number {
+  return a.chainName.localeCompare(b.chainName) || a.tokenCode.localeCompare(b.tokenCode) || a.chainId - b.chainId;
+}
+
+export function getFrontendSupportedDepositOptions(tokens: TokenOnChain[]): SupportedDepositAssetOption[] {
+  const byAsset = new Map<keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS, Map<number, SupportedDepositChainOption>>();
+
+  for (const token of tokens) {
+    if (!isFrontendSupportedDepositToken(token)) {
+      continue;
+    }
+
+    const assetCode = getFrontendDepositAssetCode(token.code)!;
+    const addressKey = DEPOSIT_ADDRESS_KEY_BY_CHAIN_TYPE[token.chain.type]!;
+    const currentByChain = byAsset.get(assetCode) || new Map<number, SupportedDepositChainOption>();
+    const candidate: SupportedDepositChainOption = {
+      assetCode,
+      tokenCode: token.code,
+      tokenName: token.name,
+      tokenAddress: token.address,
+      chainId: token.chain.id,
+      chainName: token.chain.name,
+      chainType: token.chain.type,
+      addressKey,
+    };
+
+    const existing = currentByChain.get(token.chain.id);
+    const candidateIsMainToken = token.code === assetCode;
+    const existingIsMainToken = existing?.tokenCode === assetCode;
+
+    if (!existing || (candidateIsMainToken && !existingIsMainToken)) {
+      currentByChain.set(token.chain.id, candidate);
+    }
+
+    byAsset.set(assetCode, currentByChain);
+  }
+
+  return FRONTEND_DEPOSIT_ASSETS.map((assetCode) => {
+    const chains = Array.from(byAsset.get(assetCode)?.values() || []).sort(compareDepositChainOptions);
+    return {
+      assetCode,
+      tokenCodes: [...FRONTEND_DEPOSIT_TOKEN_GROUPS[assetCode]],
+      chains,
+    };
+  }).filter((entry) => entry.chains.length > 0);
+}
+
+export function getFrontendSupportedDepositAssetCodes(tokens: TokenOnChain[]): Array<keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS> {
+  return getFrontendSupportedDepositOptions(tokens).map((entry) => entry.assetCode);
+}
+
+export function getFrontendSupportedDepositChains(tokens: TokenOnChain[], assetCode: keyof typeof FRONTEND_DEPOSIT_TOKEN_GROUPS): SupportedDepositChainOption[] {
+  return getFrontendSupportedDepositOptions(tokens).find((entry) => entry.assetCode === assetCode)?.chains || [];
+}
+
+export function resolveDepositAddressForSelection(
+  depositAddresses: DepositAddresses,
+  option: SupportedDepositChainOption,
+): string | undefined {
+  return depositAddresses[option.addressKey];
+}
+
+export function describeDepositAddressSelection(
+  selection: DepositFlowSelection,
+  tokens: TokenOnChain[],
+  depositAddresses: DepositAddresses,
+): SupportedDepositChainOption & { depositAddress: string } {
+  const option = getFrontendSupportedDepositChains(tokens, selection.assetCode).find((entry) => entry.chainId === selection.chainId);
+  if (!option) {
+    throw new Error(`Unsupported deposit selection: ${selection.assetCode} on chain ${selection.chainId}`);
+  }
+
+  const depositAddress = resolveDepositAddressForSelection(depositAddresses, option);
+  if (!depositAddress) {
+    throw new Error(`Deposit address unavailable for ${option.assetCode} on ${option.chainName}`);
+  }
+
+  return {
+    ...option,
+    depositAddress,
+  };
 }
 
 interface TonPayloadTokenPair {
@@ -1042,6 +1174,18 @@ export class UnigoxClient {
   async getBridgeTokens(): Promise<TokenOnChain[]> {
     const res = await jsonFetch(`${APIS.currency}/bridge-cryptocurrencies`);
     return unwrap<TokenOnChain[]>(res);
+  }
+
+  async getSupportedDepositOptions(): Promise<SupportedDepositAssetOption[]> {
+    return getFrontendSupportedDepositOptions(await this.getBridgeTokens());
+  }
+
+  async describeDepositSelection(selection: DepositFlowSelection): Promise<SupportedDepositChainOption & { depositAddress: string }> {
+    const [tokens, depositAddresses] = await Promise.all([
+      this.getBridgeTokens(),
+      this.getDepositAddresses(),
+    ]);
+    return describeDepositAddressSelection(selection, tokens, depositAddresses);
   }
 
   // ── Bridge: Get Quote ───────────────────────────────────────────

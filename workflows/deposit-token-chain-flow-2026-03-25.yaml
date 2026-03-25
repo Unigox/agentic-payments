@@ -1,0 +1,82 @@
+goal: "Fix the send-money onboarding/top-up deposit flow so it mirrors the real frontend-supported token -> chain -> single-address UX and excludes unsupported routes."
+run_id: "send_money_deposit_token_chain_flow_20260325"
+constraints:
+  - "use_modular_builder_process"
+  - "prefer_frontend_deposit_flow_as_source_of_truth"
+  - "keep_deposit_flow_stepwise_and_conversational"
+  - "exclude_routes_without_frontend_supported_deposit_path"
+  - "cover_token_specific_chain_support_with_tests"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "frontend_findings"
+  - "design_notes"
+  - "flow_sequence"
+  - "changed_files"
+  - "tests_run"
+  - "test_results"
+  - "docs_updated"
+  - "commit_sha"
+  - "excluded_routes"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_frontend_support"
+    name: "Inspect current send-money docs/scripts plus the live/frontend deposit selectors and token metadata"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:frontend_findings"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_deposit_flow"
+    name: "Lock the exact conversational deposit sequence and data-selection rules before edits"
+    required_predecessors:
+      - "inspect_frontend_support"
+    required_checks:
+      - "frontend_findings_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:flow_sequence"
+      - "has_key:excluded_routes"
+    external_action: false
+
+  - id: "implement_deposit_flow"
+    name: "Implement deposit helpers plus prompt/docs updates for token-first and chain-specific single-address output"
+    required_predecessors:
+      - "design_deposit_flow"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_deposit_flow"
+    name: "Run local tests that verify frontend-style filtering, token-specific chain support, and single-address resolution"
+    required_predecessors:
+      - "implement_deposit_flow"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_changes"
+    name: "Commit the send-money deposit flow fix"
+    required_predecessors:
+      - "validate_deposit_flow"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false

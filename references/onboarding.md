@@ -182,8 +182,12 @@ Let the user add as many contacts as they want. When they're done or say they wa
 > We're all set. Now, in order to send money, we need to have a little balance. You can top up your balance when we're sending it, or you can top up in advance so the sending is faster. Which one would you like to go with?
 
 If they want to top up now:
-- Show deposit address for their preferred chain
-- Mention they can also find it on unigox.com
+- First ask which token they want to deposit: the user-facing wallet flow currently exposes main deposit assets such as USDC and USDT
+- Fetch / derive the available deposit routes from the same frontend-supported source the wallet UI uses: `getBridgeTokens()` filtered by `chain.enabled_for_deposit`, main user-facing assets, XAI exclusion, and supported address families only (EVM, Solana, Tron/TVM, TON)
+- Then ask which supported chain / network they want for that token
+- Only after the token + chain are both chosen, show the single relevant deposit address for that route
+- Mention they can also find the same address flow on unigox.com
+- Do **not** dump every address up front and do **not** mention unsupported routes that are not selectable in the frontend deposit flow (for example NEAR / intent-style routes)
 - If no crypto: mention on-ramp available in EUR, NGN, and KES
 
 If they want to top up later: that's fine, proceed to Step 5.
