@@ -120,6 +120,12 @@ export interface TradeRequest {
   trade?: { id: number; status: string };
 }
 
+export interface TradeSignaturePayload {
+  domain: Record<string, unknown>;
+  types: Record<string, Array<{ name: string; type: string }>>;
+  safe_params: Record<string, any>;
+}
+
 export interface DepositAddresses {
   evmAddress: string;
   solanaAddress: string;
@@ -836,6 +842,41 @@ export class UnigoxClient {
 
   async getTrade(tradeId: number): Promise<any> {
     const res = await this.authedGet(APIS.trades, `/trade/${tradeId}`);
+    return unwrap<any>(res);
+  }
+
+  private normalizeTypedDataTypes(types: Record<string, Array<{ name: string; type: string }>>): Record<string, Array<{ name: string; type: string }>> {
+    const next = { ...types };
+    delete next.EIP712Domain;
+    return next;
+  }
+
+  private async createTradeActionSignature(tradeId: number, direction: "to_buyer" | "to_seller"): Promise<{ signature: string; signedData: unknown }> {
+    const wallet = this.requireWallet();
+    const res = await this.authedGet(APIS.trades, `/trade/${tradeId}/signature-data?direction=${direction}`);
+    const payload = unwrap<TradeSignaturePayload>(res);
+    if (!payload?.domain || !payload?.types || !payload?.safe_params) {
+      throw new Error(`Failed to load trade signature payload for trade ${tradeId}: ${JSON.stringify(res)}`);
+    }
+
+    const signature = await wallet.signTypedData(
+      payload.domain as any,
+      this.normalizeTypedDataTypes(payload.types) as any,
+      payload.safe_params as any,
+    );
+
+    return {
+      signature,
+      signedData: payload.safe_params.data,
+    };
+  }
+
+  async confirmFiatReceived(tradeId: number): Promise<any> {
+    const signed = await this.createTradeActionSignature(tradeId, "to_buyer");
+    const res = await this.authedPost(APIS.trades, `/trade/${tradeId}/confirm-payment`, {
+      signature: signed.signature,
+      signed_data: signed.signedData,
+    });
     return unwrap<any>(res);
   }
 

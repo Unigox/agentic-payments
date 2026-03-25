@@ -23,6 +23,20 @@ import type {
   WalletBalance,
 } from "./unigox-client.ts";
 import {
+  createInitialSettlementState,
+  noteDeferredPlaceholder,
+  noteReceiptNotReceived,
+  parseReceiptDecision,
+  pollSettlementSnapshot,
+  refreshSettlementSnapshot,
+} from "./settlement-monitor.ts";
+import type {
+  SettlementMonitorState,
+  SettlementPhase,
+  SettlementSnapshot,
+  SettlementTrade,
+} from "./settlement-monitor.ts";
+import {
   DEFAULT_CONTACTS_FILE,
   SKILL_DIR,
   loadContacts,
@@ -54,6 +68,10 @@ export type TransferStage =
   | "awaiting_balance_resolution"
   | "awaiting_match_status"
   | "awaiting_no_match_resolution"
+  | "awaiting_trade_settlement"
+  | "awaiting_receipt_confirmation"
+  | "awaiting_release_completion"
+  | "awaiting_manual_settlement_followup"
   | "completed"
   | "blocked"
   | "cancelled";
@@ -74,7 +92,17 @@ export interface TransferFlowEvent {
     | "trade_pending"
     | "blocked_missing_auth"
     | "blocked_insufficient_balance"
-    | "blocked_no_vendor_match";
+    | "blocked_no_vendor_match"
+    | "settlement_monitor_started"
+    | "settlement_status_changed"
+    | "receipt_confirmation_requested"
+    | "receipt_confirmation_reminder"
+    | "receipt_confirmation_timeout"
+    | "receipt_confirmed"
+    | "receipt_not_received"
+    | "settlement_placeholder_deferred"
+    | "settlement_completed"
+    | "settlement_refunded_or_cancelled";
   message: string;
   data?: Record<string, unknown>;
 }
@@ -101,13 +129,18 @@ export interface TransferExecutionClient {
   }): Promise<TradeRequest>;
   waitForTradeMatch(tradeRequestId: number, timeoutMs?: number): Promise<TradeRequest>;
   getTradeRequest?(tradeRequestId: number): Promise<TradeRequest>;
-  getTrade?(tradeId: number): Promise<any>;
+  getTrade?(tradeId: number): Promise<SettlementTrade | undefined>;
+  confirmFiatReceived?(tradeId: number): Promise<SettlementTrade | undefined>;
 }
 
 export interface TransferFlowDeps {
   contactsFilePath?: string;
   settingsFilePath?: string;
   waitForMatchTimeoutMs?: number;
+  waitForSettlementTimeoutMs?: number;
+  settlementPollIntervalMs?: number;
+  receiptReminderMs?: number;
+  receiptTimeoutMs?: number;
   now?: () => Date;
   authState?: AuthState;
   client?: TransferExecutionClient;
@@ -183,6 +216,7 @@ export interface TransferSession {
     tradeId?: number;
     tradeRequestStatus?: string;
     tradeStatus?: string;
+    settlement?: SettlementMonitorState;
     lastError?: string;
   };
   lastPrompt?: string;
@@ -653,8 +687,217 @@ function chooseNetwork(networks: PaymentNetworkInfo[], query: string): PaymentNe
   ) || networks.find((network) => normalizeMatchValue(network.name).includes(normalizedQuery));
 }
 
+function settlementMonitorOptions(deps: TransferFlowDeps) {
+  return {
+    now: deps.now,
+    pollIntervalMs: deps.settlementPollIntervalMs,
+    timeoutMs: deps.waitForSettlementTimeoutMs,
+    receiptReminderMs: deps.receiptReminderMs,
+    receiptTimeoutMs: deps.receiptTimeoutMs,
+  };
+}
+
+function ensureSettlementState(session: TransferSession): SettlementMonitorState | undefined {
+  if (!session.execution.tradeRequestId) return undefined;
+  if (!session.execution.settlement) {
+    session.execution.settlement = createInitialSettlementState({
+      tradeRequestId: session.execution.tradeRequestId,
+      tradeRequestStatus: session.execution.tradeRequestStatus,
+      tradeId: session.execution.tradeId,
+      tradeStatus: session.execution.tradeStatus,
+    });
+  }
+  return session.execution.settlement;
+}
+
+function mapSettlementPhaseToStage(phase: SettlementPhase): TransferStage {
+  switch (phase) {
+    case "waiting_for_fiat":
+      return "awaiting_trade_settlement";
+    case "awaiting_receipt_confirmation":
+      return "awaiting_receipt_confirmation";
+    case "receipt_confirmed_release_started":
+      return "awaiting_release_completion";
+    case "deferred":
+      return "awaiting_manual_settlement_followup";
+    case "completed":
+    case "refunded_or_cancelled":
+      return "completed";
+    case "matching":
+    default:
+      return "awaiting_match_status";
+  }
+}
+
+function mapSettlementEvent(event: SettlementSnapshot["events"][number]): TransferFlowEvent {
+  switch (event.type) {
+    case "status_changed":
+      return { type: "settlement_status_changed", message: event.message, data: event.data };
+    case "receipt_confirmation_requested":
+      return { type: "receipt_confirmation_requested", message: event.message, data: event.data };
+    case "receipt_confirmation_reminder":
+      return { type: "receipt_confirmation_reminder", message: event.message, data: event.data };
+    case "receipt_confirmation_timeout":
+      return { type: "receipt_confirmation_timeout", message: event.message, data: event.data };
+    case "receipt_not_received":
+      return { type: "receipt_not_received", message: event.message, data: event.data };
+    case "deferred_placeholder":
+      return { type: "settlement_placeholder_deferred", message: event.message, data: event.data };
+    default:
+      return { type: "settlement_status_changed", message: event.message, data: event.data };
+  }
+}
+
+function applySettlementSnapshotToSession(session: TransferSession, snapshot: SettlementSnapshot): void {
+  session.execution.tradeRequestId = snapshot.state.tradeRequestId;
+  session.execution.tradeRequestStatus = snapshot.state.tradeRequestStatus;
+  session.execution.tradeId = snapshot.state.tradeId;
+  session.execution.tradeStatus = snapshot.state.tradeStatus;
+  session.execution.settlement = snapshot.state;
+  session.stage = mapSettlementPhaseToStage(snapshot.phase);
+
+  if (snapshot.phase === "completed" || snapshot.phase === "refunded_or_cancelled") {
+    session.status = "completed";
+  } else {
+    session.status = "active";
+  }
+}
+
+async function refreshSettlementForSession(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  mode: "refresh" | "poll" = "refresh"
+): Promise<SettlementSnapshot | undefined> {
+  const state = ensureSettlementState(session);
+  if (!state) return undefined;
+  const client = await getExecutionClient(deps);
+  const snapshot = mode === "poll"
+    ? await pollSettlementSnapshot(state, client, settlementMonitorOptions(deps))
+    : await refreshSettlementSnapshot(state, client, settlementMonitorOptions(deps));
+  applySettlementSnapshotToSession(session, snapshot);
+  return snapshot;
+}
+
+function settlementStageActive(session: TransferSession): boolean {
+  return [
+    "awaiting_trade_settlement",
+    "awaiting_receipt_confirmation",
+    "awaiting_release_completion",
+    "awaiting_manual_settlement_followup",
+  ].includes(session.stage);
+}
+
+function settlementDecisionStageActive(session: TransferSession): boolean {
+  return [
+    "awaiting_trade_settlement",
+    "awaiting_receipt_confirmation",
+    "awaiting_manual_settlement_followup",
+  ].includes(session.stage);
+}
+
+async function maybeHandleSettlementTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (!settlementDecisionStageActive(session) || !session.execution.tradeRequestId) return undefined;
+
+  const decision = parseReceiptDecision(turn.option || turn.text);
+  if (!decision) return undefined;
+
+  const snapshot = await refreshSettlementForSession(session, deps, "refresh");
+  const events = snapshot ? snapshot.events.map(mapSettlementEvent) : [];
+
+  if (session.status === "completed") {
+    return reply(withUpdate(session, deps), snapshot?.prompt || "This trade is already settled.", snapshot?.options, events);
+  }
+
+  if (decision === "received") {
+    if (!session.execution.tradeId) {
+      const deferred = noteDeferredPlaceholder(session.execution.settlement || {}, "trade_id_missing_for_confirm_receipt");
+      session.execution.settlement = deferred.state;
+      session.stage = "awaiting_manual_settlement_followup";
+      return reply(withUpdate(session, deps), deferred.prompt, deferred.options, [...events, ...deferred.events.map(mapSettlementEvent)]);
+    }
+
+    const client = await getExecutionClient(deps);
+    if (!client.confirmFiatReceived) {
+      const deferred = noteDeferredPlaceholder(session.execution.settlement || {}, "confirm_fiat_received_integration_missing");
+      session.execution.settlement = deferred.state;
+      session.stage = "awaiting_manual_settlement_followup";
+      return reply(withUpdate(session, deps), deferred.prompt, deferred.options, [...events, ...deferred.events.map(mapSettlementEvent)]);
+    }
+
+    try {
+      const confirmedTrade = await client.confirmFiatReceived(session.execution.tradeId);
+      if (confirmedTrade?.status) {
+        session.execution.tradeStatus = confirmedTrade.status;
+        if (session.execution.settlement) session.execution.settlement.tradeStatus = confirmedTrade.status;
+      }
+      const afterConfirm = await refreshSettlementForSession(session, deps, "refresh");
+      const followUpEvents = afterConfirm ? afterConfirm.events.map(mapSettlementEvent) : [];
+      const replyText = afterConfirm?.prompt || `Trade #${session.execution.tradeId} receipt confirmed. Escrow release should now be in progress.`;
+      return reply(
+        withUpdate(session, deps),
+        replyText,
+        afterConfirm?.options,
+        [
+          ...events,
+          { type: "receipt_confirmed", message: `Confirmed fiat receipt for trade #${session.execution.tradeId}.`, data: { tradeId: session.execution.tradeId } },
+          ...followUpEvents,
+        ]
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const deferred = noteDeferredPlaceholder(session.execution.settlement || {}, `confirm_fiat_received_failed:${message}`);
+      session.execution.lastError = message;
+      session.execution.settlement = deferred.state;
+      session.stage = "awaiting_manual_settlement_followup";
+      return reply(
+        withUpdate(session, deps),
+        `${deferred.prompt} Confirmation attempt failed: ${message}`,
+        deferred.options,
+        [...events, ...deferred.events.map(mapSettlementEvent)]
+      );
+    }
+  }
+
+  if (decision === "not_received") {
+    const notReceived = noteReceiptNotReceived(session.execution.settlement || {}, "user_reported_not_received");
+    session.execution.settlement = notReceived.state;
+    session.stage = "awaiting_manual_settlement_followup";
+    session.status = "active";
+    return reply(withUpdate(session, deps), notReceived.prompt, notReceived.options, [...events, ...notReceived.events.map(mapSettlementEvent)]);
+  }
+
+  const deferred = noteDeferredPlaceholder(session.execution.settlement || {}, "unsupported_post_match_response");
+  session.execution.settlement = deferred.state;
+  session.stage = "awaiting_manual_settlement_followup";
+  session.status = "active";
+  return reply(withUpdate(session, deps), deferred.prompt, deferred.options, [...events, ...deferred.events.map(mapSettlementEvent)]);
+}
+
 async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedHints, deps: TransferFlowDeps): Promise<TransferFlowResult | undefined> {
   if (!hints.checkStatus || !session.execution.tradeRequestId) return undefined;
+
+  const snapshot = await refreshSettlementForSession(session, deps, "refresh");
+  if (snapshot) {
+    const events = snapshot.events.map(mapSettlementEvent);
+    if (snapshot.phase === "completed") {
+      events.push({
+        type: "settlement_completed",
+        message: `Trade #${snapshot.state.tradeId} reached escrow release.`,
+        data: { tradeId: snapshot.state.tradeId, tradeStatus: snapshot.state.tradeStatus },
+      });
+    } else if (snapshot.phase === "refunded_or_cancelled") {
+      events.push({
+        type: "settlement_refunded_or_cancelled",
+        message: `Trade #${snapshot.state.tradeId} ended without release.`,
+        data: { tradeId: snapshot.state.tradeId, tradeStatus: snapshot.state.tradeStatus },
+      });
+    }
+    return reply(withUpdate(session, deps), snapshot.prompt, snapshot.options, events);
+  }
 
   const client = await getExecutionClient(deps);
   let tradeRequest: TradeRequest | undefined;
@@ -897,19 +1140,51 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
     session.execution.tradeRequestStatus = matched.status;
     session.execution.tradeId = matched.trade?.id;
     session.execution.tradeStatus = matched.trade?.status;
-    session.status = "completed";
-    session.stage = "completed";
+    session.execution.settlement = createInitialSettlementState({
+      tradeRequestId: matched.id,
+      tradeRequestStatus: matched.status,
+      tradeId: matched.trade?.id,
+      tradeStatus: matched.trade?.status,
+    });
+
     events.push({
       type: "trade_matched",
       message: `Trade request #${matched.id} matched${matched.trade?.id ? ` with trade #${matched.trade.id}` : ""}.`,
       data: { tradeRequestId: matched.id, tradeId: matched.trade?.id, tradeStatus: matched.trade?.status },
     });
+    events.push({
+      type: "settlement_monitor_started",
+      message: `Started post-match settlement monitoring for trade request #${matched.id}.`,
+      data: { tradeRequestId: matched.id, tradeId: matched.trade?.id },
+    });
+
+    const settlement = await refreshSettlementForSession(session, deps, "poll");
+    if (settlement) {
+      events.push(...settlement.events.map(mapSettlementEvent));
+      if (settlement.phase === "completed") {
+        events.push({
+          type: "settlement_completed",
+          message: `Trade #${settlement.state.tradeId} reached escrow release.`,
+          data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
+        });
+      } else if (settlement.phase === "refunded_or_cancelled") {
+        events.push({
+          type: "settlement_refunded_or_cancelled",
+          message: `Trade #${settlement.state.tradeId} ended without release.`,
+          data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
+        });
+      }
+      return reply(withUpdate(session, deps), settlement.prompt, settlement.options, events);
+    }
+
+    session.stage = "awaiting_trade_settlement";
+    session.status = "active";
     return reply(
       withUpdate(session, deps),
       matched.trade?.id
-        ? `Trade request #${matched.id} matched. Trade #${matched.trade.id} is now ${matched.trade.status || "created"}.`
-        : `Trade request #${matched.id} matched successfully.`,
-      undefined,
+        ? `Trade request #${matched.id} matched. Trade #${matched.trade.id} is now ${matched.trade.status || "created"}. I am monitoring settlement. Reply 'received' only after the recipient confirms the fiat arrived, or 'not received' to keep escrow locked.`
+        : `Trade request #${matched.id} matched successfully. I am now monitoring settlement.`,
+      ["received", "not received", "status"],
       events
     );
   } catch (error) {
@@ -985,6 +1260,16 @@ export async function advanceTransferFlow(
 
   const statusReply = await maybeHandleStatusRequest(session, hints, deps);
   if (statusReply) return statusReply;
+
+  const settlementReply = await maybeHandleSettlementTurn(session, normalizedTurn, deps);
+  if (settlementReply) return settlementReply;
+
+  if (settlementStageActive(session) && session.execution.tradeRequestId) {
+    const snapshot = await refreshSettlementForSession(session, deps, "refresh");
+    if (snapshot) {
+      return reply(withUpdate(session, deps), snapshot.prompt, snapshot.options, snapshot.events.map(mapSettlementEvent));
+    }
+  }
 
   applyHintsToSession(session, stageAwareHints);
   applyMidFlowChanges(session, hints);

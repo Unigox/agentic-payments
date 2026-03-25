@@ -58,16 +58,35 @@ This document defines the higher-level chat/orchestration flow implemented in `s
     - `ensurePaymentDetail()`
     - `createTradeRequest()`
     - `waitForTradeMatch()`
-    - optionally `getTradeRequest()` / `getTrade()` for status follow-up
+    - initialize post-match settlement monitoring
 
-12. **Status / resolution gate**
-    - If matched, report trade request ID + trade ID / status.
+12. **Post-match monitoring gate**
+    - Poll `getTradeRequest()` / `getTrade()` for real settlement status transitions.
+    - Keep the flow open after vendor match instead of closing immediately.
+    - Normalize backend statuses into chat stages:
+      - matched / waiting for fiat
+      - awaiting receipt confirmation
+      - receipt confirmed / release started
+      - terminal released
+      - terminal refunded / cancelled
+      - safe deferred placeholder for unsupported post-match states
+
+13. **Receipt confirmation gate**
+    - Ask the user to confirm whether the recipient actually received fiat.
+    - Supported user outcomes in this phase:
+      - `received` → call `confirmFiatReceived()` / backend `confirm-payment`
+      - `not received` → keep escrow locked, move to manual follow-up placeholder
+      - anything else → safe deferred placeholder, keep escrow locked
+    - Reminder / timeout timestamps are tracked inside the session so later `status` checks can re-prompt if the user never answered.
+
+14. **Status / resolution gate**
     - If pending timeout, keep the flow open for later status checks.
     - If no vendor match, offer retry / amount change / method change / currency change.
+    - If released or refunded / cancelled, end the settlement flow with the final trade status.
 
 ## Happy Path Summary
 
-`intent -> recipient -> currency -> method -> network? -> details -> save/update? -> amount -> confirm -> balance check -> payment detail ensure -> trade request -> vendor match`
+`intent -> recipient -> currency -> method -> network? -> details -> save/update? -> amount -> confirm -> balance check -> payment detail ensure -> trade request -> vendor match -> settlement monitor -> receipt confirmed -> release started -> released`
 
 ## Main Unhappy Paths
 
@@ -92,9 +111,28 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 ### Wait-for-match timeout
 - Mark the trade request as pending and support later `status` checks.
 
+### Post-match: recipient says fiat was not received
+- Do **not** call any release / confirm endpoint.
+- Keep escrow locked.
+- Route into the manual follow-up placeholder and continue exposing `status` checks.
+
+### Post-match: unsupported reply or backend state
+- Do **not** guess a dispute workflow.
+- Keep escrow locked.
+- Route into the safe deferred placeholder.
+
+### Receipt confirmation timeout
+- Record reminder / timeout timestamps when receipt confirmation is pending.
+- On later `status` checks, emit a reminder / overdue prompt if the user never answered.
+
 ### Save contact only
 - Stop after successful contact save/update. Do not execute the transfer.
 
 ### Change currency or method mid-flow
 - Clear dependent state (selected network, collected fields, confirmation state).
 - Re-run the live API selection and validation path.
+
+## Deferred on purpose
+
+By user request, this phase does **not** build a real dispute system yet.
+Anything beyond explicit `received` / `not received` receipt handling is deferred to a safe placeholder/manual follow-up path.

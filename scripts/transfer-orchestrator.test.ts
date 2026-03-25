@@ -246,10 +246,17 @@ async function stubGetPaymentMethodFieldConfig(params: {
 function makeClient(options: {
   balance?: number;
   waitMode?: "matched" | "no_match" | "timeout";
+  matchedTradeStatus?: string;
+  getTradeStatuses?: string[];
+  confirmFiatReceivedStatus?: string;
+  confirmFiatReceivedError?: string;
 } = {}): TransferExecutionClient & { calls: string[] } {
   const calls: string[] = [];
   const balance = options.balance ?? 1000;
   const waitMode = options.waitMode ?? "matched";
+  let currentTradeStatus = options.matchedTradeStatus ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
+  const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
+  let tradeStatusIndex = 0;
 
   return {
     calls,
@@ -272,7 +279,7 @@ function makeClient(options: {
           id: 7001,
           status: "accepted_by_vendor",
           trade_type: "SELL",
-          trade: { id: 8801, status: "awaiting_vendor_payment" },
+          trade: { id: 8801, status: currentTradeStatus },
         } as TradeRequest;
       }
       if (waitMode === "no_match") {
@@ -282,23 +289,38 @@ function makeClient(options: {
     },
     async getTradeRequest(): Promise<TradeRequest> {
       calls.push("getTradeRequest");
-      return { id: 7001, status: "created", trade_type: "SELL", trade: { id: 8801, status: "awaiting_vendor_payment" } } as TradeRequest;
+      return { id: 7001, status: waitMode === "matched" ? "accepted_by_vendor" : "created", trade_type: "SELL", trade: { id: 8801, status: currentTradeStatus } } as TradeRequest;
     },
     async getTrade() {
       calls.push("getTrade");
-      return { id: 8801, status: "awaiting_vendor_payment" };
+      const next = tradeStatuses[Math.min(tradeStatusIndex, tradeStatuses.length - 1)] || currentTradeStatus;
+      tradeStatusIndex += 1;
+      currentTradeStatus = next;
+      return { id: 8801, status: currentTradeStatus, payment_window_seconds_left: 900, claim_autorelease_seconds_left: 1800 };
+    },
+    async confirmFiatReceived() {
+      calls.push("confirmFiatReceived");
+      if (options.confirmFiatReceivedError) {
+        throw new Error(options.confirmFiatReceivedError);
+      }
+      currentTradeStatus = options.confirmFiatReceivedStatus ?? "fiat_payment_confirmed_by_seller_escrow_release_started";
+      tradeStatuses.push(currentTradeStatus);
+      return { id: 8801, status: currentTradeStatus };
     },
   };
 }
 
-function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>): TransferFlowDeps {
+function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>, overrides: Partial<TransferFlowDeps> = {}): TransferFlowDeps {
   return {
     contactsFilePath,
     authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true },
     client,
+    waitForSettlementTimeoutMs: 1,
+    settlementPollIntervalMs: 1,
     getPaymentMethodsForCurrency: stubGetPaymentMethodsForCurrency,
     getPaymentMethodFieldConfig: stubGetPaymentMethodFieldConfig,
     validatePaymentDetailInput,
+    ...overrides,
   };
 }
 
@@ -337,11 +359,13 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.equal(res.session.stage, "awaiting_confirmation");
 
   res = await advanceTransferFlow(res.session, "confirm", deps);
-  assert.equal(res.session.stage, "completed");
-  assert.equal(res.session.status, "completed");
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.equal(res.session.status, "active");
   assert.ok(res.events.some((event) => event.type === "trade_request_created"));
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
-  assert.deepEqual(client.calls, ["getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch"]);
+  assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
+  assert.match(res.reply, /keep escrow locked/i);
+  assert.deepEqual(client.calls.slice(0, 6), ["getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
@@ -385,7 +409,7 @@ test("stale saved contact gets revalidated, updated, and then used", async () =>
   assert.ok(res.events.some((event) => event.type === "contact_updated"));
 
   res = await advanceTransferFlow(res.session, "confirm", deps);
-  assert.equal(res.session.stage, "completed");
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts.mom.paymentMethods.EUR.details.revtag, "mom_ok");
@@ -474,6 +498,155 @@ test("changing currency mid-flow resets payment selection and asks for a new met
   assert.equal(res.session.currency, "KES");
   assert.equal(res.session.payment, undefined);
   assert.equal(res.session.stage, "awaiting_payment_method");
+});
+
+test("received confirmation uses confirm-payment and moves to release monitoring", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+    getTradeStatuses: ["fiat_payment_proof_submitted_by_buyer", "fiat_payment_confirmed_by_seller_escrow_release_started"],
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
+
+  res = await advanceTransferFlow(res.session, "received", deps);
+  assert.equal(res.session.stage, "awaiting_release_completion");
+  assert.equal(res.session.status, "active");
+  assert.ok(res.events.some((event) => event.type === "receipt_confirmed"));
+  assert.match(res.reply, /release has started|release should now be in progress/i);
+  assert.ok(client.calls.includes("confirmFiatReceived"));
+});
+
+test("not received keeps escrow locked and enters manual follow-up placeholder", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+
+  res = await advanceTransferFlow(res.session, "not received", deps);
+  assert.equal(res.session.stage, "awaiting_manual_settlement_followup");
+  assert.equal(res.session.status, "active");
+  assert.ok(res.events.some((event) => event.type === "receipt_not_received"));
+  assert.match(res.reply, /keeping escrow locked/i);
+  assert.ok(!client.calls.includes("confirmFiatReceived"));
+});
+
+test("unsupported post-match response goes to safe deferred placeholder", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  res = await advanceTransferFlow(res.session, "need more time", deps);
+
+  assert.equal(res.session.stage, "awaiting_manual_settlement_followup");
+  assert.ok(res.events.some((event) => event.type === "settlement_placeholder_deferred"));
+  assert.match(res.reply, /not automating that response path yet/i);
+});
+
+test("status check emits receipt timeout reminder when user does not respond", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+
+  const client = makeClient();
+  const base = new Date("2026-03-25T14:00:00.000Z");
+  let current = base.getTime();
+  const deps = makeDeps(file, client, {
+    now: () => new Date(current),
+    receiptReminderMs: 60_000,
+    receiptTimeoutMs: 120_000,
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+
+  current += 3 * 60_000;
+  res = await advanceTransferFlow(res.session, "status", deps);
+  assert.ok(res.events.some((event) => event.type === "receipt_confirmation_timeout"));
+  assert.match(res.reply, /keep escrow locked/i);
 });
 
 test("no vendor match lands in explicit retry/change branch", async () => {

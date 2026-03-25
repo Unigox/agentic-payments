@@ -127,7 +127,7 @@ if (!validation.valid) {
 ## Send Money Flow
 
 For the chat/state-machine layer, use `scripts/transfer-orchestrator.ts`.
-It handles:
+It now handles:
 - saved vs new recipient branching
 - live method / network selection
 - field-by-field collection + validation
@@ -135,6 +135,10 @@ It handles:
 - save/update decisions
 - confirmation
 - balance / trade request / wait-for-match unhappy paths
+- post-match settlement monitoring via `scripts/settlement-monitor.ts`
+- receipt confirmation prompts (`received` / `not received`)
+- reminder / timeout tracking for unanswered receipt confirmation
+- safe deferred placeholder handling for unsupported post-match replies / statuses
 
 ```typescript
 import { startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator";
@@ -174,15 +178,29 @@ const tr = await client.createTradeRequest({
   paymentNetworkId: contact.networkId,
 });
 
-// 4. Wait / report
-console.log(`Trade request #${tr.id} created`);
+// 4. Wait for vendor match
+const matched = await client.waitForTradeMatch(tr.id, 120_000);
+console.log(`Trade request #${matched.id} matched`);
+
+// 5. Monitor the post-match lifecycle
+const trade = matched.trade?.id ? await client.getTrade(matched.trade.id) : undefined;
+console.log(`Trade status: ${trade?.status}`);
+
+// 6. Only after explicit receipt confirmation
+if (trade?.id) {
+  await client.confirmFiatReceived(trade.id);
+}
 ```
 
-## Important limitation
+## Important limitations
 
 TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require `UNIGOX_PRIVATE_KEY`:
 - `withdrawFromEscrow()`
 - `bridgeOut()`
+- `confirmFiatReceived()`
+
+Dispute handling is intentionally deferred in this phase of the skill.
+If the user says anything other than explicit `received` / `not received`, or if the trade moves into an unsupported post-match status such as dispute-related states, the orchestrator keeps escrow untouched and routes to a safe deferred/manual follow-up placeholder instead of inventing a dispute workflow.
 
 ## Token Addresses (XAI Chain)
 
@@ -210,6 +228,7 @@ TON auth only covers login / JWT acquisition. Methods that sign EVM transactions
 | `createTradeRequest(params)` | Initiate a trade |
 | `waitForTradeMatch(id, timeout)` | Poll until vendor accepts |
 | `getTrade(id)` | Get trade status |
+| `confirmFiatReceived(tradeId)` | Sign + call backend `confirm-payment` to release after explicit receipt confirmation |
 | `getBridgeTokens()` | Supported chains + tokens |
 | `getBridgeQuote(params)` | Get bridge quote |
 | `bridgeOut(params)` | Withdraw to external chain (requires EVM key) |

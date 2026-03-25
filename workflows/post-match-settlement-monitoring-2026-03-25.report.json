@@ -1,0 +1,15 @@
+{
+  "status": "completed",
+  "run_id": "send_money_post_match_settlement_2026_03_25",
+  "goal": "Extend send-money with post-match settlement monitoring and user confirmation orchestration for UNIGOX trades",
+  "completed_steps": [
+    "audit_current_flow",
+    "map_real_unigox_contract",
+    "design_state_machine",
+    "plan_validation"
+  ],
+  "total_steps": 4,
+  "drift_flags_total": 0,
+  "corrections_total": 0,
+  "trace_entries": 8
+}

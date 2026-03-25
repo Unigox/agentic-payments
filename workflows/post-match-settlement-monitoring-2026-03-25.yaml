@@ -1,0 +1,66 @@
+goal: "Extend send-money with post-match settlement monitoring and user confirmation orchestration for UNIGOX trades"
+run_id: "send_money_post_match_settlement_2026_03_25"
+constraints:
+  - "reuse_existing_unigox_helpers_when_possible"
+  - "no_backend_contract_invention_without_marking_gap"
+  - "preserve_existing_transfer_orchestrator_entrypoints"
+  - "keep_escrow_locked_until_receipt_confirmation"
+  - "defer_real_dispute_system_by_user_request"
+allowed_scope:
+  - "status"
+  - "count"
+  - "current_flow_gaps"
+  - "real_statuses"
+  - "real_actions"
+  - "missing_integrations"
+  - "state_machine_plan"
+  - "monitoring_plan"
+  - "test_plan"
+  - "doc_plan"
+  - "delivery_plan"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "audit_current_flow"
+    name: "Audit the current send-money execution boundary and gaps"
+    required_predecessors: []
+    acceptance_criteria:
+      - "has_key:current_flow_gaps"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "map_real_unigox_contract"
+    name: "Map real trade statuses, timers, and settlement actions from local UNIGOX sources"
+    required_predecessors:
+      - "audit_current_flow"
+    acceptance_criteria:
+      - "has_key:real_statuses"
+      - "has_key:real_actions"
+      - "has_key:missing_integrations"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_state_machine"
+    name: "Design the post-match state machine and monitoring abstraction"
+    required_predecessors:
+      - "map_real_unigox_contract"
+    acceptance_criteria:
+      - "has_key:state_machine_plan"
+      - "has_key:monitoring_plan"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
+
+  - id: "plan_validation"
+    name: "Define tests, docs, and delivery checkpoints before code changes"
+    required_predecessors:
+      - "design_state_machine"
+    acceptance_criteria:
+      - "has_key:test_plan"
+      - "has_key:doc_plan"
+      - "has_key:delivery_plan"
+      - "has_key:count"
+      - "min_count:1"
+    external_action: false
