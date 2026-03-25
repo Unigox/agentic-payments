@@ -1,0 +1,39 @@
+{
+  "engine": {
+    "status": "completed",
+    "run_id": "send-money-evm-onboarding-sequence-2026-03-25",
+    "goal": "Audit the send-money onboarding prompt/state flow and implement the exact EVM conversational ordering: choose auth path, confirm wallet sign-in on unigox.com, verify the login wallet key, then ask for the separate exported signing key.",
+    "completed_steps": [
+      "audit_current_flow",
+      "capture_required_sequence",
+      "design_state_changes",
+      "define_regression_coverage"
+    ],
+    "total_steps": 4,
+    "drift_flags_total": 0,
+    "corrections_total": 0,
+    "trace_entries": 8
+  },
+  "meta": {
+    "total_findings": 0,
+    "critical": 0,
+    "warnings": 0,
+    "info": 0,
+    "findings": [],
+    "verdict": "clean"
+  },
+  "step_outputs": {
+    "audit_current_flow": {
+      "audit_summary": "Current transfer-orchestrator still jumps from EVM auth-path selection straight to requesting the wallet private key, without the intermediate \u201csign in on unigox.com first\u201d confirmation state the user asked for."
+    },
+    "capture_required_sequence": {
+      "sequence_requirements": "Required EVM order: ask auth path -> if EVM, ask whether the user has already signed in on unigox.com with that wallet / instruct them to do so first -> after confirmation, ask which login wallet key they used -> verify login with that login key -> only then ask for the separate UNIGOX-exported signing key."
+    },
+    "design_state_changes": {
+      "implementation_plan": "Add explicit EVM onboarding stages for sign-in confirmation and login-key verification, route missing-auth EVM selections through those stages, and only transition to the existing signing-key gate after login verification succeeds."
+    },
+    "define_regression_coverage": {
+      "test_plan": "Add tests that assert the exact prompt ordering, the lack of an immediate key request after choosing EVM, login verification failure retry behavior, and the post-verification transition to the exported signing-key prompt."
+    }
+  }
+}

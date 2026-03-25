@@ -56,6 +56,8 @@ export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
   | "resolving"
   | "awaiting_auth_choice"
+  | "awaiting_evm_wallet_signin"
+  | "awaiting_evm_login_key"
   | "awaiting_evm_signing_key"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
@@ -147,6 +149,9 @@ export interface TransferFlowDeps {
   client?: TransferExecutionClient;
   clientFactory?: () => Promise<TransferExecutionClient>;
   clientConfig?: UnigoxClientConfig;
+  verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string } | void>;
+  persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
+  persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   getPaymentMethodsForCurrency?: (currency: string) => Promise<CurrencyPaymentData>;
   getPaymentMethodFieldConfig?: (params: {
     currency: string;
@@ -278,6 +283,8 @@ const AFFIRMATIVE_RE = /^(yes|y|save it|save|update it)$/i;
 const CONFIRM_RE = /^(confirm|confirmed|proceed|go ahead|send it|do it|retry|continue)$/i;
 const NO_RE = /^(no|n|don'?t|not now|skip save)$/i;
 const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
+const SIGNIN_READY_RE = /^(yes|y|done|ready|already signed in|already logged in|signed in|logged in|i signed in|i have signed in|i already signed in|i logged in|i have logged in)$/i;
+const NOT_READY_RE = /^(no|n|not yet|haven'?t|have not|didn'?t|did not)$/i;
 
 function nowIso(deps: TransferFlowDeps): string {
   return (deps.now ? deps.now() : new Date()).toISOString();
@@ -594,6 +601,145 @@ async function getExecutionClient(deps: TransferFlowDeps): Promise<TransferExecu
   if (deps.client) return deps.client;
   if (deps.clientFactory) return deps.clientFactory();
   return new UnigoxClient(deps.clientConfig || loadUnigoxConfigFromEnv());
+}
+
+async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps): Promise<{ success: boolean; message?: string }> {
+  if (deps.verifyEvmLoginKey) {
+    const result = await deps.verifyEvmLoginKey(loginKey);
+    if (!result) return { success: true };
+    return {
+      success: result.success ?? result.ok ?? true,
+      message: result.message,
+    };
+  }
+
+  let email: string | undefined;
+  let frontendUrl: string | undefined;
+  if (deps.clientConfig) {
+    email = deps.clientConfig.email;
+    frontendUrl = deps.clientConfig.frontendUrl;
+  } else {
+    try {
+      const config = loadUnigoxConfigFromEnv();
+      email = config.email;
+      frontendUrl = config.frontendUrl;
+    } catch {
+      // No stored config available yet; login verification can still proceed with the provided key alone.
+    }
+  }
+
+  try {
+    const client = new UnigoxClient({
+      authMode: "evm",
+      evmLoginPrivateKey: loginKey,
+      ...(email ? { email } : {}),
+      ...(frontendUrl ? { frontendUrl } : {}),
+    });
+    await client.login();
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function maybeHandleAuthOnboardingTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (session.goal !== "transfer") return undefined;
+
+  const responseText = cleanText(turn.option || turn.text);
+  const hintedChoice = parseIntentHints(responseText).authChoice;
+
+  if (session.stage === "awaiting_evm_wallet_signin") {
+    session.status = "blocked";
+
+    if (hintedChoice === "ton" || hintedChoice === "email") {
+      session.stage = "awaiting_auth_choice";
+      session.auth.choice = hintedChoice;
+      const followUp = hintedChoice === "ton"
+        ? "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login."
+        : "Please provide the email address to use for OTP onboarding / recovery.";
+      return reply(withUpdate(session, deps), followUp, undefined, [{
+        type: "blocked_missing_auth",
+        message: followUp,
+      }]);
+    }
+
+    if (SIGNIN_READY_RE.test(responseText) || /signed in|logged in/i.test(responseText)) {
+      session.stage = "awaiting_evm_login_key";
+      const followUp = "Great. Which wallet key did you use to sign in on UNIGOX? Please paste the login wallet private key and I’ll verify login with that key first.";
+      return reply(withUpdate(session, deps), followUp, undefined, [{
+        type: "blocked_missing_auth",
+        message: followUp,
+      }]);
+    }
+
+    const reminder = NOT_READY_RE.test(responseText) || !responseText
+      ? "Before I ask for any key: please sign in on unigox.com with the EVM wallet you want me to reuse. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used."
+      : "I still need you to sign in on unigox.com with that EVM wallet first. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used.";
+    return reply(withUpdate(session, deps), reminder, ["I signed in", "TON wallet connection", "email OTP"], [{
+      type: "blocked_missing_auth",
+      message: reminder,
+    }]);
+  }
+
+  if (session.stage === "awaiting_evm_login_key") {
+    session.status = "blocked";
+    if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
+      const prompt = "Which wallet key did you use to sign in on UNIGOX? Please paste the login wallet private key and I’ll verify login with that key first.";
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const verification = await verifyEvmLoginKeyInput(responseText, deps);
+    if (!verification.success) {
+      const failure = `That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again.${verification.message ? ` (${verification.message})` : ""}`;
+      return reply(withUpdate(session, deps), failure, undefined, [{
+        type: "blocked_missing_auth",
+        message: failure,
+      }]);
+    }
+
+    await deps.persistEvmLoginKey?.(responseText);
+    session.auth.available = true;
+    session.auth.mode = "evm";
+    session.auth.choice = "evm";
+    session.auth.evmSigningKeyAvailable = false;
+    session.stage = "awaiting_evm_signing_key";
+    const followUp = "Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here. I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release. If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.";
+    return reply(withUpdate(session, deps), followUp, undefined, [{
+      type: "blocked_missing_auth",
+      message: followUp,
+    }]);
+  }
+
+  if (session.stage === "awaiting_evm_signing_key" && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
+    session.status = "blocked";
+    if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
+      const prompt = "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release. Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).";
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    await deps.persistEvmSigningKey?.(responseText);
+    session.auth.available = true;
+    session.auth.mode = "evm";
+    session.auth.choice = "evm";
+    session.auth.evmSigningKeyAvailable = true;
+    session.status = "active";
+    return advanceTransferFlow(session, { text: "" }, deps);
+  }
+
+  return undefined;
 }
 
 function resetPaymentSelection(session: TransferSession): void {
@@ -1292,6 +1438,16 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
+  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key"].includes(inputSession.stage)) {
+    delete stageAwareHints.recipient;
+    delete stageAwareHints.currency;
+    delete stageAwareHints.amount;
+    delete stageAwareHints.savedOrNew;
+    delete stageAwareHints.saveContactDecision;
+    delete stageAwareHints.confirm;
+    delete stageAwareHints.changeAmount;
+    delete stageAwareHints.changeCurrency;
+  }
   const events: TransferFlowEvent[] = [];
   let consumedTurnForSelection = false;
 
@@ -1314,9 +1470,6 @@ export async function advanceTransferFlow(
     }
   }
 
-  applyHintsToSession(session, stageAwareHints);
-  applyMidFlowChanges(session, hints);
-
   if (!session.auth.checked) {
     const auth = deps.authState || detectAuthState();
     session.auth = {
@@ -1328,17 +1481,24 @@ export async function advanceTransferFlow(
     };
   }
 
+  const authOnboardingReply = await maybeHandleAuthOnboardingTurn(session, normalizedTurn, deps);
+  if (authOnboardingReply) return authOnboardingReply;
+
+  applyHintsToSession(session, stageAwareHints);
+  applyMidFlowChanges(session, hints);
+
   if (session.goal === "transfer" && !session.auth.available) {
     session.status = "blocked";
     session.stage = "awaiting_auth_choice";
     if (hints.authChoice) {
       session.auth.choice = hints.authChoice;
       const followUp = hints.authChoice === "evm"
-        ? "Please provide the private key for the wallet you already use to sign in on UNIGOX. I’ll verify login with that first, then I’ll ask for the separate UNIGOX-exported EVM signing key used for receipt confirmations and other signed actions."
+        ? "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used."
         : hints.authChoice === "ton"
           ? "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login."
           : "Please provide the email address to use for OTP onboarding / recovery.";
-      return reply(withUpdate(session, deps), followUp, undefined, [{
+      session.stage = hints.authChoice === "evm" ? "awaiting_evm_wallet_signin" : "awaiting_auth_choice";
+      return reply(withUpdate(session, deps), followUp, hints.authChoice === "evm" ? ["I signed in", "TON wallet connection", "email OTP"] : undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
       }]);

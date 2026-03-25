@@ -47,7 +47,7 @@ When the skill needs to sign in on UNIGOX, the first auth question should be:
 
 Those are the two replayable wallet sign-in paths. Email remains useful, but as an onboarding / recovery fallback rather than the main wording for repeatable sign-in.
 
-- **EVM login key** — the private key for the wallet you already use to sign in on UNIGOX.
+- **EVM login key** — the private key for the wallet you already use to sign in on UNIGOX. Do not ask for it until the user confirms they have already signed in on unigox.com with that wallet.
 - **UNIGOX-exported EVM signing key** — a separate internal wallet key exported from unigox.com settings. This is the key the skill needs for signed actions like receipt confirmation / escrow release, escrow withdrawals, and bridge-outs. Save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (`UNIGOX_PRIVATE_KEY` still works as a legacy alias).
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
@@ -63,7 +63,7 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 Add Agentic Payments to your OpenClaw agent.
 
 ### 5. Initialize the agent
-On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding is now explicitly two-step: first it asks for the wallet key already used to sign in on UNIGOX and verifies login, then it asks for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
+On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then ask which login wallet key you used and verify login with it, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
 
 ### 6. Fund your wallet
 Two options:

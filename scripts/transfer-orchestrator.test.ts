@@ -736,7 +736,7 @@ test("loadUnigoxConfigFromEnv returns split EVM config with legacy signing alias
   assert.equal(result.email, "agent@example.com");
 });
 
-test("missing EVM auth now asks for the login wallet key before the exported signing key", async () => {
+test("missing EVM auth asks the user to sign in on unigox.com before requesting the login key", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
   const deps = makeDeps(file, client, {
@@ -744,11 +744,17 @@ test("missing EVM auth now asks for the login wallet key before the exported sig
   });
 
   const res = await startTransferFlow("send 50 EUR to mom", deps);
-  const followUp = await advanceTransferFlow(res.session, "evm", deps);
+  const chooseEvm = await advanceTransferFlow(res.session, "evm", deps);
 
-  assert.equal(followUp.session.stage, "awaiting_auth_choice");
-  assert.match(followUp.reply, /wallet you already use to sign in on UNIGOX/i);
-  assert.match(followUp.reply, /then I’ll ask for the separate UNIGOX-exported EVM signing key/i);
+  assert.equal(chooseEvm.session.stage, "awaiting_evm_wallet_signin");
+  assert.match(chooseEvm.reply, /Before I ask for any key/i);
+  assert.match(chooseEvm.reply, /signed in on unigox\.com/i);
+  assert.doesNotMatch(chooseEvm.reply, /paste the login wallet private key/i);
+
+  const afterSignin = await advanceTransferFlow(chooseEvm.session, "done", deps);
+  assert.equal(afterSignin.session.stage, "awaiting_evm_login_key");
+  assert.match(afterSignin.reply, /Which wallet key did you use to sign in on UNIGOX/i);
+  assert.match(afterSignin.reply, /login wallet private key/i);
 });
 
 test("EVM login without exported signing key blocks before transfer execution", async () => {
@@ -768,4 +774,54 @@ test("EVM login without exported signing key blocks before transfer execution", 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.ok(res.events.some((event) => event.type === "blocked_missing_auth"));
+});
+
+
+test("failed EVM login verification stays on the login-key step and does not ask for the signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    verifyEvmLoginKey: async () => ({ success: false, message: "invalid key" }),
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "evm", deps);
+  res = await advanceTransferFlow(res.session, "done", deps);
+  res = await advanceTransferFlow(res.session, "0xbadlogin", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_login_key");
+  assert.match(res.reply, /didn't work/i);
+  assert.doesNotMatch(res.reply, /UNIGOX EVM signing key/i);
+});
+
+test("successful EVM login verification asks for the separate signing key and then resumes the transfer flow", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { login: [] as string[], signing: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === "0xgoodlogin" }),
+    persistEvmLoginKey: async (loginKey) => {
+      persisted.login.push(loginKey);
+    },
+    persistEvmSigningKey: async (signingKey) => {
+      persisted.signing.push(signingKey);
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "evm", deps);
+  res = await advanceTransferFlow(res.session, "done", deps);
+  res = await advanceTransferFlow(res.session, "0xgoodlogin", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /Login works/i);
+  assert.match(res.reply, /separate UNIGOX EVM signing key/i);
+  assert.deepEqual(persisted.login, ["0xgoodlogin"]);
+
+  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+  assert.match(res.reply, /Which payout method should mom receive in EUR/i);
 });

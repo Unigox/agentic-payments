@@ -90,11 +90,13 @@ This keeps the skill's normal sign-in language centered on the two replayable wa
 
 For EVM, use this exact order:
 
-1. Ask for the **wallet key already used to sign in on UNIGOX**.
-2. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
-3. Call `client.login()` to verify that login works.
-4. Only after login succeeds, ask for the separate **UNIGOX-exported EVM signing key**.
-5. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy `UNIGOX_PRIVATE_KEY` still works).
+1. Ask whether the user has **already signed in on unigox.com with that EVM wallet**.
+2. If not, stop and tell them to sign in on unigox.com with that wallet first.
+3. Only after they confirm the wallet sign-in already happened, ask for the **wallet key they used to sign in on UNIGOX**.
+4. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+5. Call `client.login()` to verify that login works.
+6. Only after login succeeds, ask for the separate **UNIGOX-exported EVM signing key**.
+7. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy `UNIGOX_PRIVATE_KEY` still works).
 
 Important: the current integration does **not** expose a backend/client API to export that second key automatically. The user still has to export it manually from unigox.com settings.
 

@@ -33,6 +33,11 @@ Use this key to:
 - replay the EVM / SIWE login flow on UNIGOX
 - verify that the agent can sign in successfully
 
+Conversation order for EVM:
+1. Ask whether the user has already signed in on unigox.com with that wallet.
+2. If not, stop there and tell them to sign in first.
+3. Only after they confirm that sign-in already happened, ask for this login key and verify it.
+
 ### 2. UNIGOX-exported EVM signing key
 
 ```env

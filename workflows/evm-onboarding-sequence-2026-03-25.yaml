@@ -1,0 +1,37 @@
+run_id: send-money-evm-onboarding-sequence-2026-03-25
+goal: >-
+  Audit the send-money onboarding prompt/state flow and implement the exact EVM
+  conversational ordering: choose auth path, confirm wallet sign-in on unigox.com,
+  verify the login wallet key, then ask for the separate exported signing key.
+constraints:
+  - no_external_actions
+allowed_scope:
+  - audit_summary
+  - sequence_requirements
+  - implementation_plan
+  - test_plan
+workflow:
+  - id: audit_current_flow
+    name: Audit current send-money onboarding state/prompt flow
+    acceptance_criteria:
+      - has_key:audit_summary
+  - id: capture_required_sequence
+    name: Capture the exact required EVM conversation sequence
+    required_predecessors:
+      - audit_current_flow
+    acceptance_criteria:
+      - has_key:sequence_requirements
+  - id: design_state_changes
+    name: Design the minimum state/prompt changes needed
+    required_predecessors:
+      - capture_required_sequence
+    acceptance_criteria:
+      - has_key:implementation_plan
+  - id: define_regression_coverage
+    name: Define regression tests for the exact conversational ordering
+    required_predecessors:
+      - design_state_changes
+    acceptance_criteria:
+      - has_key:test_plan
+max_auto_corrections: 1
+hard_stop_threshold: 2

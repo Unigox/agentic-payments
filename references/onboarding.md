@@ -34,19 +34,21 @@ Wait for the user to answer before proceeding.
 
 Use this exact sequence:
 
-1. Ask for the **wallet key already used to sign in on UNIGOX**.
-2. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
-3. Clear `UNIGOX_AUTH_MODE` if it was set to `ton`.
-4. Call `login()` to verify EVM sign-in works.
-5. If login fails:
+1. First ask whether they have **already signed in on unigox.com with that EVM wallet**.
+2. If not, stop there and tell them to sign in on unigox.com with the wallet first.
+3. Only after they confirm that sign-in already happened, ask for the **wallet key already used to sign in on UNIGOX**.
+4. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+5. Clear `UNIGOX_AUTH_MODE` if it was set to `ton`.
+6. Call `login()` to verify EVM sign-in works.
+7. If login fails:
    - say: "That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again."
    - do **not** ask for the export key yet.
-6. If login succeeds, ask for the **separate UNIGOX-exported EVM signing key** from unigox.com settings.
-7. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY` still works).
-8. Explain that this second key is required for signed actions such as receipt confirmation / escrow release, escrow withdrawals, and bridge-outs.
-9. Proceed to Step 3.
+8. If login succeeds, ask for the **separate UNIGOX-exported EVM signing key** from unigox.com settings.
+9. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY` still works).
+10. Explain that this second key is required for signed actions such as receipt confirmation / escrow release, escrow withdrawals, and bridge-outs.
+11. Proceed to Step 3.
 
-Prompt wording for step 6:
+Prompt wording for the signing-key step:
 
 > Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here. I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release.
 >
@@ -113,7 +115,9 @@ Once they provide the email:
 
 ### If they choose EVM wallet connection directly
 
-> Sign up at unigox.com with your wallet first. After that, give me the private key for the wallet you actually use to sign in on UNIGOX so I can verify login.
+> Have you already signed in on unigox.com with the EVM wallet you want me to reuse? If not, do that first.
+>
+> After you confirm that sign-in is done, give me the private key for the wallet you actually use to sign in on UNIGOX so I can verify login.
 >
 > Once that works, I'll ask for the separate UNIGOX-exported signing key from account settings.
 
