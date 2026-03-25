@@ -3,26 +3,53 @@
 ## Dependencies
 
 - Node.js 22+
-- `ethers` v6 (`npm install ethers`)
+- `ethers` v6
+- `@ton/crypto`, `@ton/ton`, `tweetnacl` for TON auth
 - `unigox-client.ts` module (the UNIGOX SDK)
 
 ## UNIGOX Client Module
 
-The client module lives at the project level (not bundled in the skill).
-
-Location options:
-- `/home/grape/projects/unigox-sdk/src/client.ts` (standalone repo)
-- `/home/grape/projects/agent-scripts/unigox-client.ts` (shared)
-- Or install from the unigox-sdk repo
+The client module lives inside this skill at `scripts/unigox-client.ts`.
 
 ## Authentication
 
-Set `UNIGOX_USER_PRIVATE_KEY` environment variable with an EVM wallet private key that has a UNIGOX account.
+Supported auth modes:
 
-The client handles:
-- Wallet-based login (SIWE message signing)
-- Auto token refresh with exponential backoff (5 retries)
-- Token expiry detection on all API calls
+### 1. EVM private key
+
+```env
+UNIGOX_PRIVATE_KEY=0x...
+```
+
+Use this when the agent needs both:
+- normal UNIGOX login
+- EVM-signed actions (`withdrawFromEscrow()`, `bridgeOut()`)
+
+### 2. TON wallet auth
+
+```env
+UNIGOX_AUTH_MODE=ton
+UNIGOX_TON_MNEMONIC="word1 word2 ... word24"
+UNIGOX_TON_ADDRESS=0:...   # optional override if derived V4 address differs
+UNIGOX_TON_NETWORK=-239    # optional, defaults to mainnet
+```
+
+This mode uses the frontend TON routes:
+- `POST /api/ton-generate-payload`
+- `POST /api/ton-login`
+- `POST /api/ton-link`
+
+TON auth is only for JWT acquisition and optional wallet linking. After the JWT is obtained, the rest of the client keeps using the same account/trade APIs as before.
+
+### 3. Email OTP onboarding
+
+```env
+UNIGOX_EMAIL=agent@example.com
+```
+
+Use this for onboarding or recovery. After email login, the agent can:
+- generate and link a local EVM wallet, or
+- link a TON wallet for future JWT login
 
 ## Supported APIs
 

@@ -6,7 +6,7 @@
  * Designed to be imported by automation scripts, AI agent skills, and bots.
  * 
  * Features:
- *   - Wallet-based login with auto-refresh + retry
+ *   - EVM, TON, or email-assisted auth (with auto-refresh where replayable)
  *   - Payment details CRUD (create, read, update, delete)
  *   - Trade request creation + polling
  *   - Wallet balance (USDC, USDT on XAI chain)
@@ -22,6 +22,10 @@
  *   const details = await client.listPaymentDetails();
  */
 
+import crypto from "node:crypto";
+import { mnemonicToWalletKey } from "@ton/crypto";
+import { Address, WalletContractV4 } from "@ton/ton";
+import nacl from "tweetnacl";
 import { Wallet, ethers } from "ethers";
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -80,10 +84,17 @@ const FORWARD_REQUEST_TYPES = {
 
 // ── Types ───────────────────────────────────────────────────────────
 
+export type AuthMode = "auto" | "evm" | "ton" | "email";
+type ResolvedAuthMode = Exclude<AuthMode, "auto">;
+
 export interface UnigoxClientConfig {
+  authMode?: AuthMode;
   privateKey?: string;
   email?: string;
   frontendUrl?: string;
+  tonMnemonic?: string | string[];
+  tonAddress?: string;
+  tonNetwork?: string;
 }
 
 export interface PaymentDetail {
@@ -162,8 +173,34 @@ export interface BridgeQuote {
 export interface UserProfile {
   user_id: number;
   evm_address: string;
+  linked_wallet_address?: string;
+  linked_ton_address?: string;
   automated_escrow_address?: string;
   username?: string;
+}
+
+interface TonPayloadTokenPair {
+  payloadToken: string;
+  payloadTokenHash: string;
+}
+
+interface TonProofPayload {
+  timestamp: number;
+  domain: {
+    lengthBytes: number;
+    value: string;
+  };
+  signature: string;
+  payload: string;
+  stateInit?: string;
+}
+
+interface TonWalletAccount {
+  address: string;
+  network: string;
+  publicKey: string;
+  secretKey: Uint8Array;
+  derivedAddress: string;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -190,22 +227,192 @@ export class UnigoxClient {
   private wallet: Wallet | null;
   private email: string | null;
   private frontendUrl: string;
+  private authMode: AuthMode;
+  private tonMnemonicWords: string[] | null;
+  private tonAddressOverride: string | null;
+  private tonNetwork: string;
+  private tonWalletAccount: TonWalletAccount | null = null;
   private token: string | null = null;
   private tokenExpiresAt: number = 0;
   private userProfile: UserProfile | null = null;
 
   constructor(config: UnigoxClientConfig) {
-    if (!config.privateKey && !config.email) {
-      throw new Error("Either privateKey or email is required");
+    if (!config.privateKey && !config.email && !config.tonMnemonic) {
+      throw new Error("At least one auth method is required: privateKey, email, or tonMnemonic");
     }
+
     this.wallet = config.privateKey ? new Wallet(config.privateKey) : null;
     this.email = config.email || null;
     this.frontendUrl = config.frontendUrl || DEFAULT_FRONTEND_URL;
+    this.authMode = config.authMode || "auto";
+    this.tonMnemonicWords = this.parseTonMnemonic(config.tonMnemonic);
+    this.tonAddressOverride = config.tonAddress ? this.normalizeTonAddress(config.tonAddress) : null;
+    this.tonNetwork = config.tonNetwork || "-239";
   }
 
   get address(): string {
-    if (!this.wallet) throw new Error("No wallet configured. Complete email signup first.");
-    return this.wallet.address;
+    if (this.wallet) return this.wallet.address;
+    if (this.userProfile?.evm_address) return this.userProfile.evm_address;
+    throw new Error("No EVM wallet configured locally. Log in first and read the account profile instead.");
+  }
+
+  private parseTonMnemonic(mnemonic?: string | string[]): string[] | null {
+    if (!mnemonic) return null;
+    const words = Array.isArray(mnemonic) ? mnemonic : mnemonic.trim().split(/\s+/);
+    return words.filter(Boolean).length ? words.filter(Boolean) : null;
+  }
+
+  private normalizeTonAddress(address: string): string {
+    return Address.parse(address).toRawString().toLowerCase();
+  }
+
+  private requireWallet(): Wallet {
+    if (!this.wallet) {
+      throw new Error("This operation requires a local EVM private key. TON auth only covers JWT acquisition.");
+    }
+    return this.wallet;
+  }
+
+  private async getAccountEvmAddress(): Promise<string> {
+    if (this.wallet) return this.wallet.address;
+
+    const profile = await this.ensureProfile();
+    if (!profile.evm_address) {
+      throw new Error("No EVM address found on the UNIGOX account profile.");
+    }
+
+    return profile.evm_address;
+  }
+
+  private resolveLoginMode(): ResolvedAuthMode {
+    if (this.authMode === "evm") {
+      if (!this.wallet) throw new Error("authMode=evm requires privateKey");
+      return "evm";
+    }
+
+    if (this.authMode === "ton") {
+      if (!this.tonMnemonicWords) throw new Error("authMode=ton requires tonMnemonic");
+      return "ton";
+    }
+
+    if (this.authMode === "email") {
+      if (!this.email) throw new Error("authMode=email requires email");
+      return "email";
+    }
+
+    if (this.wallet) return "evm";
+    if (this.tonMnemonicWords) return "ton";
+    if (this.email) return "email";
+
+    throw new Error("Unable to resolve UNIGOX auth mode");
+  }
+
+  private async ensureTonWalletAccount(): Promise<TonWalletAccount> {
+    if (this.tonWalletAccount) return this.tonWalletAccount;
+    if (!this.tonMnemonicWords) throw new Error("TON auth requires tonMnemonic");
+
+    const keyPair = await mnemonicToWalletKey(this.tonMnemonicWords);
+    const workchain = this.tonAddressOverride ? Address.parse(this.tonAddressOverride).workChain : 0;
+    const derivedAddress = WalletContractV4.create({ workchain, publicKey: keyPair.publicKey }).address.toRawString().toLowerCase();
+    const address = this.tonAddressOverride || derivedAddress;
+
+    if (this.tonAddressOverride && this.tonAddressOverride !== derivedAddress) {
+      console.warn(`[UNIGOX] Using TON address override ${this.tonAddressOverride} (derived V4 address: ${derivedAddress})`);
+    }
+
+    this.tonWalletAccount = {
+      address,
+      network: this.tonNetwork,
+      publicKey: Buffer.from(keyPair.publicKey).toString("hex"),
+      secretKey: keyPair.secretKey,
+      derivedAddress,
+    };
+
+    return this.tonWalletAccount;
+  }
+
+  private async generateTonPayloadTokenPair(): Promise<TonPayloadTokenPair> {
+    const res = await jsonFetch(`${this.frontendUrl}/api/ton-generate-payload`, { method: "POST" });
+    if (!res?.payloadToken || !res?.payloadTokenHash) {
+      throw new Error(`Failed to generate TON payload: ${JSON.stringify(res)}`);
+    }
+    return res as TonPayloadTokenPair;
+  }
+
+  private buildTonProofMessage(address: Address, proof: Pick<TonProofPayload, "timestamp" | "domain" | "payload">): Buffer {
+    const domainBuf = Buffer.from(proof.domain.value, "utf8");
+    const domainLen = Buffer.allocUnsafe(4);
+    domainLen.writeUInt32LE(domainBuf.length);
+
+    const workchain = Buffer.allocUnsafe(4);
+    workchain.writeInt32BE(address.workChain);
+
+    const timestamp = Buffer.allocUnsafe(8);
+    timestamp.writeBigUInt64LE(BigInt(proof.timestamp));
+
+    return Buffer.concat([
+      Buffer.from("ton-proof-item-v2/", "utf8"),
+      workchain,
+      Buffer.from(address.hash),
+      domainLen,
+      domainBuf,
+      timestamp,
+      Buffer.from(proof.payload, "utf8"),
+    ]);
+  }
+
+  private buildTonProof(address: string, payloadTokenHash: string, secretKey: Uint8Array): TonProofPayload {
+    const domain = new URL(this.frontendUrl).host;
+    const proofBase = {
+      timestamp: Math.floor(Date.now() / 1000),
+      domain: {
+        lengthBytes: Buffer.byteLength(domain, "utf8"),
+        value: domain,
+      },
+      payload: payloadTokenHash,
+    };
+
+    const addressObj = Address.parse(address);
+    const message = this.buildTonProofMessage(addressObj, proofBase);
+    const messageHash = crypto.createHash("sha256").update(message).digest();
+    const fullMessage = Buffer.concat([Buffer.from([0xff, 0xff]), Buffer.from("ton-connect", "utf8"), messageHash]);
+    const result = crypto.createHash("sha256").update(fullMessage).digest();
+    const signature = Buffer.from(nacl.sign.detached(result, secretKey)).toString("base64");
+
+    return {
+      ...proofBase,
+      signature,
+    };
+  }
+
+  private async finalizeAccountLogin(
+    token: string,
+    options: { walletAddress?: string; linkedTonAddress?: string } = {},
+  ): Promise<string> {
+    this.token = token;
+    this.tokenExpiresAt = Date.now() + 50 * 60 * 1000;
+    this.userProfile = null;
+
+    await jsonFetch(`${APIS.account}/account/login`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        ...(options.walletAddress && { wallet_address: options.walletAddress }),
+      }),
+    });
+
+    if (options.linkedTonAddress) {
+      await this.updateLinkedTonAddress(options.linkedTonAddress, token);
+    }
+
+    return token;
+  }
+
+  private requireFreshToken(context = "This action"): string {
+    if (!this.token || Date.now() >= this.tokenExpiresAt) {
+      throw new Error(`${context} requires an active authenticated session. Re-authenticate first.`);
+    }
+    return this.token;
   }
 
   // ── Email Auth ──────────────────────────────────────────────
@@ -235,18 +442,9 @@ export class UnigoxClient {
     if (!res.id_token) {
       throw new Error(`Email verification failed: ${JSON.stringify(res)}`);
     }
-    this.token = res.id_token as string;
-    this.tokenExpiresAt = Date.now() + 50 * 60 * 1000;
-
-    // Register with account service
-    await jsonFetch(`${APIS.account}/account/login`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.token}` },
-      body: JSON.stringify({}),
-    });
 
     console.log("[UNIGOX] Email login successful");
-    return this.token;
+    return this.finalizeAccountLogin(res.id_token as string);
   }
 
   /**
@@ -279,39 +477,110 @@ export class UnigoxClient {
     }
 
     this.wallet = newWallet;
+    this.userProfile = null;
     console.log(`[UNIGOX] Wallet linked: ${newWallet.address}`);
     return { address: newWallet.address, privateKey: newWallet.privateKey };
   }
 
+  async updateLinkedTonAddress(tonAddress: string, token = this.token): Promise<void> {
+    if (!token) throw new Error("Not logged in. Authenticate first.");
+
+    const normalizedTonAddress = this.normalizeTonAddress(tonAddress);
+    await jsonFetch(`${APIS.account}/account/me`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ linked_ton_address: normalizedTonAddress }),
+    });
+
+    if (this.userProfile) {
+      this.userProfile.linked_ton_address = normalizedTonAddress;
+    }
+  }
+
+  async linkTonWallet(): Promise<{ address: string; merged: boolean; message: string }> {
+    const primaryToken = this.requireFreshToken("TON wallet linking");
+    const tonWallet = await this.ensureTonWalletAccount();
+    const { payloadToken, payloadTokenHash } = await this.generateTonPayloadTokenPair();
+    const proof = this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey);
+
+    const res = await jsonFetch(`${this.frontendUrl}/api/ton-link`, {
+      method: "POST",
+      body: JSON.stringify({
+        address: tonWallet.address,
+        network: tonWallet.network,
+        public_key: tonWallet.publicKey,
+        proof,
+        payloadToken,
+        primary_token: primaryToken,
+      }),
+    });
+
+    if (!res?.success) {
+      throw new Error(`TON wallet linking failed: ${JSON.stringify(res)}`);
+    }
+
+    await this.updateLinkedTonAddress(tonWallet.address, primaryToken);
+    this.userProfile = null;
+
+    return {
+      address: tonWallet.address,
+      merged: !!res.merged,
+      message: res.message || "TON wallet linked to your account",
+    };
+  }
+
   // ── Auth ────────────────────────────────────────────────────────
 
-  private async loginOnce(): Promise<string> {
-    if (!this.wallet) throw new Error("No wallet configured. Use email login flow instead.");
+  private async loginOnceWithEvm(): Promise<string> {
+    const wallet = this.requireWallet();
     const domain = new URL(this.frontendUrl).host;
     const nonce = Math.random().toString(36).substring(7);
     const issuedAt = new Date().toISOString();
-    const message = `${domain} wants you to sign in with your Ethereum account:\n${this.address}\n\nSign in to Unigox\n\nURI: https://${domain}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
-    const signature = await this.wallet.signMessage(message);
+    const message = `${domain} wants you to sign in with your Ethereum account:\n${wallet.address}\n\nSign in to Unigox\n\nURI: https://${domain}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
+    const signature = await wallet.signMessage(message);
 
     const loginRes = await jsonFetch(`${this.frontendUrl}/api/web3-login`, {
       method: "POST",
-      body: JSON.stringify({ walletAddress: this.address, signature, message }),
+      body: JSON.stringify({ walletAddress: wallet.address, signature, message }),
     });
 
     if (!loginRes.id_token) {
       throw new Error(`Login failed: ${JSON.stringify(loginRes)}`);
     }
 
-    const token = loginRes.id_token as string;
+    return this.finalizeAccountLogin(loginRes.id_token as string, { walletAddress: wallet.address });
+  }
 
-    // Register with account service
-    await jsonFetch(`${APIS.account}/account/login`, {
+  private async loginOnceWithTon(): Promise<string> {
+    const tonWallet = await this.ensureTonWalletAccount();
+    const { payloadToken, payloadTokenHash } = await this.generateTonPayloadTokenPair();
+    const proof = this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey);
+
+    const loginRes = await jsonFetch(`${this.frontendUrl}/api/ton-login`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ wallet_address: this.address }),
+      body: JSON.stringify({
+        address: tonWallet.address,
+        network: tonWallet.network,
+        public_key: tonWallet.publicKey,
+        proof,
+        payloadToken,
+      }),
     });
 
-    return token;
+    if (!loginRes.id_token) {
+      throw new Error(`TON login failed: ${JSON.stringify(loginRes)}`);
+    }
+
+    return this.finalizeAccountLogin(loginRes.id_token as string, { linkedTonAddress: tonWallet.address });
+  }
+
+  private async loginOnce(): Promise<string> {
+    const mode = this.resolveLoginMode();
+
+    if (mode === "evm") return this.loginOnceWithEvm();
+    if (mode === "ton") return this.loginOnceWithTon();
+
+    throw new Error("Email auth requires OTP verification. Call requestEmailOTP() and verifyEmailOTP(code) first.");
   }
 
   async login(): Promise<string> {
@@ -323,7 +592,6 @@ export class UnigoxClient {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         this.token = await this.loginOnce();
-        this.tokenExpiresAt = Date.now() + 50 * 60 * 1000; // 50 min
         if (attempt > 1) console.log(`[UNIGOX] Login succeeded on attempt ${attempt}`);
         return this.token;
       } catch (err: any) {
@@ -333,6 +601,7 @@ export class UnigoxClient {
         await sleep(delay);
       }
     }
+
     throw new Error("Login failed: exhausted retries");
   }
 
@@ -412,6 +681,8 @@ export class UnigoxClient {
     this.userProfile = {
       user_id: user.id,
       evm_address: user.evm_address,
+      linked_wallet_address: user.linked_wallet_address,
+      linked_ton_address: user.linked_ton_address,
       automated_escrow_address: user.automated_escrow_address,
       username: user.username,
     };
@@ -567,14 +838,15 @@ export class UnigoxClient {
   // ── Wallet Balances (on-chain, XAI) ─────────────────────────────
 
   async getWalletBalance(): Promise<WalletBalance> {
+    const evmAddress = await this.getAccountEvmAddress();
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
 
     const usdcContract = new ethers.Contract(TOKENS.USDC.address, ["function balanceOf(address) view returns (uint256)"], provider);
     const usdtContract = new ethers.Contract(TOKENS.USDT.address, ["function balanceOf(address) view returns (uint256)"], provider);
 
     const [usdcRaw, usdtRaw] = await Promise.all([
-      usdcContract.balanceOf(this.address),
-      usdtContract.balanceOf(this.address),
+      usdcContract.balanceOf(evmAddress),
+      usdtContract.balanceOf(evmAddress),
     ]);
 
     const usdc = Number(ethers.formatUnits(usdcRaw, TOKENS.USDC.decimals));
@@ -612,6 +884,7 @@ export class UnigoxClient {
   // ── Escrow Withdraw (to wallet) ─────────────────────────────────
 
   async withdrawFromEscrow(tokenCode: "USDC" | "USDT", amount: string): Promise<{ txId: number; txHash: string }> {
+    const wallet = this.requireWallet();
     const profile = await this.ensureProfile();
     if (!profile.automated_escrow_address) throw new Error("No escrow address");
 
@@ -625,12 +898,12 @@ export class UnigoxClient {
     // Get nonce
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
     const forwarder = new ethers.Contract(FORWARDER_ADDRESS, ["function nonces(address) view returns (uint256)"], provider);
-    const nonce = await forwarder.nonces(this.address);
+    const nonce = await forwarder.nonces(wallet.address);
 
     const deadline = Math.floor(Date.now() / 1000) + 3600;
 
     const forwardRequest = {
-      from: this.address,
+      from: wallet.address,
       to: profile.automated_escrow_address,
       value: "0",
       gas: "500000",
@@ -640,7 +913,7 @@ export class UnigoxClient {
     };
 
     // Sign EIP-712
-    const signature = await this.wallet.signTypedData(
+    const signature = await wallet.signTypedData(
       FORWARDER_DOMAIN,
       FORWARD_REQUEST_TYPES,
       forwardRequest,
@@ -691,8 +964,7 @@ export class UnigoxClient {
   // ── Deposit Addresses ───────────────────────────────────────────
 
   async getDepositAddresses(): Promise<DepositAddresses> {
-    const profile = await this.ensureProfile();
-    const evmAddr = profile.evm_address || this.address;
+    const evmAddr = await this.getAccountEvmAddress();
     const res = await jsonFetch(`${APIS.quote}/deposit-addresses/${evmAddr}`);
     const data = unwrap<any>(res);
     if (data?.evmAddress) return data as DepositAddresses;
@@ -719,13 +991,14 @@ export class UnigoxClient {
     recipientAddress?: string;
     slippage?: number;
   }): Promise<BridgeQuote> {
+    const userAddress = await this.getAccountEvmAddress();
     const searchParams = new URLSearchParams({
       fromChain: params.fromChainId.toString(),
       toChain: params.toChainId.toString(),
       fromToken: params.fromTokenAddress,
       toToken: params.toTokenAddress,
       amount: params.amount,
-      userAddress: this.address,
+      userAddress,
       slippage: (params.slippage || 0.005).toString(),
       ...(params.recipientAddress && { recipientAddress: params.recipientAddress }),
     });
@@ -743,6 +1016,7 @@ export class UnigoxClient {
     amount: string;
     recipientAddress?: string;
   }): Promise<{ quoteId: string; txId: number; txHash: string }> {
+    const wallet = this.requireWallet();
     const token = TOKENS[params.tokenCode];
     const amountWei = ethers.parseUnits(params.amount, token.decimals).toString();
 
@@ -753,7 +1027,7 @@ export class UnigoxClient {
       fromTokenAddress: token.address,
       toTokenAddress: params.toTokenAddress,
       amount: amountWei,
-      recipientAddress: params.recipientAddress || this.address,
+      recipientAddress: params.recipientAddress || wallet.address,
     });
 
     if (!quote.snapshot.isLiquiditySufficient) {
@@ -763,13 +1037,13 @@ export class UnigoxClient {
     // 2. Execute the bridge tx via transactor (the quote txData contains the bridge calldata)
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
     const forwarder = new ethers.Contract(FORWARDER_ADDRESS, ["function nonces(address) view returns (uint256)"], provider);
-    const nonce = await forwarder.nonces(this.address);
+    const nonce = await forwarder.nonces(wallet.address);
     const deadline = Math.floor(Date.now() / 1000) + 3600;
 
     // The quote parameters contain the target contract and calldata
     const forwardRequest = {
-      from: this.address,
-      to: quote.parameters.txData ? this.address : this.address, // bridge txs go through solver
+      from: wallet.address,
+      to: wallet.address, // bridge txs go through the solver/forwarder path
       value: quote.parameters.txData?.value || "0",
       gas: "500000",
       nonce: nonce.toString(),
@@ -777,7 +1051,7 @@ export class UnigoxClient {
       data: quote.parameters.txData?.data || "0x",
     };
 
-    const signature = await this.wallet.signTypedData(
+    const signature = await wallet.signTypedData(
       FORWARDER_DOMAIN,
       FORWARD_REQUEST_TYPES,
       forwardRequest,

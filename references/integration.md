@@ -1,42 +1,74 @@
 # Integration — Code Patterns
 
-## Loading the Private Key
+## Loading Auth Config
 
 ```typescript
 import fs from "fs";
 import path from "path";
+import type { UnigoxClientConfig } from "./unigox-client";
 
-function loadPrivateKey(): string {
-  // 1. Environment variable
-  if (process.env.UNIGOX_PRIVATE_KEY) return process.env.UNIGOX_PRIVATE_KEY;
-  
-  // 2. Skill directory .env
-  const skillEnv = path.join(__dirname, ".env");
-  if (fs.existsSync(skillEnv)) {
-    const line = fs.readFileSync(skillEnv, "utf-8")
-      .split("\n").find(l => l.startsWith("UNIGOX_PRIVATE_KEY="));
-    if (line) return line.split("=")[1].trim();
+function loadEnvValue(key: string): string | undefined {
+  if (process.env[key]) return process.env[key];
+
+  const candidates = [
+    path.join(__dirname, ".env"),
+    path.join(process.env.HOME || "", ".openclaw", ".env"),
+  ];
+
+  for (const envPath of candidates) {
+    if (!fs.existsSync(envPath)) continue;
+    const line = fs.readFileSync(envPath, "utf-8")
+      .split("\n")
+      .find((l) => l.startsWith(`${key}=`));
+    if (line) return line.slice(key.length + 1).trim();
   }
-  
-  // 3. OpenClaw .env
-  const ocEnv = path.join(process.env.HOME || "", ".openclaw", ".env");
-  if (fs.existsSync(ocEnv)) {
-    const line = fs.readFileSync(ocEnv, "utf-8")
-      .split("\n").find(l => l.startsWith("UNIGOX_PRIVATE_KEY="));
-    if (line) return line.split("=")[1].trim();
+}
+
+function loadUnigoxConfig(): UnigoxClientConfig {
+  const privateKey = loadEnvValue("UNIGOX_PRIVATE_KEY");
+  const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
+
+  if (privateKey) {
+    return { privateKey, authMode: "evm" };
   }
-  
-  throw new Error("UNIGOX_PRIVATE_KEY not found. Run onboarding first.");
+
+  if (tonMnemonic) {
+    return {
+      authMode: loadEnvValue("UNIGOX_AUTH_MODE") === "ton" ? "ton" : "auto",
+      tonMnemonic,
+      tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
+      tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
+      email: loadEnvValue("UNIGOX_EMAIL"),
+    };
+  }
+
+  const email = loadEnvValue("UNIGOX_EMAIL");
+  if (email) return { email, authMode: "email" };
+
+  throw new Error("UNIGOX auth config not found. Run onboarding first.");
 }
 ```
 
 ## Creating the Client
 
 ```typescript
-import UnigoxClient from "unigox-client"; // or from the SDK repo
+import UnigoxClient from "./unigox-client";
 
-const client = new UnigoxClient({ privateKey: loadPrivateKey() });
+const client = new UnigoxClient(loadUnigoxConfig());
 await client.login();
+```
+
+## Email → TON linking
+
+```typescript
+const client = new UnigoxClient({
+  email: process.env.UNIGOX_EMAIL,
+  tonMnemonic: process.env.UNIGOX_TON_MNEMONIC,
+  tonAddress: process.env.UNIGOX_TON_ADDRESS,
+});
+
+await client.verifyEmailOTP(code);
+await client.linkTonWallet();
 ```
 
 ## Send Money Flow
@@ -50,18 +82,18 @@ if (balance.totalUsd < amount * 1.05) {
 
 // 2. Ensure payment detail on UNIGOX
 const pd = await client.ensurePaymentDetail({
-  paymentMethodId: contact.methodId,    // e.g. 2 for Revolut
-  paymentNetworkId: contact.networkId,  // e.g. 47 for Revolut Username
+  paymentMethodId: contact.methodId,
+  paymentNetworkId: contact.networkId,
   fiatCurrencyCode: "EUR",
-  details: contact.details,             // e.g. { revtag: "@mom" }
+  details: contact.details,
 });
 
 // 3. Create trade request
 const tr = await client.createTradeRequest({
-  tradeType: "SELL",           // sell crypto to get fiat out
+  tradeType: "SELL",
   fiatCurrencyCode: "EUR",
   fiatAmount: amount,
-  cryptoAmount: amount,        // ~1:1 for stablecoins
+  cryptoAmount: amount,
   paymentDetailsId: pd.id,
   paymentMethodId: contact.methodId,
   paymentNetworkId: contact.networkId,
@@ -71,18 +103,11 @@ const tr = await client.createTradeRequest({
 console.log(`Trade request #${tr.id} created`);
 ```
 
-## Generating a New Wallet
+## Important limitation
 
-```typescript
-import { ethers } from "ethers";
-
-const wallet = ethers.Wallet.createRandom();
-console.log("Address:", wallet.address);
-console.log("Private Key:", wallet.privateKey);
-
-// Save to .env
-fs.appendFileSync(".env", `\nUNIGOX_PRIVATE_KEY=${wallet.privateKey}\n`);
-```
+TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require `UNIGOX_PRIVATE_KEY`:
+- `withdrawFromEscrow()`
+- `bridgeOut()`
 
 ## Token Addresses (XAI Chain)
 
@@ -95,8 +120,10 @@ fs.appendFileSync(".env", `\nUNIGOX_PRIVATE_KEY=${wallet.privateKey}\n`);
 
 | Method | Description |
 |--------|-------------|
-| `login()` | Auth with retry (5 attempts, exponential backoff) |
-| `getProfile()` | User ID, username, escrow address |
+| `login()` | Auth with retry (EVM or TON, depending on config) |
+| `verifyEmailOTP(code)` | Finish email OTP login |
+| `linkTonWallet()` | Link TON wallet to the current authenticated account |
+| `getProfile()` | User ID, username, linked addresses, escrow address |
 | `getWalletBalance()` | USDC + USDT on XAI chain |
 | `getEscrowBalance(token)` | Escrow balance (available, reserved) |
 | `getDepositAddresses()` | EVM, Solana, Tron, TON addresses |
@@ -110,5 +137,5 @@ fs.appendFileSync(".env", `\nUNIGOX_PRIVATE_KEY=${wallet.privateKey}\n`);
 | `getTrade(id)` | Get trade status |
 | `getBridgeTokens()` | Supported chains + tokens |
 | `getBridgeQuote(params)` | Get bridge quote |
-| `bridgeOut(params)` | Withdraw to external chain |
-| `withdrawFromEscrow(token, amount)` | Escrow → wallet |
+| `bridgeOut(params)` | Withdraw to external chain (requires EVM key) |
+| `withdrawFromEscrow(token, amount)` | Escrow → wallet (requires EVM key) |

@@ -31,7 +31,7 @@ More coming soon.
 ## How It Works
 
 ### 1. Sign up on UNIGOX
-Create an account at [unigox.com](https://www.unigox.com) using a **web3 wallet or your agent's email**, not your personal email. This account belongs to the agent.
+Create an account at [unigox.com](https://www.unigox.com) using an **EVM wallet, TON wallet, or your agent's email**, not your personal email. This account belongs to the agent.
 
 Don't have a web3 wallet? Create one for free using [MetaMask](https://metamask.io/) or [Phantom](https://phantom.app/).
 
@@ -40,19 +40,24 @@ You can customize your username in the settings.
 ### 2. Request access
 Send an email to **hello@unigox.com** requesting access to Agentic Payments. Include your UNIGOX username so we can enable your account.
 
-### 3. Export the wallet
-Inside UNIGOX, export your agent's wallet private key. This key is what the skill uses to authenticate and execute payments.
+### 3. Configure authentication
+You now have three viable auth paths:
+
+- **EVM private key** — best all-around option. Lets the skill authenticate and also sign EVM helper actions like escrow withdrawals and bridge-outs.
+- **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
+- **Agent email** — useful for onboarding and recovery. You can later link either an EVM wallet or a TON wallet.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
-- Secure your private key. If someone gains access to it, they can withdraw funds.
+- Secure your private key or TON mnemonic. If someone gains access to it, they can authenticate as the agent.
+- TON auth only covers login / JWT acquisition. Advanced EVM-signed actions still require an EVM private key.
 - We are building more secure key management options for agents. For now, standard precautions apply.
 
 ### 4. Install the skill
 Add Agentic Payments to your OpenClaw agent.
 
 ### 5. Initialize the agent
-On first run, the skill walks you through setup: linking your wallet, configuring payment methods, and adding your first contacts. More details in the setup guide.
+On first run, the skill walks you through setup: choosing an auth path (EVM, TON, or email), optionally linking wallets, configuring payment methods, and adding your first contacts. More details in the setup guide.
 
 ### 6. Fund your wallet
 Two options:
