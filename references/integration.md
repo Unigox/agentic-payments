@@ -26,11 +26,18 @@ function loadEnvValue(key: string): string | undefined {
 }
 
 function loadUnigoxConfig(): UnigoxClientConfig {
-  const privateKey = loadEnvValue("UNIGOX_PRIVATE_KEY");
+  const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
+  const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
+  const email = loadEnvValue("UNIGOX_EMAIL");
 
-  if (privateKey) {
-    return { privateKey, authMode: "evm" };
+  if (evmLoginPrivateKey) {
+    return {
+      authMode: "evm",
+      evmLoginPrivateKey,
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
+      ...(email && { email }),
+    };
   }
 
   if (tonMnemonic) {
@@ -39,12 +46,22 @@ function loadUnigoxConfig(): UnigoxClientConfig {
       tonMnemonic,
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
-      email: loadEnvValue("UNIGOX_EMAIL"),
+      ...(email && { email }),
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
     };
   }
 
-  const email = loadEnvValue("UNIGOX_EMAIL");
-  if (email) return { email, authMode: "email" };
+  if (email) {
+    return {
+      email,
+      authMode: "email",
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
+    };
+  }
+
+  if (evmSigningPrivateKey) {
+    return { privateKey: evmSigningPrivateKey, authMode: "evm" };
+  }
 
   throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
 }
@@ -68,6 +85,18 @@ Use this exact user-facing prompt before asking for credentials:
 > If neither is ready yet, we can still use **email OTP** for onboarding or recovery first.
 
 This keeps the skill's normal sign-in language centered on the two replayable wallet paths, while preserving email as the fallback.
+
+## EVM onboarding prompt sequence
+
+For EVM, use this exact order:
+
+1. Ask for the **wallet key already used to sign in on UNIGOX**.
+2. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+3. Call `client.login()` to verify that login works.
+4. Only after login succeeds, ask for the separate **UNIGOX-exported EVM signing key**.
+5. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy `UNIGOX_PRIVATE_KEY` still works).
+
+Important: the current integration does **not** expose a backend/client API to export that second key automatically. The user still has to export it manually from unigox.com settings.
 
 ## Email → TON linking
 
@@ -194,10 +223,14 @@ if (trade?.id) {
 
 ## Important limitations
 
-TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require `UNIGOX_PRIVATE_KEY`:
+TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`):
 - `withdrawFromEscrow()`
 - `bridgeOut()`
 - `confirmFiatReceived()`
+
+Likewise, EVM login and EVM signing are now modeled separately:
+- `UNIGOX_EVM_LOGIN_PRIVATE_KEY` -> wallet login / SIWE replay (`linked_wallet_address`)
+- `UNIGOX_EVM_SIGNING_PRIVATE_KEY` -> internal UNIGOX / Privy wallet signing (`evm_address`)
 
 Dispute handling is intentionally deferred in this phase of the skill.
 If the user says anything other than explicit `received` / `not received`, or if the trade moves into an unsupported post-match status such as dispute-related states, the orchestrator keeps escrow untouched and routes to a safe deferred/manual follow-up placeholder instead of inventing a dispute workflow.

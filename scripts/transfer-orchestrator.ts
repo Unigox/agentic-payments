@@ -56,6 +56,7 @@ export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
   | "resolving"
   | "awaiting_auth_choice"
+  | "awaiting_evm_signing_key"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
   | "awaiting_currency"
@@ -165,6 +166,7 @@ export interface AuthState {
   hasReplayableAuth: boolean;
   authMode?: "evm" | "ton" | "email";
   emailFallbackAvailable: boolean;
+  evmSigningKeyAvailable?: boolean;
 }
 
 export interface SelectedPaymentMethod {
@@ -208,6 +210,7 @@ export interface TransferSession {
     available: boolean;
     mode?: "evm" | "ton" | "email";
     choice?: AuthChoice;
+    evmSigningKeyAvailable?: boolean;
   };
   execution: {
     confirmed: boolean;
@@ -418,9 +421,9 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/^(cancel|stop|nevermind|never mind)$/i.test(value)) {
     hints.cancel = true;
   }
-  if (/^(evm|evm wallet|wallet connection evm)$/i.test(value)) {
+  if (/^(evm|evm wallet|evm wallet connection|wallet connection evm)$/i.test(value)) {
     hints.authChoice = "evm";
-  } else if (/^(ton|ton wallet|wallet connection ton)$/i.test(value)) {
+  } else if (/^(ton|ton wallet|ton wallet connection|wallet connection ton)$/i.test(value)) {
     hints.authChoice = "ton";
   } else if (/^(email|otp|email otp)$/i.test(value)) {
     hints.authChoice = "email";
@@ -497,39 +500,79 @@ function loadEnvValue(key: string): string | undefined {
 }
 
 export function detectAuthState(): AuthState {
-  const privateKey = loadEnvValue("UNIGOX_PRIVATE_KEY");
+  const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
+  const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
   const email = loadEnvValue("UNIGOX_EMAIL");
 
-  if (privateKey) {
-    return { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: !!email };
+  if (evmLoginPrivateKey) {
+    return {
+      hasReplayableAuth: true,
+      authMode: "evm",
+      emailFallbackAvailable: !!email,
+      evmSigningKeyAvailable: !!evmSigningPrivateKey,
+    };
   }
   if (tonMnemonic) {
-    return { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: !!email };
+    return {
+      hasReplayableAuth: true,
+      authMode: "ton",
+      emailFallbackAvailable: !!email,
+      evmSigningKeyAvailable: !!evmSigningPrivateKey,
+    };
   }
-  return { hasReplayableAuth: false, authMode: email ? "email" : undefined, emailFallbackAvailable: !!email };
+  if (evmSigningPrivateKey) {
+    return {
+      hasReplayableAuth: true,
+      authMode: "evm",
+      emailFallbackAvailable: !!email,
+      evmSigningKeyAvailable: true,
+    };
+  }
+  return {
+    hasReplayableAuth: false,
+    authMode: email ? "email" : undefined,
+    emailFallbackAvailable: !!email,
+    evmSigningKeyAvailable: false,
+  };
 }
 
 export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
-  const privateKey = loadEnvValue("UNIGOX_PRIVATE_KEY");
-  if (privateKey) {
-    return { privateKey, authMode: "evm" };
+  const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
+  const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
+  const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
+  const email = loadEnvValue("UNIGOX_EMAIL");
+
+  if (evmLoginPrivateKey) {
+    return {
+      authMode: "evm",
+      evmLoginPrivateKey,
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
+      ...(email && { email }),
+    };
   }
 
-  const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
   if (tonMnemonic) {
     return {
       authMode: loadEnvValue("UNIGOX_AUTH_MODE") === "ton" ? "ton" : "auto",
       tonMnemonic,
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
-      email: loadEnvValue("UNIGOX_EMAIL"),
+      ...(email && { email }),
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
     };
   }
 
-  const email = loadEnvValue("UNIGOX_EMAIL");
   if (email) {
-    return { email, authMode: "email" };
+    return {
+      email,
+      authMode: "email",
+      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
+    };
+  }
+
+  if (evmSigningPrivateKey) {
+    return { privateKey: evmSigningPrivateKey, authMode: "evm" };
   }
 
   throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
@@ -1281,6 +1324,7 @@ export async function advanceTransferFlow(
       available: auth.hasReplayableAuth,
       mode: auth.authMode,
       choice: session.auth.choice,
+      evmSigningKeyAvailable: auth.evmSigningKeyAvailable,
     };
   }
 
@@ -1290,7 +1334,7 @@ export async function advanceTransferFlow(
     if (hints.authChoice) {
       session.auth.choice = hints.authChoice;
       const followUp = hints.authChoice === "evm"
-        ? "Please provide the exported EVM private key so onboarding can save it and verify login."
+        ? "Please provide the private key for the wallet you already use to sign in on UNIGOX. I’ll verify login with that first, then I’ll ask for the separate UNIGOX-exported EVM signing key used for receipt confirmations and other signed actions."
         : hints.authChoice === "ton"
           ? "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login."
           : "Please provide the email address to use for OTP onboarding / recovery.";
@@ -1309,6 +1353,16 @@ export async function advanceTransferFlow(
         message: getUnigoxWalletConnectionPrompt(),
       }]
     );
+  }
+
+  if (session.goal === "transfer" && session.auth.available && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
+    session.status = "blocked";
+    session.stage = "awaiting_evm_signing_key";
+    const followUp = "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release. Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).";
+    return reply(withUpdate(session, deps), followUp, undefined, [{
+      type: "blocked_missing_auth",
+      message: followUp,
+    }]);
   }
 
   if (!session.recipientMode && !session.recipientQuery && !session.recipientName) {

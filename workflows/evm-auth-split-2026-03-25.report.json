@@ -1,0 +1,41 @@
+{
+  "engine": {
+    "status": "completed",
+    "run_id": "send-money-evm-auth-split-2026-03-25",
+    "goal": "Audit the send-money EVM onboarding model, confirm the real UNIGOX credential split, and implement the minimum safe skill changes so onboarding collects the login key first, verifies login, then requests the separate UNIGOX-exported signing key.",
+    "completed_steps": [
+      "audit_current_flow",
+      "verify_real_credentials",
+      "design_safe_architecture",
+      "implementation_scope"
+    ],
+    "total_steps": 4,
+    "drift_flags_total": 0,
+    "corrections_total": 0,
+    "trace_entries": 8
+  },
+  "meta": {
+    "total_findings": 0,
+    "critical": 0,
+    "warnings": 0,
+    "info": 0,
+    "findings": [],
+    "verdict": "clean"
+  },
+  "step_outputs": {
+    "audit_current_flow": {
+      "audit_summary": "Current send-money docs and transfer-orchestrator still treat EVM onboarding as a single exported private key prompt and do not model split login-vs-signing credentials."
+    },
+    "verify_real_credentials": {
+      "credential_split": "UNIGOX currently uses two distinct EVM addresses in the real integration: linked_wallet_address for wallet-login/SIWE and evm_address for the Privy embedded wallet used by in-app signed actions and export-private-key UI."
+    },
+    "design_safe_architecture": {
+      "architecture_plan": "Add explicit env/config support for UNIGOX_EVM_LOGIN_PRIVATE_KEY plus UNIGOX_EVM_SIGNING_PRIVATE_KEY (with legacy UNIGOX_PRIVATE_KEY alias), use the login key only for /api/web3-login, use the signing key for confirm-payment/withdraw/bridge actions, and block transfer onboarding until the signing key is also supplied for EVM mode."
+    },
+    "implementation_scope": {
+      "code_changes": "Update UnigoxClient + transfer-orchestrator auth-state/config loading and onboarding prompts.",
+      "docs_changes": "Update SKILL.md, README.md, onboarding/setup/integration/transfer-flow references to document the split and manual export step.",
+      "tests_plan": "Add regression tests for split env loading and new onboarding prompts/stages while keeping legacy single-key fallback."
+    }
+  }
+}

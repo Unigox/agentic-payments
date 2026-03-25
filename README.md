@@ -47,21 +47,23 @@ When the skill needs to sign in on UNIGOX, the first auth question should be:
 
 Those are the two replayable wallet sign-in paths. Email remains useful, but as an onboarding / recovery fallback rather than the main wording for repeatable sign-in.
 
-- **EVM private key** — best all-around option. Lets the skill authenticate and also sign EVM helper actions like escrow withdrawals and bridge-outs.
+- **EVM login key** — the private key for the wallet you already use to sign in on UNIGOX.
+- **UNIGOX-exported EVM signing key** — a separate internal wallet key exported from unigox.com settings. This is the key the skill needs for signed actions like receipt confirmation / escrow release, escrow withdrawals, and bridge-outs. Save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (`UNIGOX_PRIVATE_KEY` still works as a legacy alias).
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
-- Secure your private key or TON mnemonic. If someone gains access to it, they can authenticate as the agent.
-- TON auth only covers login / JWT acquisition. Advanced EVM-signed actions still require an EVM private key.
+- Secure your login key, signing key, or TON mnemonic. If someone gains access to them, they can authenticate or sign as the agent.
+- TON auth only covers login / JWT acquisition. Advanced EVM-signed actions still require the exported EVM signing key.
+- The skill can verify login with the first EVM key, but it does not currently auto-export the second key from UNIGOX. That export still has to happen manually on unigox.com.
 - We are building more secure key management options for agents. For now, standard precautions apply.
 
 ### 4. Install the skill
 Add Agentic Payments to your OpenClaw agent.
 
 ### 5. Initialize the agent
-On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If neither is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
+On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding is now explicitly two-step: first it asks for the wallet key already used to sign in on UNIGOX and verifies login, then it asks for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
 
 ### 6. Fund your wallet
 Two options:

@@ -4,7 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
+import { detectAuthState, loadUnigoxConfigFromEnv, startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
 import { validatePaymentDetailInput } from "./unigox-client.ts";
 import type {
   CurrencyPaymentData,
@@ -21,6 +21,30 @@ function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { la
   const file = path.join(dir, "contacts.json");
   fs.writeFileSync(file, JSON.stringify(initialContacts, null, 2));
   return { dir, file };
+}
+
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const original: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    original[key] = process.env[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 const PAYMENT_DATA: Record<string, CurrencyPaymentData> = {
@@ -313,7 +337,7 @@ function makeClient(options: {
 function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>, overrides: Partial<TransferFlowDeps> = {}): TransferFlowDeps {
   return {
     contactsFilePath,
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true },
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: true },
     client,
     waitForSettlementTimeoutMs: 1,
     settlementPollIntervalMs: 1,
@@ -680,4 +704,68 @@ test("no vendor match lands in explicit retry/change branch", async () => {
   assert.equal(res.session.stage, "awaiting_no_match_resolution");
   assert.equal(res.session.status, "blocked");
   assert.ok(res.events.some((event) => event.type === "blocked_no_vendor_match"));
+});
+
+test("detectAuthState recognizes split EVM login and signing keys", () => {
+  const result = withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, () => detectAuthState());
+
+  assert.equal(result.hasReplayableAuth, true);
+  assert.equal(result.authMode, "evm");
+  assert.equal(result.evmSigningKeyAvailable, true);
+  assert.equal(result.emailFallbackAvailable, true);
+});
+
+test("loadUnigoxConfigFromEnv returns split EVM config with legacy signing alias fallback", () => {
+  const result = withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: "0xlegacySign",
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, () => loadUnigoxConfigFromEnv());
+
+  assert.equal(result.authMode, "evm");
+  assert.equal(result.evmLoginPrivateKey, "0xlogin");
+  assert.equal(result.evmSigningPrivateKey, "0xlegacySign");
+  assert.equal(result.email, "agent@example.com");
+});
+
+test("missing EVM auth now asks for the login wallet key before the exported signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  const res = await startTransferFlow("send 50 EUR to mom", deps);
+  const followUp = await advanceTransferFlow(res.session, "evm", deps);
+
+  assert.equal(followUp.session.stage, "awaiting_auth_choice");
+  assert.match(followUp.reply, /wallet you already use to sign in on UNIGOX/i);
+  assert.match(followUp.reply, /then I’ll ask for the separate UNIGOX-exported EVM signing key/i);
+});
+
+test("EVM login without exported signing key blocks before transfer execution", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: {
+      hasReplayableAuth: true,
+      authMode: "evm",
+      emailFallbackAvailable: true,
+      evmSigningKeyAvailable: false,
+    },
+  });
+
+  const res = await startTransferFlow("send 50 EUR to mom", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.ok(res.events.some((event) => event.type === "blocked_missing_auth"));
 });

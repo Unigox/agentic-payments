@@ -2,7 +2,12 @@
 
 ## When to Trigger
 
-Run this flow when neither `UNIGOX_PRIVATE_KEY` nor `UNIGOX_TON_MNEMONIC` is configured and no email session is active.
+Run this flow when no replayable wallet sign-in path is configured yet:
+- no `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
+- no legacy single-key `UNIGOX_PRIVATE_KEY`
+- no `UNIGOX_TON_MNEMONIC`
+
+Email-only (`UNIGOX_EMAIL`) counts as recovery / bootstrap, not a replayable wallet path.
 
 ---
 
@@ -20,24 +25,37 @@ Wait for the user to answer before proceeding.
 
 > To sign in on UNIGOX, I need one wallet connection path I can replay locally. Which wallet connection path should I use: **EVM wallet connection** or **TON wallet connection**?
 >
-> 1. **EVM wallet connection** — best if you want me to do everything, including EVM-signed withdrawals and bridge-outs.
-> 2. **TON wallet connection** — good if you only want TON-based login/JWT acquisition. Sending still works after login, but EVM-signed helper methods still need an EVM key.
+> 1. **EVM wallet connection** — best if you want me to do everything, but this path has **two** EVM credentials: the wallet key you use to sign in, then the separate UNIGOX-exported signing key used for in-app signed actions.
+> 2. **TON wallet connection** — good if you want TON-based login/JWT acquisition. Signed EVM actions still need the separate UNIGOX-exported EVM signing key later.
 >
 > If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery and come back to your wallet choice after that.
 
-### If they choose EVM private key
+### If they choose EVM wallet connection
 
-> Email hello@unigox.com and request private key export access. Once it's enabled, go to your account settings on unigox.com and export the wallet private key.
+Use this exact sequence:
+
+1. Ask for the **wallet key already used to sign in on UNIGOX**.
+2. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+3. Clear `UNIGOX_AUTH_MODE` if it was set to `ton`.
+4. Call `login()` to verify EVM sign-in works.
+5. If login fails:
+   - say: "That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again."
+   - do **not** ask for the export key yet.
+6. If login succeeds, ask for the **separate UNIGOX-exported EVM signing key** from unigox.com settings.
+7. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY` still works).
+8. Explain that this second key is required for signed actions such as receipt confirmation / escrow release, escrow withdrawals, and bridge-outs.
+9. Proceed to Step 3.
+
+Prompt wording for step 6:
+
+> Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here. I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release.
 >
-> Paste it here when you're ready. I store it locally on this machine, nowhere else.
+> If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.
 
-When the user provides the key:
-- Validate it's a valid hex string (64 chars, with or without 0x prefix)
-- Save to `.env` as `UNIGOX_PRIVATE_KEY`
-- Clear `UNIGOX_AUTH_MODE` if it was set to `ton`
-- Call `login()` to verify it works
-- If login fails: "That key didn't work. Double-check you exported the right one from your UNIGOX account settings. Want to try again?"
-- If login succeeds: proceed to Step 3
+Important implementation note:
+- the skill can verify login with the first key
+- the skill does **not** currently have a backend/client API to export the second key automatically
+- that export still has to happen manually on unigox.com
 
 ### If they choose TON wallet auth
 
@@ -54,6 +72,7 @@ When the user provides TON credentials:
 - Call `login()` to verify TON auth works
 - If login fails: ask whether the raw address is correct and mention the wallet may not be using the default V4 derived address
 - If login succeeds: proceed to Step 3
+- If they want the agent to finish signed EVM actions too, separately ask for `UNIGOX_EVM_SIGNING_PRIVATE_KEY` after TON login succeeds
 
 ---
 
@@ -65,7 +84,7 @@ When the user provides TON credentials:
 >
 > Which wallet connection path do you want me to end up using: **EVM** or **TON**?
 
-### If they need email OTP first:
+### If they need email OTP first
 
 > What email do you want to use?
 
@@ -75,21 +94,36 @@ Once they provide the email:
 3. If not: ask the user: "I just sent a 6-digit code to [email]. What's the code?"
 4. Call `verifyEmailOTP(code)` to log in
 5. Ask: "Now that you're in, which wallet connection path do you want me to use for future UNIGOX sign-in: EVM wallet connection or TON wallet connection?"
-6. If EVM: call `generateAndLinkWallet()`, save `UNIGOX_PRIVATE_KEY`, save `UNIGOX_EMAIL`, proceed to Step 3
-7. If TON: collect TON mnemonic/address, call `linkTonWallet()`, save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_MNEMONIC`, optional `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`, proceed to Step 3
-8. If they want to stay email-only for now: save `UNIGOX_EMAIL`, explain that future re-auth may need another OTP and that they can later choose EVM or TON as the replayable wallet path, then proceed to Step 3
+6. If EVM:
+   - call `generateAndLinkWallet()`
+   - save the returned key as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
+   - save `UNIGOX_EMAIL`
+   - explain that this generated key is the **login** key only
+   - then ask the user to manually export the separate UNIGOX signing key from unigox.com settings and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
+   - proceed to Step 3 only after that second step is acknowledged
+7. If TON:
+   - collect TON mnemonic/address
+   - call `linkTonWallet()`
+   - save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_MNEMONIC`, optional `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`
+   - proceed to Step 3
+8. If they want to stay email-only for now:
+   - save `UNIGOX_EMAIL`
+   - explain that future re-auth may need another OTP and that they can later choose EVM or TON as the replayable wallet path
+   - proceed to Step 3
 
-### If they choose EVM wallet connection:
+### If they choose EVM wallet connection directly
 
-> Sign up at unigox.com with your wallet, then export your private key from the account settings. You'll need to email hello@unigox.com to request export access first.
+> Sign up at unigox.com with your wallet first. After that, give me the private key for the wallet you actually use to sign in on UNIGOX so I can verify login.
 >
-> Paste the key here when you're ready.
+> Once that works, I'll ask for the separate UNIGOX-exported signing key from account settings.
 
-When the user provides the key:
-- Validate, save to `.env`, call `login()`, verify
+When the user provides the login key:
+- Save `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
+- Call `login()` and verify it works
+- Only after success, ask for the separate exported signing key and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
 - Proceed to Step 3
 
-### If they choose TON wallet:
+### If they choose TON wallet
 
 > Sign up / log in on unigox.com with your TON wallet first, then give me the TON mnemonic plus the raw TON address from the wallet app.
 >
@@ -138,10 +172,15 @@ If they want to top up later: that's fine, proceed to Step 5.
 
 ## Returning Sessions
 
-When the agent restarts and finds `UNIGOX_PRIVATE_KEY` in `.env`:
-- Log in silently using the saved EVM key
-- No onboarding needed
-- If login fails (expired/revoked), re-run onboarding and ask which wallet connection path the user wants to use: EVM or TON
+When the agent restarts and finds `UNIGOX_EVM_LOGIN_PRIVATE_KEY` in `.env`:
+- Log in silently using the saved EVM login key
+- If `UNIGOX_EVM_SIGNING_PRIVATE_KEY` is missing, block transfer execution and ask for the separate exported signing key before proceeding
+- If login fails, re-run onboarding and ask which wallet connection path the user wants to use: EVM or TON
+
+When the agent restarts and finds only legacy `UNIGOX_PRIVATE_KEY` in `.env`:
+- Treat it as legacy single-key EVM mode
+- Attempt silent login with it
+- Recommend migrating to split keys if the user actually uses separate login vs exported signing credentials
 
 When the agent restarts and finds `UNIGOX_TON_MNEMONIC` in `.env`:
 - Log in silently using TON auth
@@ -160,7 +199,7 @@ When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
 Don't dump these all at once. Mention naturally during setup and periodically after every ~10 transfers:
 
 - "Quick reminder: this is a spending wallet. If your balance is getting high, consider moving some out."
-- "Your private key or TON mnemonic is on this machine. Keep your machine secure."
+- "Your login wallet key, signing key, or TON mnemonic is on this machine. Keep your machine secure."
 
 ## High Balance Warning
 

@@ -17,7 +17,10 @@
  * 
  * Usage:
  *   import { UnigoxClient } from "./unigox-client.ts";
- *   const client = new UnigoxClient({ privateKey: "0x..." });
+ *   const client = new UnigoxClient({
+ *     evmLoginPrivateKey: "0x...",        // wallet used to sign in on UNIGOX
+ *     evmSigningPrivateKey: "0x...",      // separate exported signing key for signed actions
+ *   });
  *   await client.login();
  *   const details = await client.listPaymentDetails();
  */
@@ -94,6 +97,8 @@ export function getUnigoxWalletConnectionPrompt(): string {
 export interface UnigoxClientConfig {
   authMode?: AuthMode;
   privateKey?: string;
+  evmLoginPrivateKey?: string;
+  evmSigningPrivateKey?: string;
   email?: string;
   frontendUrl?: string;
   tonMnemonic?: string | string[];
@@ -234,7 +239,8 @@ function sleep(ms: number): Promise<void> {
 // ── Client ──────────────────────────────────────────────────────────
 
 export class UnigoxClient {
-  private wallet: Wallet | null;
+  private loginWallet: Wallet | null;
+  private signingWallet: Wallet | null;
   private email: string | null;
   private frontendUrl: string;
   private authMode: AuthMode;
@@ -247,11 +253,15 @@ export class UnigoxClient {
   private userProfile: UserProfile | null = null;
 
   constructor(config: UnigoxClientConfig) {
-    if (!config.privateKey && !config.email && !config.tonMnemonic) {
+    const loginPrivateKey = config.evmLoginPrivateKey || config.privateKey;
+    const signingPrivateKey = config.evmSigningPrivateKey || config.privateKey;
+
+    if (!loginPrivateKey && !config.email && !config.tonMnemonic) {
       throw new Error(`UNIGOX auth is not configured. ${getUnigoxWalletConnectionPrompt()}`);
     }
 
-    this.wallet = config.privateKey ? new Wallet(config.privateKey) : null;
+    this.loginWallet = loginPrivateKey ? new Wallet(loginPrivateKey) : null;
+    this.signingWallet = signingPrivateKey ? new Wallet(signingPrivateKey) : null;
     this.email = config.email || null;
     this.frontendUrl = config.frontendUrl || DEFAULT_FRONTEND_URL;
     this.authMode = config.authMode || "auto";
@@ -261,8 +271,9 @@ export class UnigoxClient {
   }
 
   get address(): string {
-    if (this.wallet) return this.wallet.address;
+    if (this.signingWallet) return this.signingWallet.address;
     if (this.userProfile?.evm_address) return this.userProfile.evm_address;
+    if (this.loginWallet) return this.loginWallet.address;
     throw new Error("No EVM wallet configured locally. Log in first and read the account profile instead.");
   }
 
@@ -277,14 +288,21 @@ export class UnigoxClient {
   }
 
   private requireWallet(): Wallet {
-    if (!this.wallet) {
-      throw new Error("This operation requires a local EVM private key. TON auth only covers JWT acquisition.");
+    if (!this.signingWallet) {
+      throw new Error("This operation requires the UNIGOX-exported EVM signing private key. TON or login-only auth only covers JWT acquisition.");
     }
-    return this.wallet;
+    return this.signingWallet;
+  }
+
+  private requireLoginWallet(): Wallet {
+    if (!this.loginWallet) {
+      throw new Error("EVM login requires the private key for the wallet you use to sign in on UNIGOX.");
+    }
+    return this.loginWallet;
   }
 
   private async getAccountEvmAddress(): Promise<string> {
-    if (this.wallet) return this.wallet.address;
+    if (this.signingWallet) return this.signingWallet.address;
 
     const profile = await this.ensureProfile();
     if (!profile.evm_address) {
@@ -296,7 +314,7 @@ export class UnigoxClient {
 
   private resolveLoginMode(): ResolvedAuthMode {
     if (this.authMode === "evm") {
-      if (!this.wallet) throw new Error("authMode=evm requires privateKey");
+      if (!this.loginWallet) throw new Error("authMode=evm requires evmLoginPrivateKey or privateKey");
       return "evm";
     }
 
@@ -310,7 +328,7 @@ export class UnigoxClient {
       return "email";
     }
 
-    if (this.wallet) return "evm";
+    if (this.loginWallet) return "evm";
     if (this.tonMnemonicWords) return "ton";
     if (this.email) return "email";
 
@@ -458,8 +476,9 @@ export class UnigoxClient {
   }
 
   /**
-   * Step 3: Generate a local wallet and link it to the email account.
-   * Returns the private key - the agent must store this securely.
+   * Step 3: Generate a local EVM login wallet and link it to the email account.
+   * Returns the login private key - the agent must store this securely.
+   * This is NOT the separate UNIGOX-exported signing key used for in-app signed actions.
    */
   async generateAndLinkWallet(): Promise<{ address: string; privateKey: string }> {
     if (!this.token) throw new Error("Must be logged in first (call verifyEmailOTP)");
@@ -486,7 +505,7 @@ export class UnigoxClient {
       throw new Error(`Wallet linking failed: ${JSON.stringify(res)}`);
     }
 
-    this.wallet = newWallet;
+    this.loginWallet = newWallet;
     this.userProfile = null;
     console.log(`[UNIGOX] Wallet linked: ${newWallet.address}`);
     return { address: newWallet.address, privateKey: newWallet.privateKey };
@@ -542,7 +561,7 @@ export class UnigoxClient {
   // ── Auth ────────────────────────────────────────────────────────
 
   private async loginOnceWithEvm(): Promise<string> {
-    const wallet = this.requireWallet();
+    const wallet = this.requireLoginWallet();
     const domain = new URL(this.frontendUrl).host;
     const nonce = Math.random().toString(36).substring(7);
     const issuedAt = new Date().toISOString();

@@ -7,7 +7,7 @@ description: >
   (3) user asks about supported payment methods or currencies,
   (4) user wants to check UNIGOX wallet balance before sending.
   Supports EUR plus API-driven payout methods for INR, NGN, KES, GHS, and other currencies exposed by UNIGOX.
-  Requires a UNIGOX account and at least one auth path: EVM private key, TON wallet auth, or email OTP during onboarding.
+  Requires a UNIGOX account and at least one auth path: EVM login key, TON wallet auth, or email OTP during onboarding. Full EVM automation also needs the separate UNIGOX-exported EVM signing key.
 ---
 
 # Send Money
@@ -18,16 +18,17 @@ Conversational money transfer via UNIGOX P2P exchange.
 
 On first use, check if the environment is configured. Read `references/onboarding.md` and follow it step by step.
 
-**Quick check**: look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_PRIVATE_KEY` for EVM or `UNIGOX_TON_MNEMONIC` for TON. If neither is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
+**Quick check**: look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` (or legacy `UNIGOX_PRIVATE_KEY`) for EVM or `UNIGOX_TON_MNEMONIC` for TON. If neither is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
 
 The onboarding flow:
 1. Explain what this skill does and the security model
 2. Ask the user which wallet connection path they want to use for UNIGOX sign-in: EVM wallet connection or TON wallet connection
 3. If neither wallet path is ready yet, offer email OTP as the temporary onboarding / recovery fallback
-4. Save the chosen credentials to the project's `.env` file (never in skill files or contacts.json)
-5. Verify login works
-6. Optionally link the other wallet path later if the user wants flexibility
-7. Show deposit addresses so the user can fund the wallet
+4. For EVM, collect and save the **login** wallet key first (`UNIGOX_EVM_LOGIN_PRIVATE_KEY`), then verify login works
+5. Only after successful EVM login, collect and save the separate **UNIGOX-exported signing** key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY`, legacy alias `UNIGOX_PRIVATE_KEY` still supported)
+6. For TON, verify TON login and only ask for an EVM signing key later if signed EVM actions are needed
+7. Optionally link the other wallet path later if the user wants flexibility
+8. Show deposit addresses so the user can fund the wallet
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 
@@ -94,12 +95,13 @@ Use the UNIGOX client module. See `references/integration.md` for code patterns.
 ```
 1. If login is needed and no replayable wallet path is configured, ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?"
 2. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen wallet path
-3. Login with the configured auth mode (EVM private key or TON wallet auth)
-4. Check wallet balance (warn if insufficient)
-5. Ensure payment detail exists on UNIGOX
-6. Create trade request (SELL crypto → fiat to recipient)
-7. Report trade request ID to user
-8. Wait for vendor match / status and handle the main unhappy paths:
+3. For EVM, verify login with `UNIGOX_EVM_LOGIN_PRIVATE_KEY` first, then require the separate exported signing key before transfer execution
+4. Login with the configured auth mode (EVM login key or TON wallet auth)
+5. Check wallet balance (warn if insufficient)
+6. Ensure payment detail exists on UNIGOX
+7. Create trade request (SELL crypto → fiat to recipient)
+8. Report trade request ID to user
+9. Wait for vendor match / status and handle the main unhappy paths:
    - missing auth
    - insufficient balance
    - invalid field input
@@ -123,7 +125,9 @@ Schema: see `references/contact-schema.md`.
 ## Environment
 
 Preferred auth environment variables:
-- `UNIGOX_PRIVATE_KEY` — EVM auth + EVM-signed actions
+- `UNIGOX_EVM_LOGIN_PRIVATE_KEY` — EVM wallet key used to sign in on UNIGOX
+- `UNIGOX_EVM_SIGNING_PRIVATE_KEY` — separate UNIGOX-exported EVM key used for signed actions
+- `UNIGOX_PRIVATE_KEY` — legacy alias for `UNIGOX_EVM_SIGNING_PRIVATE_KEY` and legacy single-key fallback
 - `UNIGOX_AUTH_MODE=ton`
 - `UNIGOX_TON_MNEMONIC` — TON mnemonic used only for TON login / linking
 - `UNIGOX_TON_ADDRESS` — optional raw TON address override when the derived V4 address does not match the wallet
@@ -149,5 +153,5 @@ Preferred auth environment variables:
 - **When auth is missing or needs recovery, explicitly ask for the wallet sign-in path first**: EVM wallet connection or TON wallet connection
 - **Email OTP is fallback**, not the first phrasing for repeatable sign-in. Use it when the chosen wallet path is not ready yet or for recovery
 - **TON auth only covers JWT acquisition** — keep using the existing post-login APIs unchanged
-- **EVM-signed actions** like escrow withdraw / bridge-out still require `UNIGOX_PRIVATE_KEY`
+- **EVM-signed actions** like receipt confirmation / escrow release, escrow withdraw, and bridge-out require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`)
 - Save new contacts immediately for persistence

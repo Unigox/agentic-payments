@@ -13,6 +13,8 @@ This document defines the higher-level chat/orchestration flow implemented in `s
      - **EVM wallet connection**
      - **TON wallet connection**
      - fallback: **email OTP**
+   - If the user chooses **EVM**, ask for the **login wallet key first**, verify login, and only then ask for the separate **UNIGOX-exported EVM signing key**.
+   - If EVM login is configured but the exported signing key is still missing, block transfer execution before recipient collection.
    - Do not continue to execution until auth/onboarding is completed.
 
 3. **Recipient gate**
@@ -92,6 +94,8 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 
 ### Missing auth
 - Block execution and ask for wallet sign-in path before continuing.
+- For EVM, collect the login wallet key first, verify login, then ask for the separate exported signing key.
+- If the exported signing key is missing, keep the flow blocked before execution.
 
 ### Invalid field
 - Re-prompt on the exact field that failed validation.

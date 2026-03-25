@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --experimental-strip-types transfer-orchestrator.test.ts"
+    "test": "node --test --experimental-strip-types *.test.ts"
   },
   "keywords": [],
   "author": "",

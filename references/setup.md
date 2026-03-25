@@ -19,25 +19,44 @@ When auth is missing or login has to be re-established, start with this user-fac
 >
 > If neither is ready yet, use **email OTP** for onboarding or recovery, then link the wallet path the user chooses.
 
-Supported auth modes:
+For EVM, the real integration has **two different credentials**:
+1. a **login wallet key** for the wallet already linked to UNIGOX sign-in (`linked_wallet_address`)
+2. a separate **UNIGOX-exported signing key** for the internal Privy / app wallet (`evm_address`) used by signed actions
 
-### 1. EVM private key
+### 1. EVM login key
 
 ```env
-UNIGOX_PRIVATE_KEY=0x...
+UNIGOX_EVM_LOGIN_PRIVATE_KEY=0x...
 ```
 
-Use this when the agent needs both:
-- normal UNIGOX login
-- EVM-signed actions (`withdrawFromEscrow()`, `bridgeOut()`)
+Use this key to:
+- replay the EVM / SIWE login flow on UNIGOX
+- verify that the agent can sign in successfully
 
-### 2. TON wallet auth
+### 2. UNIGOX-exported EVM signing key
+
+```env
+UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
+# legacy alias still supported:
+# UNIGOX_PRIVATE_KEY=0x...
+```
+
+Use this key for EVM-signed actions inside UNIGOX:
+- `confirmFiatReceived()`
+- `withdrawFromEscrow()`
+- `bridgeOut()`
+
+If the user only has the old single-key setup (`UNIGOX_PRIVATE_KEY`), the client still treats it as a legacy fallback for both login and signing.
+
+### 3. TON wallet auth
 
 ```env
 UNIGOX_AUTH_MODE=ton
 UNIGOX_TON_MNEMONIC="word1 word2 ... word24"
 UNIGOX_TON_ADDRESS=0:...   # optional override if derived V4 address differs
 UNIGOX_TON_NETWORK=-239    # optional, defaults to mainnet
+# optional, if EVM signed actions are also needed later:
+UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
 ```
 
 This mode uses the frontend TON routes:
@@ -47,15 +66,20 @@ This mode uses the frontend TON routes:
 
 TON auth is only for JWT acquisition and optional wallet linking. After the JWT is obtained, the rest of the client keeps using the same account/trade APIs as before.
 
-### 3. Email OTP onboarding
+### 4. Email OTP onboarding
 
 ```env
 UNIGOX_EMAIL=agent@example.com
+# optional later, once configured:
+UNIGOX_EVM_LOGIN_PRIVATE_KEY=0x...
+UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
 ```
 
 Use this for onboarding or recovery. After email login, the agent can:
-- generate and link a local EVM wallet, or
+- generate and link a local EVM **login** wallet, or
 - link a TON wallet for future JWT login
+
+Important: the skill can generate/link the **login** wallet, but it does **not** currently have an API to export the separate internal UNIGOX / Privy signing key. That export still has to happen manually on unigox.com.
 
 ## Supported APIs
 

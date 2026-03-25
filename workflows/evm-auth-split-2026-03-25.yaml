@@ -1,0 +1,41 @@
+run_id: send-money-evm-auth-split-2026-03-25
+goal: >-
+  Audit the send-money EVM onboarding model, confirm the real UNIGOX credential split,
+  and implement the minimum safe skill changes so onboarding collects the login key first,
+  verifies login, then requests the separate UNIGOX-exported signing key.
+constraints:
+  - no_external_actions
+allowed_scope:
+  - audit_summary
+  - credential_split
+  - architecture_plan
+  - code_changes
+  - docs_changes
+  - tests_plan
+workflow:
+  - id: audit_current_flow
+    name: Audit current send-money onboarding and auth assumptions
+    acceptance_criteria:
+      - has_key:audit_summary
+  - id: verify_real_credentials
+    name: Verify the real UNIGOX credential split from existing frontend/client code
+    required_predecessors:
+      - audit_current_flow
+    acceptance_criteria:
+      - has_key:credential_split
+  - id: design_safe_architecture
+    name: Design the minimum safe split-key architecture and prompt changes
+    required_predecessors:
+      - verify_real_credentials
+    acceptance_criteria:
+      - has_key:architecture_plan
+  - id: implementation_scope
+    name: Define code, docs, and tests required for the fix
+    required_predecessors:
+      - design_safe_architecture
+    acceptance_criteria:
+      - has_key:code_changes
+      - has_key:docs_changes
+      - has_key:tests_plan
+max_auto_corrections: 1
+hard_stop_threshold: 2
