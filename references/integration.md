@@ -85,7 +85,7 @@ await client.linkTonWallet();
 ## Resolving dynamic payment fields before save / send
 
 The frontend/payment-network config is the source of truth here:
-- `getPaymentMethodFieldConfig()` resolves fields using the same format-mapping strategy the frontend uses
+- `getPaymentMethodFieldConfig()` resolves fields using the same format-mapping strategy the frontend uses (and now supports either `networkSlug` or `networkId` so saved contacts can be revalidated accurately)
 - `validatePaymentDetailInput()` applies the field validators exposed by the API and falls back to frontend validator-name behavior only when the API omits a regex pattern
 
 ```typescript
@@ -126,6 +126,28 @@ if (!validation.valid) {
 
 ## Send Money Flow
 
+For the chat/state-machine layer, use `scripts/transfer-orchestrator.ts`.
+It handles:
+- saved vs new recipient branching
+- live method / network selection
+- field-by-field collection + validation
+- stale-contact revalidation
+- save/update decisions
+- confirmation
+- balance / trade request / wait-for-match unhappy paths
+
+```typescript
+import { startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator";
+
+let result = await startTransferFlow("I want to send money", { client });
+console.log(result.reply);
+
+result = await advanceTransferFlow(result.session, "new recipient", { client });
+console.log(result.reply);
+```
+
+Under the hood, execution still follows the same UNIGOX client sequence:
+
 ```typescript
 // 1. Check balance
 const balance = await client.getWalletBalance();
@@ -152,7 +174,7 @@ const tr = await client.createTradeRequest({
   paymentNetworkId: contact.networkId,
 });
 
-// 4. Report
+// 4. Wait / report
 console.log(`Trade request #${tr.id} created`);
 ```
 

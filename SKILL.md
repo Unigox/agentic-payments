@@ -33,6 +33,9 @@ The onboarding flow:
 
 ## Flow
 
+The reusable orchestration layer now lives in `scripts/transfer-orchestrator.ts`.
+For the end-to-end map, stage transitions, and unhappy-path handling, see `references/transfer-flow.md`.
+
 ### 1. Parse Request
 
 Extract from user message:
@@ -73,6 +76,10 @@ Examples of now-supported live flows:
 
 Static EUR IDs are still documented for convenience. For non-EUR flows, prefer the live API response over hardcoded IDs. Full method + field notes: see `references/payment-methods.md` and `references/field-validators.md`.
 
+If a saved contact already has details for the chosen currency, re-validate those saved details against the live field config before sending. If they are stale or incomplete, switch into field-by-field update mode instead of blindly reusing them.
+
+If the user changes currency or payment method mid-flow, clear the dependent selection/details and re-run live method + field resolution for the new choice.
+
 ### 4. Confirm
 
 Always confirm before executing:
@@ -92,6 +99,14 @@ Use the UNIGOX client module. See `references/integration.md` for code patterns.
 5. Ensure payment detail exists on UNIGOX
 6. Create trade request (SELL crypto → fiat to recipient)
 7. Report trade request ID to user
+8. Wait for vendor match / status and handle the main unhappy paths:
+   - missing auth
+   - insufficient balance
+   - invalid field input
+   - existing contact with stale details
+   - no vendor match / matching timeout
+   - save contact only
+   - user changes currency or method mid-flow
 ```
 
 ## Contact Management

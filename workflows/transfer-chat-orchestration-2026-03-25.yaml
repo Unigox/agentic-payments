@@ -1,0 +1,81 @@
+goal: "Implement the higher-level conversational transfer orchestration for skills/send-money, covering saved/new recipients, API-driven currency/method/detail collection, contact save/update, confirmation, transfer execution, wait-for-match handling, and key unhappy paths."
+run_id: "send_money_transfer_chat_orchestration_20260325"
+constraints:
+  - "use_modular_builder_process"
+  - "prefer_frontend_api_as_field_source_of_truth"
+  - "reuse_existing_unigox_client_helpers"
+  - "keep_changes_local_to_send_money_skill"
+  - "cover_main_happy_and_unhappy_paths"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "api_findings"
+  - "design_notes"
+  - "flow_map"
+  - "changed_files"
+  - "tests_run"
+  - "test_results"
+  - "docs_updated"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_current_skill"
+    name: "Inspect the current send-money skill, helper APIs, and existing docs / schemas"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:api_findings"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_transfer_flow"
+    name: "Lock the conversational flow map, state transitions, and implementation plan before code edits"
+    required_predecessors:
+      - "inspect_current_skill"
+    required_checks:
+      - "api_findings_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:flow_map"
+      - "has_key:summary"
+    external_action: false
+
+  - id: "implement_orchestration"
+    name: "Implement the conversation orchestration layer, contact/schema helpers, and documentation updates"
+    required_predecessors:
+      - "design_transfer_flow"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_locally"
+    name: "Run local automated tests covering the transfer flow and unhappy paths"
+    required_predecessors:
+      - "implement_orchestration"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_changes"
+    name: "Commit the completed send-money changes with a clear message"
+    required_predecessors:
+      - "validate_locally"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false

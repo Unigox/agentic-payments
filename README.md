@@ -77,6 +77,8 @@ Two options:
 
 Your agent checks the balance, finds the recipient, and executes. You confirm. Recipient gets paid.
 
+The orchestration layer also handles the real chat edges: saved vs new recipients, live payment-method/network selection, field-by-field validation, stale contact updates, save-contact-only mode, insufficient balance, and no-vendor-match follow-up. See `references/transfer-flow.md`.
+
 ## Why UNIGOX?
 
 UNIGOX is a Canadian-regulated money service business built from the ground up to be agent-friendly.

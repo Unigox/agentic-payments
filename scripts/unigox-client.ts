@@ -1453,6 +1453,7 @@ export async function getPaymentMethodFieldConfig(params: {
   methodSlug?: string;
   methodId?: number;
   networkSlug?: string;
+  networkId?: number;
 }): Promise<ResolvedPaymentMethodFieldConfig> {
   const currencyData = await getPaymentMethodsForCurrency(params.currency);
   const method = currencyData.paymentMethods.find((entry) =>
@@ -1465,9 +1466,11 @@ export async function getPaymentMethodFieldConfig(params: {
     );
   }
 
-  const network = params.networkSlug
-    ? method.networks.find((entry) => normalizeSlug(entry.slug) === normalizeSlug(params.networkSlug))
-    : method.networks.find((entry) => entry.default) || method.networks[0];
+  const network = params.networkId
+    ? method.networks.find((entry) => entry.id === params.networkId)
+    : params.networkSlug
+      ? method.networks.find((entry) => normalizeSlug(entry.slug) === normalizeSlug(params.networkSlug))
+      : method.networks.find((entry) => entry.default) || method.networks[0];
 
   if (!network) {
     throw new Error(`No payment network found for method ${method.name} (${params.currency})`);

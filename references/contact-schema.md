@@ -12,11 +12,15 @@
         "<CURRENCY>": {
           "method": "Method Name",
           "methodId": 2,
+          "methodSlug": "revolut",
           "networkId": 47,
           "network": "Network Name",
+          "networkSlug": "revolut-username",
+          "selectedFormatId": "optional-format-id",
           "details": {
             "field1": "value1"
-          }
+          },
+          "lastValidatedAt": "2026-03-25T11:55:00.000Z"
         }
       },
       "notes": "Optional notes"
@@ -36,9 +40,13 @@
 - **paymentMethods**: one entry per currency, each with:
   - **method**: human-readable method name
   - **methodId**: UNIGOX payment_method_id
+  - **methodSlug**: live API slug for re-resolving the frontend/API field config later
   - **networkId**: UNIGOX payment_network_id
   - **network**: human-readable network name
+  - **networkSlug**: live API slug for the exact payout network (important when one method has multiple networks)
+  - **selectedFormatId**: optional resolved format ID when the network exposes multiple frontend/API formats
   - **details**: key-value pairs required by the method
+  - **lastValidatedAt**: optional timestamp of the last successful frontend/API validation
 
 ## Example
 
@@ -51,10 +59,12 @@
       "EUR": {
         "method": "Revolut",
         "methodId": 2,
+        "methodSlug": "revolut",
         "networkId": 47,
         "network": "Revolut Username",
+        "networkSlug": "revolut-username",
         "details": {
-          "revtag": "@svetlana"
+          "revtag": "svetlana"
         }
       }
     }

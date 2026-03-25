@@ -1,0 +1,510 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "fs";
+import os from "os";
+import path from "path";
+
+import { startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
+import { validatePaymentDetailInput } from "./unigox-client.ts";
+import type {
+  CurrencyPaymentData,
+  NetworkFieldConfig,
+  PaymentDetail,
+  ResolvedPaymentMethodFieldConfig,
+  TradeRequest,
+  WalletBalance,
+} from "./unigox-client.ts";
+import type { TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
+
+function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { lastUpdated: "" } }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-flow-"));
+  const file = path.join(dir, "contacts.json");
+  fs.writeFileSync(file, JSON.stringify(initialContacts, null, 2));
+  return { dir, file };
+}
+
+const PAYMENT_DATA: Record<string, CurrencyPaymentData> = {
+  EUR: {
+    currency: { code: "EUR", name: "Euro" },
+    paymentMethods: [
+      {
+        id: 2,
+        name: "Revolut",
+        slug: "revolut",
+        type: "Digital Banks",
+        typeSlug: "digital-banks",
+        fiatCurrencyCodes: ["EUR"],
+        networks: [
+          { id: 3, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: true },
+          { id: 47, name: "Revolut Username", slug: "revolut-username", fiatCurrencyCode: "EUR", default: false },
+        ],
+      },
+    ],
+  },
+  NGN: {
+    currency: { code: "NGN", name: "Nigerian Naira" },
+    paymentMethods: [
+      {
+        id: 1001,
+        name: "Kuda Bank",
+        slug: "kuda-bank",
+        type: "Digital Banks",
+        typeSlug: "digital-banks",
+        fiatCurrencyCodes: ["NGN"],
+        networks: [
+          { id: 501, name: "NIP Nigeria", slug: "nip-nigeria", fiatCurrencyCode: "NGN", default: true },
+        ],
+      },
+    ],
+  },
+  KES: {
+    currency: { code: "KES", name: "Kenyan Shilling" },
+    paymentMethods: [
+      {
+        id: 3001,
+        name: "M-PESA",
+        slug: "m-pesa",
+        type: "Mobile Money",
+        typeSlug: "mobile-money",
+        fiatCurrencyCodes: ["KES"],
+        networks: [
+          { id: 601, name: "Pesalink", slug: "pesalink", fiatCurrencyCode: "KES", default: true },
+        ],
+      },
+    ],
+  },
+};
+
+const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
+  "EUR:revolut:revolut-username": {
+    currency: PAYMENT_DATA.EUR.currency,
+    method: PAYMENT_DATA.EUR.paymentMethods[0],
+    network: PAYMENT_DATA.EUR.paymentMethods[0].networks[1],
+    selectedFormatId: undefined,
+    networkConfig: {
+      slug: "revolut-username",
+      name: "Revolut Username",
+      description: "Revolut Username",
+      fields: [
+        {
+          field: "revtag",
+          label: "RevTag",
+          description: "Recipient's Revolut tag",
+          placeholder: "Enter @username",
+          type: "text",
+          required: true,
+          validators: [
+            {
+              validatorName: "revTag",
+              pattern: "^[a-zA-Z0-9_-]+$",
+              message: "RevTag must contain only letters, numbers, underscores or hyphens",
+            },
+          ],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "revtag",
+        label: "RevTag",
+        description: "Recipient's Revolut tag",
+        placeholder: "Enter @username",
+        type: "text",
+        required: true,
+        validators: [
+          {
+            validatorName: "revTag",
+            pattern: "^[a-zA-Z0-9_-]+$",
+            message: "RevTag must contain only letters, numbers, underscores or hyphens",
+          },
+        ],
+      },
+    ],
+  },
+  "NGN:kuda-bank:nip-nigeria": {
+    currency: PAYMENT_DATA.NGN.currency,
+    method: PAYMENT_DATA.NGN.paymentMethods[0],
+    network: PAYMENT_DATA.NGN.paymentMethods[0].networks[0],
+    selectedFormatId: "banks",
+    networkConfig: {
+      slug: "nip-nigeria",
+      name: "NIP Nigeria",
+      description: "NIP Nigeria",
+      countryCode: "NG",
+      fields: [
+        {
+          field: "account_number",
+          label: "Account Number",
+          description: "10-digit account number",
+          placeholder: "0123456789",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "accountNumber", pattern: "^\\d{10}$", message: "Account number must be 10 digits" }],
+        },
+        {
+          field: "full_name",
+          label: "Full Name",
+          description: "Optional account name",
+          placeholder: "Recipient full name",
+          type: "text",
+          required: false,
+          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "account_number",
+        label: "Account Number",
+        description: "10-digit account number",
+        placeholder: "0123456789",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "accountNumber", pattern: "^\\d{10}$", message: "Account number must be 10 digits" }],
+      },
+      {
+        field: "full_name",
+        label: "Full Name",
+        description: "Optional account name",
+        placeholder: "Recipient full name",
+        type: "text",
+        required: false,
+        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+      },
+    ],
+  },
+  "KES:m-pesa:pesalink": {
+    currency: PAYMENT_DATA.KES.currency,
+    method: PAYMENT_DATA.KES.paymentMethods[0],
+    network: PAYMENT_DATA.KES.paymentMethods[0].networks[0],
+    selectedFormatId: "mobile-money",
+    networkConfig: {
+      slug: "pesalink",
+      name: "Pesalink",
+      description: "Pesalink",
+      countryCode: "KE",
+      fields: [
+        {
+          field: "phone_number",
+          label: "Phone Number",
+          description: "Kenyan mobile number",
+          placeholder: "+254712345678",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "internationalPhone", message: "Invalid phone number" }],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "phone_number",
+        label: "Phone Number",
+        description: "Kenyan mobile number",
+        placeholder: "+254712345678",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "internationalPhone", message: "Invalid phone number" }],
+      },
+    ],
+  },
+};
+
+function makeFieldConfigKey(currency: string, methodSlug?: string, networkSlug?: string) {
+  return `${currency.toUpperCase()}:${methodSlug}:${networkSlug}`;
+}
+
+async function stubGetPaymentMethodsForCurrency(currency: string): Promise<CurrencyPaymentData> {
+  const data = PAYMENT_DATA[currency.toUpperCase()];
+  if (!data) throw new Error(`Unsupported test currency ${currency}`);
+  return data;
+}
+
+async function stubGetPaymentMethodFieldConfig(params: {
+  currency: string;
+  methodSlug?: string;
+  methodId?: number;
+  networkSlug?: string;
+  networkId?: number;
+}): Promise<ResolvedPaymentMethodFieldConfig> {
+  const data = PAYMENT_DATA[params.currency.toUpperCase()];
+  const method = data.paymentMethods.find((entry) => entry.id === params.methodId || entry.slug === params.methodSlug);
+  if (!method) throw new Error(`Method not found for test config: ${JSON.stringify(params)}`);
+  const network = params.networkId
+    ? method.networks.find((entry) => entry.id === params.networkId)
+    : params.networkSlug
+      ? method.networks.find((entry) => entry.slug === params.networkSlug)
+      : method.networks.find((entry) => entry.default) || method.networks[0];
+  if (!network) throw new Error(`Network not found for test config: ${JSON.stringify(params)}`);
+  const config = FIELD_CONFIGS[makeFieldConfigKey(params.currency, method.slug, network.slug)];
+  if (!config) throw new Error(`Field config not found for test config: ${JSON.stringify(params)}`);
+  return config;
+}
+
+function makeClient(options: {
+  balance?: number;
+  waitMode?: "matched" | "no_match" | "timeout";
+} = {}): TransferExecutionClient & { calls: string[] } {
+  const calls: string[] = [];
+  const balance = options.balance ?? 1000;
+  const waitMode = options.waitMode ?? "matched";
+
+  return {
+    calls,
+    async getWalletBalance(): Promise<WalletBalance> {
+      calls.push("getWalletBalance");
+      return { usdc: balance, usdt: 0, totalUsd: balance };
+    },
+    async ensurePaymentDetail(): Promise<PaymentDetail> {
+      calls.push("ensurePaymentDetail");
+      return { id: 9001, fiat_currency_code: "EUR", details: {} } as PaymentDetail;
+    },
+    async createTradeRequest(): Promise<TradeRequest> {
+      calls.push("createTradeRequest");
+      return { id: 7001, status: "created", trade_type: "SELL" } as TradeRequest;
+    },
+    async waitForTradeMatch(): Promise<TradeRequest> {
+      calls.push("waitForTradeMatch");
+      if (waitMode === "matched") {
+        return {
+          id: 7001,
+          status: "accepted_by_vendor",
+          trade_type: "SELL",
+          trade: { id: 8801, status: "awaiting_vendor_payment" },
+        } as TradeRequest;
+      }
+      if (waitMode === "no_match") {
+        throw new Error("Trade request 7001 ended: not_accepted_by_any_vendor");
+      }
+      throw new Error("Trade request 7001 timed out after 120s");
+    },
+    async getTradeRequest(): Promise<TradeRequest> {
+      calls.push("getTradeRequest");
+      return { id: 7001, status: "created", trade_type: "SELL", trade: { id: 8801, status: "awaiting_vendor_payment" } } as TradeRequest;
+    },
+    async getTrade() {
+      calls.push("getTrade");
+      return { id: 8801, status: "awaiting_vendor_payment" };
+    },
+  };
+}
+
+function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>): TransferFlowDeps {
+  return {
+    contactsFilePath,
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true },
+    client,
+    getPaymentMethodsForCurrency: stubGetPaymentMethodsForCurrency,
+    getPaymentMethodFieldConfig: stubGetPaymentMethodFieldConfig,
+    validatePaymentDetailInput,
+  };
+}
+
+test("happy path: new recipient transfer goes from chat prompts to matched trade", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("Hey I want to make a transfer", deps);
+  assert.equal(res.session.stage, "awaiting_recipient_mode");
+
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  assert.equal(res.session.stage, "awaiting_recipient_name");
+
+  res = await advanceTransferFlow(res.session, "John Doe", deps);
+  assert.equal(res.session.stage, "awaiting_currency");
+
+  res = await advanceTransferFlow(res.session, "EUR", deps);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+
+  res = await advanceTransferFlow(res.session, "Revolut", deps);
+  assert.equal(res.session.stage, "awaiting_payment_network");
+
+  res = await advanceTransferFlow(res.session, "Revolut Username", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /RevTag/i);
+
+  res = await advanceTransferFlow(res.session, "@john_doe", deps);
+  assert.equal(res.session.stage, "awaiting_save_contact_decision");
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.ok(res.events.some((event) => event.type === "contact_saved"));
+
+  res = await advanceTransferFlow(res.session, "50", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "completed");
+  assert.equal(res.session.status, "completed");
+  assert.ok(res.events.some((event) => event.type === "trade_request_created"));
+  assert.ok(res.events.some((event) => event.type === "trade_matched"));
+  assert.deepEqual(client.calls, ["getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch"]);
+
+  const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
+  assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
+  assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.networkSlug, "revolut-username");
+  assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.details.revtag, "john_doe");
+});
+
+test("stale saved contact gets revalidated, updated, and then used", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "bad tag!" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 40 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /stale or incomplete/i);
+
+  res = await advanceTransferFlow(res.session, "@mom_ok", deps);
+  assert.equal(res.session.stage, "awaiting_save_contact_decision");
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.ok(res.events.some((event) => event.type === "contact_updated"));
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "completed");
+
+  const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
+  assert.equal(contacts.contacts.mom.paymentMethods.EUR.details.revtag, "mom_ok");
+});
+
+test("save-contact-only flow collects details, allows skip on optional field, and never executes a transfer", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("Please save a contact for later", deps);
+  assert.equal(res.session.goal, "save_contact_only");
+
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  res = await advanceTransferFlow(res.session, "Alice Example", deps);
+  res = await advanceTransferFlow(res.session, "NGN", deps);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+
+  res = await advanceTransferFlow(res.session, "Kuda Bank", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+
+  res = await advanceTransferFlow(res.session, "0123456789", deps);
+  assert.equal(res.session.stage, "awaiting_payment_details");
+  assert.match(res.reply, /Optional/i);
+
+  res = await advanceTransferFlow(res.session, "skip", deps);
+  assert.equal(res.session.stage, "awaiting_save_contact_decision");
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "completed");
+  assert.equal(res.session.status, "completed");
+  assert.deepEqual(client.calls, []);
+});
+
+test("insufficient balance blocks execution after confirmation", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ balance: 10 });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
+  assert.equal(res.session.status, "blocked");
+  assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
+});
+
+test("changing currency mid-flow resets payment selection and asks for a new method", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("I want to make a transfer", deps);
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  res = await advanceTransferFlow(res.session, "Bob", deps);
+  res = await advanceTransferFlow(res.session, "NGN", deps);
+  res = await advanceTransferFlow(res.session, "Kuda Bank", deps);
+  res = await advanceTransferFlow(res.session, "0123456789", deps);
+  res = await advanceTransferFlow(res.session, "skip", deps);
+  assert.equal(res.session.stage, "awaiting_save_contact_decision");
+
+  res = await advanceTransferFlow(res.session, "no", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+
+  res = await advanceTransferFlow(res.session, "change currency to KES", deps);
+  assert.equal(res.session.currency, "KES");
+  assert.equal(res.session.payment, undefined);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+});
+
+test("no vendor match lands in explicit retry/change branch", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ waitMode: "no_match" });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_no_match_resolution");
+  assert.equal(res.session.status, "blocked");
+  assert.ok(res.events.some((event) => event.type === "blocked_no_vendor_match"));
+});
