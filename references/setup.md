@@ -13,6 +13,12 @@ The client module lives inside this skill at `scripts/unigox-client.ts`.
 
 ## Authentication
 
+When auth is missing or login has to be re-established, start with this user-facing question:
+
+> Which wallet connection path should I use to sign in on UNIGOX: **EVM wallet connection** or **TON wallet connection**?
+>
+> If neither is ready yet, use **email OTP** for onboarding or recovery, then link the wallet path the user chooses.
+
 Supported auth modes:
 
 ### 1. EVM private key

@@ -87,6 +87,10 @@ const FORWARD_REQUEST_TYPES = {
 export type AuthMode = "auto" | "evm" | "ton" | "email";
 type ResolvedAuthMode = Exclude<AuthMode, "auto">;
 
+export function getUnigoxWalletConnectionPrompt(): string {
+  return "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection? If neither is ready yet, we can still use email OTP for onboarding or recovery.";
+}
+
 export interface UnigoxClientConfig {
   authMode?: AuthMode;
   privateKey?: string;
@@ -238,7 +242,7 @@ export class UnigoxClient {
 
   constructor(config: UnigoxClientConfig) {
     if (!config.privateKey && !config.email && !config.tonMnemonic) {
-      throw new Error("At least one auth method is required: privateKey, email, or tonMnemonic");
+      throw new Error(`UNIGOX auth is not configured. ${getUnigoxWalletConnectionPrompt()}`);
     }
 
     this.wallet = config.privateKey ? new Wallet(config.privateKey) : null;
@@ -304,7 +308,7 @@ export class UnigoxClient {
     if (this.tonMnemonicWords) return "ton";
     if (this.email) return "email";
 
-    throw new Error("Unable to resolve UNIGOX auth mode");
+    throw new Error(`Unable to resolve UNIGOX auth mode. ${getUnigoxWalletConnectionPrompt()}`);
   }
 
   private async ensureTonWalletAccount(): Promise<TonWalletAccount> {
@@ -580,7 +584,7 @@ export class UnigoxClient {
     if (mode === "evm") return this.loginOnceWithEvm();
     if (mode === "ton") return this.loginOnceWithTon();
 
-    throw new Error("Email auth requires OTP verification. Call requestEmailOTP() and verifyEmailOTP(code) first.");
+    throw new Error(`Email auth requires OTP verification. ${getUnigoxWalletConnectionPrompt()} If you want to continue with email for now, call requestEmailOTP() and verifyEmailOTP(code) first.`);
   }
 
   async login(): Promise<string> {

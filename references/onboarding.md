@@ -18,12 +18,12 @@ Wait for the user to answer before proceeding.
 
 ## Step 2a: If they already have an account
 
-> To connect your account, I need one auth path I can replay locally. You can use either:
+> To sign in on UNIGOX, I need one wallet connection path I can replay locally. Which wallet connection path should I use: **EVM wallet connection** or **TON wallet connection**?
 >
-> 1. **EVM private key** — best if you want me to do everything, including EVM-signed withdrawals and bridge-outs.
-> 2. **TON wallet auth** — good if you only want TON-based login/JWT acquisition. Sending still works after login, but EVM-signed helper methods still need an EVM key.
+> 1. **EVM wallet connection** — best if you want me to do everything, including EVM-signed withdrawals and bridge-outs.
+> 2. **TON wallet connection** — good if you only want TON-based login/JWT acquisition. Sending still works after login, but EVM-signed helper methods still need an EVM key.
 >
-> Which one do you want to use?
+> If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery and come back to your wallet choice after that.
 
 ### If they choose EVM private key
 
@@ -59,15 +59,13 @@ When the user provides TON credentials:
 
 ## Step 2b: If they don't have an account
 
-> No problem, let's create one. You have three options:
+> No problem, let's create one. First decide which wallet connection path you want me to use for UNIGOX sign-in going forward: **EVM wallet connection** or **TON wallet connection**.
 >
-> 1. **Email** - sign up with an email address. Can be yours or your agent's. If it's the agent's, it can log in on its own whenever needed.
-> 2. **Web3 wallet** - sign up with a wallet like MetaMask or Phantom. You'll give the agent the private key directly.
-> 3. **TON wallet** - sign up / log in with a TON wallet and let me reuse that wallet for JWT login.
+> If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery, then link the wallet path you chose once you're in.
 >
-> Which do you prefer? I can explain more about any of them if you need.
+> Which wallet connection path do you want me to end up using: **EVM** or **TON**?
 
-### If they choose email:
+### If they need email OTP first:
 
 > What email do you want to use?
 
@@ -76,12 +74,12 @@ Once they provide the email:
 2. If agent has access to the email inbox: read the code automatically
 3. If not: ask the user: "I just sent a 6-digit code to [email]. What's the code?"
 4. Call `verifyEmailOTP(code)` to log in
-5. Ask whether they want to link an EVM wallet now, a TON wallet now, or keep email-only for the moment
+5. Ask: "Now that you're in, which wallet connection path do you want me to use for future UNIGOX sign-in: EVM wallet connection or TON wallet connection?"
 6. If EVM: call `generateAndLinkWallet()`, save `UNIGOX_PRIVATE_KEY`, save `UNIGOX_EMAIL`, proceed to Step 3
 7. If TON: collect TON mnemonic/address, call `linkTonWallet()`, save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_MNEMONIC`, optional `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`, proceed to Step 3
-8. If email-only: save `UNIGOX_EMAIL`, explain that future re-auth may need another OTP, then proceed to Step 3
+8. If they want to stay email-only for now: save `UNIGOX_EMAIL`, explain that future re-auth may need another OTP and that they can later choose EVM or TON as the replayable wallet path, then proceed to Step 3
 
-### If they choose web3 wallet:
+### If they choose EVM wallet connection:
 
 > Sign up at unigox.com with your wallet, then export your private key from the account settings. You'll need to email hello@unigox.com to request export access first.
 >
@@ -143,14 +141,15 @@ If they want to top up later: that's fine, proceed to Step 5.
 When the agent restarts and finds `UNIGOX_PRIVATE_KEY` in `.env`:
 - Log in silently using the saved EVM key
 - No onboarding needed
-- If login fails (expired/revoked), re-run onboarding
+- If login fails (expired/revoked), re-run onboarding and ask which wallet connection path the user wants to use: EVM or TON
 
 When the agent restarts and finds `UNIGOX_TON_MNEMONIC` in `.env`:
 - Log in silently using TON auth
-- If login fails, check `UNIGOX_TON_ADDRESS` and re-run onboarding if needed
+- If login fails, check `UNIGOX_TON_ADDRESS` and re-run onboarding if needed, again asking which wallet connection path the user wants: EVM or TON
 
 When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
-- Use the email flow to re-authenticate
+- First ask which wallet connection path the user wants for UNIGOX sign-in: EVM wallet connection or TON wallet connection
+- If neither path is ready yet, use the email flow to re-authenticate
 - Agent email: reads OTP automatically
 - User email: asks for the code
 

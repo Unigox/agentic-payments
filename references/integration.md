@@ -5,6 +5,7 @@
 ```typescript
 import fs from "fs";
 import path from "path";
+import { getUnigoxWalletConnectionPrompt } from "./unigox-client";
 import type { UnigoxClientConfig } from "./unigox-client";
 
 function loadEnvValue(key: string): string | undefined {
@@ -45,7 +46,7 @@ function loadUnigoxConfig(): UnigoxClientConfig {
   const email = loadEnvValue("UNIGOX_EMAIL");
   if (email) return { email, authMode: "email" };
 
-  throw new Error("UNIGOX auth config not found. Run onboarding first.");
+  throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
 }
 ```
 
@@ -57,6 +58,16 @@ import UnigoxClient from "./unigox-client";
 const client = new UnigoxClient(loadUnigoxConfig());
 await client.login();
 ```
+
+## Prompt when auth is missing or only recovery email is available
+
+Use this exact user-facing prompt before asking for credentials:
+
+> Which wallet connection path should I use to sign in on UNIGOX: **EVM wallet connection** or **TON wallet connection**?
+>
+> If neither is ready yet, we can still use **email OTP** for onboarding or recovery first.
+
+This keeps the skill's normal sign-in language centered on the two replayable wallet paths, while preserving email as the fallback.
 
 ## Email → TON linking
 

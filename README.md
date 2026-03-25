@@ -41,11 +41,15 @@ You can customize your username in the settings.
 Send an email to **hello@unigox.com** requesting access to Agentic Payments. Include your UNIGOX username so we can enable your account.
 
 ### 3. Configure authentication
-You now have three viable auth paths:
+When the skill needs to sign in on UNIGOX, the first auth question should be:
+
+> Which wallet connection path should I use to sign in on UNIGOX: **EVM wallet connection** or **TON wallet connection**?
+
+Those are the two replayable wallet sign-in paths. Email remains useful, but as an onboarding / recovery fallback rather than the main wording for repeatable sign-in.
 
 - **EVM private key** — best all-around option. Lets the skill authenticate and also sign EVM helper actions like escrow withdrawals and bridge-outs.
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
-- **Agent email** — useful for onboarding and recovery. You can later link either an EVM wallet or a TON wallet.
+- **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
@@ -57,7 +61,7 @@ You now have three viable auth paths:
 Add Agentic Payments to your OpenClaw agent.
 
 ### 5. Initialize the agent
-On first run, the skill walks you through setup: choosing an auth path (EVM, TON, or email), optionally linking wallets, configuring payment methods, and adding your first contacts. More details in the setup guide.
+On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If neither is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. After that it helps with payment methods and your first contacts. More details in the setup guide.
 
 ### 6. Fund your wallet
 Two options:
