@@ -40,6 +40,12 @@ export interface ContactMatch {
   matchType: "key" | "name" | "alias";
 }
 
+export interface ContactResolution {
+  match?: ContactMatch;
+  ambiguous: ContactMatch[];
+  matchedBy?: "exact" | "partial";
+}
+
 function baseStore(): ContactStoreData {
   return {
     contacts: {},
@@ -117,29 +123,89 @@ export function saveContacts(store: ContactStoreData, filePath = DEFAULT_CONTACT
   return normalized;
 }
 
-export function resolveContact(store: ContactStoreData, query: string | undefined | null): ContactMatch | undefined {
-  const normalizedQuery = normalizeLookupValue(query);
-  if (!normalizedQuery) return undefined;
+function dedupeMatches(matches: ContactMatch[]): ContactMatch[] {
+  const seen = new Set<string>();
+  return matches.filter((match) => {
+    if (seen.has(match.key)) return false;
+    seen.add(match.key);
+    return true;
+  });
+}
+
+function isPartialLookupMatch(candidate: string, normalizedQuery: string): boolean {
+  if (!candidate || normalizedQuery.length < 2) return false;
+  return candidate.includes(normalizedQuery);
+}
+
+function collectExactMatches(store: ContactStoreData, normalizedQuery: string): ContactMatch[] {
+  const matches: ContactMatch[] = [];
 
   for (const [key, contact] of Object.entries(store.contacts)) {
     if (normalizeLookupValue(key) === normalizedQuery) {
-      return { key, contact, matchType: "key" };
+      matches.push({ key, contact, matchType: "key" });
     }
   }
 
   for (const [key, contact] of Object.entries(store.contacts)) {
     if (normalizeLookupValue(contact.name) === normalizedQuery) {
-      return { key, contact, matchType: "name" };
+      matches.push({ key, contact, matchType: "name" });
     }
   }
 
   for (const [key, contact] of Object.entries(store.contacts)) {
     if ((contact.aliases || []).some((alias) => normalizeLookupValue(alias) === normalizedQuery)) {
-      return { key, contact, matchType: "alias" };
+      matches.push({ key, contact, matchType: "alias" });
     }
   }
 
-  return undefined;
+  return dedupeMatches(matches);
+}
+
+function collectPartialMatches(store: ContactStoreData, normalizedQuery: string): ContactMatch[] {
+  const matches: ContactMatch[] = [];
+
+  for (const [key, contact] of Object.entries(store.contacts)) {
+    if (isPartialLookupMatch(normalizeLookupValue(key), normalizedQuery)) {
+      matches.push({ key, contact, matchType: "key" });
+      continue;
+    }
+    if (isPartialLookupMatch(normalizeLookupValue(contact.name), normalizedQuery)) {
+      matches.push({ key, contact, matchType: "name" });
+      continue;
+    }
+    if ((contact.aliases || []).some((alias) => isPartialLookupMatch(normalizeLookupValue(alias), normalizedQuery))) {
+      matches.push({ key, contact, matchType: "alias" });
+    }
+  }
+
+  return dedupeMatches(matches);
+}
+
+export function resolveContactQuery(store: ContactStoreData, query: string | undefined | null): ContactResolution {
+  const normalizedQuery = normalizeLookupValue(query);
+  if (!normalizedQuery) return { ambiguous: [] };
+
+  const exactMatches = collectExactMatches(store, normalizedQuery);
+  if (exactMatches.length === 1) {
+    return { match: exactMatches[0], ambiguous: [], matchedBy: "exact" };
+  }
+  if (exactMatches.length > 1) {
+    return { ambiguous: exactMatches, matchedBy: "exact" };
+  }
+
+  const partialMatches = collectPartialMatches(store, normalizedQuery);
+  if (partialMatches.length === 1) {
+    return { match: partialMatches[0], ambiguous: [], matchedBy: "partial" };
+  }
+  if (partialMatches.length > 1) {
+    return { ambiguous: partialMatches, matchedBy: "partial" };
+  }
+
+  return { ambiguous: [] };
+}
+
+export function resolveContact(store: ContactStoreData, query: string | undefined | null): ContactMatch | undefined {
+  return resolveContactQuery(store, query).match;
 }
 
 export function ensureContact(

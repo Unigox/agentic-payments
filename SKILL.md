@@ -53,8 +53,11 @@ Extract from user message:
 
 ### 2. Resolve Contact
 
-Read `contacts.json` from skill directory. Match by `name` or `aliases` (case-insensitive).
+Read `contacts.json` from skill directory. Match by `name` or `aliases` (case-insensitive), and also attempt partial saved-contact resolution when the user only gives part of the saved name.
 
+- **Single clear saved-contact match** → confirm the full saved name explicitly before continuing
+- **Single clear match + exactly one saved currency / payout setup** → use that stored route as the default instead of asking a broad generic currency question
+- **Multiple saved-contact matches** → ask a disambiguation question with the full saved names
 - **Found with details** → run balance preflight, then confirm
 - **Found without details** → ask for payment details, save, proceed
 - **Not found** → ask for full name, payment method, details, save as new contact

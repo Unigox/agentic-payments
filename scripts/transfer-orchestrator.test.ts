@@ -717,6 +717,91 @@ test("stale saved contact gets revalidated, updated, and then used", async () =>
   assert.equal(contacts.contacts.mom.paymentMethods.EUR.details.revtag, "mom_ok");
 });
 
+test("saved contact partial name resolves to the full contact and defaults the single saved route", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["alex", "sasha"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "alex_vino" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("saved contact Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.equal(res.session.recipientName, "Aleksandr Example");
+  assert.equal(res.session.currency, "EUR");
+  assert.equal(res.session.payment?.methodSlug, "revolut");
+  assert.equal(res.session.payment?.networkSlug, "revolut-username");
+  assert.match(res.reply, /I found saved contact Aleksandr Example/i);
+  assert.match(res.reply, /saved EUR via Revolut \/ Revolut Username payout route by default/i);
+  assert.match(res.reply, /How much EUR should I send to Aleksandr Example\?/i);
+  assert.doesNotMatch(res.reply, /What currency should the recipient receive/i);
+});
+
+test("saved contact partial name asks for disambiguation when multiple contacts match", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      "aleksandr-v": {
+        name: "Aleksandr Example",
+        aliases: ["alex v"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "alex_vino" },
+          },
+        },
+      },
+      "aleksandr-p": {
+        name: "Aleksandr Sample",
+        aliases: ["aleksandr p"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "alex_petrov" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient();
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("saved contact Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_recipient_name");
+  assert.match(res.reply, /multiple saved contacts matching 'Aleksandr'/i);
+  assert.match(res.reply, /Aleksandr Example/i);
+  assert.match(res.reply, /Aleksandr Sample/i);
+  assert.deepEqual(res.options, ["Aleksandr Example", "Aleksandr Sample"]);
+});
+
 test("save-contact-only flow collects details, allows skip on optional field, and never executes a transfer", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();

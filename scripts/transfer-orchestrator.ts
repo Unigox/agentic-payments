@@ -44,8 +44,10 @@ import {
   DEFAULT_CONTACTS_FILE,
   SKILL_DIR,
   loadContacts,
+  normalizeLookupValue,
   saveContacts,
   resolveContact,
+  resolveContactQuery,
   upsertContactPaymentMethod,
 } from "./contact-store.ts";
 import type { ContactMatch, ContactRecord, StoredPaymentMethod } from "./contact-store.ts";
@@ -437,6 +439,16 @@ function parseRecipient(text: string | undefined): string | undefined {
   return undefined;
 }
 
+function parseSavedContactRecipient(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  const match = value.match(/\b(?:saved contact|existing contact|someone saved)\s+(?:named\s+)?([a-z0-9][a-z0-9 .,'@_-]{1,60})$/i);
+  const candidate = match?.[1]?.trim().replace(/[!?.,]+$/g, "");
+  if (!candidate) return undefined;
+  if (/\b(currency|amount|method|wallet|status)\b/i.test(candidate)) return undefined;
+  return candidate;
+}
+
 function parseIntentHints(text: string | undefined): ParsedHints {
   const value = cleanText(text);
   if (!value) return {};
@@ -448,7 +460,7 @@ function parseIntentHints(text: string | undefined): ParsedHints {
     ...(amountCurrency.currency ? { currency: amountCurrency.currency } : {}),
   };
 
-  if (/(?:save|add).*(?:contact|recipient)|contact only|for later/.test(lower)) {
+  if (/(?:\bsave\b|\badd\b).*(?:contact|recipient)|contact only|for later/.test(lower)) {
     hints.goal = "save_contact_only";
   }
   if (/make a transfer|send money|send|transfer|pay /.test(lower) && !hints.goal) {
@@ -460,7 +472,7 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/new recipient|new contact|someone new/.test(lower)) {
     hints.savedOrNew = "new";
   }
-  const recipient = parseRecipient(value);
+  const recipient = parseRecipient(value) || (hints.savedOrNew === "saved" ? parseSavedContactRecipient(value) : undefined);
   if (recipient) hints.recipient = recipient;
 
   const standaloneCurrency = parseStandaloneCurrency(value);
@@ -1191,6 +1203,39 @@ function buildSavePrompt(session: TransferSession): string {
     return `Do you want me to update ${session.recipientName}'s saved ${session.currency} payout details for ${summarizePayment(session)}? Reply yes or no.`;
   }
   return `Do you want me to save ${session.recipientName} as a contact for future ${session.currency} transfers? Reply yes or no.`;
+}
+
+function prependReplyContext(result: TransferFlowResult, prefix?: string): TransferFlowResult {
+  if (!prefix) return result;
+  result.reply = `${prefix} ${result.reply}`;
+  result.session.lastPrompt = result.reply;
+  return result;
+}
+
+function addReplyNote(existing: string | undefined, note: string | undefined): string | undefined {
+  if (!note) return existing;
+  if (existing?.includes(note)) return existing;
+  return existing ? `${existing} ${note}` : note;
+}
+
+function summarizeStoredPaymentRoute(currency: string, payment: StoredPaymentMethod): string {
+  const methodName = payment.method?.trim();
+  const networkName = payment.network?.trim();
+  const route = networkName && methodName && normalizeLookupValue(networkName) !== normalizeLookupValue(methodName)
+    ? `${methodName} / ${networkName}`
+    : networkName || methodName || "saved payout route";
+  return `${currency.toUpperCase()} via ${route}`;
+}
+
+function getSingleStoredPaymentSetup(contact: ContactRecord | undefined): { currency: string; method: StoredPaymentMethod } | undefined {
+  const entries = Object.entries(contact?.paymentMethods || {});
+  if (entries.length !== 1) return undefined;
+  const [currency, method] = entries[0];
+  return { currency, method };
+}
+
+function buildSavedContactDisambiguation(query: string, matches: ContactMatch[]): string {
+  return `I found multiple saved contacts matching '${query}': ${matches.map((match) => match.contact.name).join(", ")}. Which one do you mean?`;
 }
 
 function isBankLikeMethod(method: PaymentMethodInfo): boolean {
@@ -2080,6 +2125,7 @@ export async function advanceTransferFlow(
   }
   const events: TransferFlowEvent[] = [];
   let consumedTurnForSelection = false;
+  let savedContactReplyNote: string | undefined;
 
   if (hints.cancel) {
     session.status = "cancelled";
@@ -2188,15 +2234,26 @@ export async function advanceTransferFlow(
 
   if (session.recipientQuery && !session.recipientName) {
     const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
-    const match = resolveContact(store, session.recipientQuery);
-    if (match) {
-      session.contactKey = match.key;
-      session.recipientName = match.contact.name;
-      session.aliases = match.contact.aliases || [];
+    const resolution = resolveContactQuery(store, session.recipientQuery);
+    if (resolution.match) {
+      const queryDiffersFromSavedName = normalizeLookupValue(session.recipientQuery) !== normalizeLookupValue(resolution.match.contact.name);
+      session.contactKey = resolution.match.key;
+      session.recipientName = resolution.match.contact.name;
+      session.aliases = resolution.match.contact.aliases || [];
       session.contactExists = true;
       session.recipientMode = "saved";
+      if (queryDiffersFromSavedName || resolution.matchedBy === "partial") {
+        savedContactReplyNote = addReplyNote(savedContactReplyNote, `I found saved contact ${session.recipientName}.`);
+      }
     } else if (session.recipientMode === "saved") {
       session.stage = "awaiting_recipient_name";
+      if (resolution.ambiguous.length) {
+        return reply(
+          withUpdate(session, deps),
+          buildSavedContactDisambiguation(session.recipientQuery, resolution.ambiguous),
+          resolution.ambiguous.map((match) => match.contact.name)
+        );
+      }
       return reply(withUpdate(session, deps), `I couldn't find a saved contact for '${session.recipientQuery}'. Who is the recipient?`);
     } else {
       session.recipientName = session.recipientQuery;
@@ -2207,13 +2264,29 @@ export async function advanceTransferFlow(
     }
   }
 
+  if (session.contactExists && !session.currency) {
+    const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
+    const contact = session.contactKey ? store.contacts[session.contactKey] : resolveContact(store, session.recipientName)?.contact;
+    const singleStoredPayment = getSingleStoredPaymentSetup(contact);
+    if (singleStoredPayment) {
+      setCurrency(session, singleStoredPayment.currency);
+      savedContactReplyNote = addReplyNote(
+        savedContactReplyNote,
+        `I'll start from the saved ${summarizeStoredPaymentRoute(singleStoredPayment.currency, singleStoredPayment.method)} payout route by default.`
+      );
+    }
+  }
+
   if (!session.currency) {
     session.stage = "awaiting_currency";
     const maybeCurrency = parseStandaloneCurrency(normalizedTurn.text);
     if (maybeCurrency) {
       setCurrency(session, maybeCurrency);
     } else {
-      return reply(withUpdate(session, deps), "What currency should the recipient receive? If you don't specify, I can default to EUR.");
+      return prependReplyContext(
+        reply(withUpdate(session, deps), "What currency should the recipient receive? If you don't specify, I can default to EUR."),
+        savedContactReplyNote
+      );
     }
   }
 
@@ -2221,13 +2294,20 @@ export async function advanceTransferFlow(
     const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
     const match = session.contactKey ? { key: session.contactKey, contact: store.contacts[session.contactKey] } as ContactMatch : resolveContact(store, session.recipientName);
     const contact = match?.contact;
+    const singleStoredPayment = getSingleStoredPaymentSetup(contact);
+    if (singleStoredPayment && singleStoredPayment.currency === session.currency) {
+      savedContactReplyNote = addReplyNote(
+        savedContactReplyNote,
+        `I'll start from the saved ${summarizeStoredPaymentRoute(singleStoredPayment.currency, singleStoredPayment.method)} payout route by default.`
+      );
+    }
     if (contact?.paymentMethods?.[session.currency!]) {
       const validation = await validateStoredContactSelection(session, contact, deps);
       if (!validation.valid) {
         session.stage = "awaiting_payment_details";
         const fieldPrompt = await promptForNextField(session, deps);
         fieldPrompt.reply = `I found saved ${session.currency} details for ${session.recipientName}, but they look stale or incomplete. ${fieldPrompt.reply}`;
-        return fieldPrompt;
+        return prependReplyContext(fieldPrompt, savedContactReplyNote);
       }
     }
   }
@@ -2250,10 +2330,13 @@ export async function advanceTransferFlow(
           networkName: "",
         };
         session.stage = "awaiting_payment_network";
-        return reply(
-          withUpdate(session, deps),
-          buildPaymentNetworkPrompt(method, session.currency!),
-          method.networks.map((network) => network.name)
+        return prependReplyContext(
+          reply(
+            withUpdate(session, deps),
+            buildPaymentNetworkPrompt(method, session.currency!),
+            method.networks.map((network) => network.name)
+          ),
+          savedContactReplyNote
         );
       }
 
@@ -2273,7 +2356,10 @@ export async function advanceTransferFlow(
       const ambiguity = selection.ambiguous?.length
         ? `I found multiple matches: ${selection.ambiguous.map((method) => method.name).join(", ")}.`
         : undefined;
-      return reply(withUpdate(session, deps), buildPaymentMethodPrompt(session, currencyData, ambiguity));
+      return prependReplyContext(
+        reply(withUpdate(session, deps), buildPaymentMethodPrompt(session, currencyData, ambiguity)),
+        savedContactReplyNote
+      );
     }
   }
 
@@ -2283,15 +2369,21 @@ export async function advanceTransferFlow(
     const method = currencyData.paymentMethods.find((entry) => entry.id === session.payment?.methodId);
     if (!method) {
       resetPaymentSelection(session);
-      return reply(withUpdate(session, deps), `I couldn't re-resolve that payment method for ${session.currency}. Let's pick it again.`);
+      return prependReplyContext(
+        reply(withUpdate(session, deps), `I couldn't re-resolve that payment method for ${session.currency}. Let's pick it again.`),
+        savedContactReplyNote
+      );
     }
     const network = chooseNetwork(method.networks, normalizedTurn.option || normalizedTurn.text || "");
     if (!network) {
       session.stage = "awaiting_payment_network";
-      return reply(
-        withUpdate(session, deps),
-        buildPaymentNetworkPrompt(method, session.currency!),
-        method.networks.map((entry) => entry.name)
+      return prependReplyContext(
+        reply(
+          withUpdate(session, deps),
+          buildPaymentNetworkPrompt(method, session.currency!),
+          method.networks.map((entry) => entry.name)
+        ),
+        savedContactReplyNote
       );
     }
     consumedTurnForSelection = true;
@@ -2307,7 +2399,7 @@ export async function advanceTransferFlow(
   const detailResult = await collectPaymentDetails(session, detailTurn, deps);
   if (detailResult) {
     detailResult.session.stage = "awaiting_payment_details";
-    return detailResult;
+    return prependReplyContext(detailResult, savedContactReplyNote);
   }
 
   if (session.saveContactDecision !== "no" && (!session.contactExists || session.contactStale || session.goal === "save_contact_only")) {
@@ -2319,24 +2411,36 @@ export async function advanceTransferFlow(
       if (session.goal === "save_contact_only") {
         session.status = "completed";
         session.stage = "completed";
-        return reply(withUpdate(session, deps), event?.message || `${session.recipientName} saved.`, undefined, events);
+        return prependReplyContext(
+          reply(withUpdate(session, deps), event?.message || `${session.recipientName} saved.`, undefined, events),
+          savedContactReplyNote
+        );
       }
     } else if (hints.saveContactDecision === "no") {
       session.saveContactDecision = "no";
       if (session.goal === "save_contact_only") {
         session.status = "completed";
         session.stage = "completed";
-        return reply(withUpdate(session, deps), `Okay, I didn't save ${session.recipientName}.`, undefined, events);
+        return prependReplyContext(
+          reply(withUpdate(session, deps), `Okay, I didn't save ${session.recipientName}.`, undefined, events),
+          savedContactReplyNote
+        );
       }
     } else {
-      return reply(withUpdate(session, deps), buildSavePrompt(session));
+      return prependReplyContext(
+        reply(withUpdate(session, deps), buildSavePrompt(session)),
+        savedContactReplyNote
+      );
     }
   }
 
   if (session.goal === "save_contact_only") {
     session.status = "completed";
     session.stage = "completed";
-    return reply(withUpdate(session, deps), `${session.recipientName} is ready for later transfers.`, undefined, events);
+    return prependReplyContext(
+      reply(withUpdate(session, deps), `${session.recipientName} is ready for later transfers.`, undefined, events),
+      savedContactReplyNote
+    );
   }
 
   if (!session.amount) {
@@ -2346,10 +2450,16 @@ export async function advanceTransferFlow(
       session.amount = parsed.amount;
       if (parsed.currency && parsed.currency !== session.currency) {
         setCurrency(session, parsed.currency);
-        return reply(withUpdate(session, deps), `You asked for ${parsed.currency}, so I reset the payout method selection. Which method should I use?`, undefined, events);
+        return prependReplyContext(
+          reply(withUpdate(session, deps), `You asked for ${parsed.currency}, so I reset the payout method selection. Which method should I use?`, undefined, events),
+          savedContactReplyNote
+        );
       }
     } else {
-      return reply(withUpdate(session, deps), `How much ${session.currency} should I send to ${session.recipientName}?`, undefined, events);
+      return prependReplyContext(
+        reply(withUpdate(session, deps), `How much ${session.currency} should I send to ${session.recipientName}?`, undefined, events),
+        savedContactReplyNote
+      );
     }
   }
 
@@ -2357,7 +2467,7 @@ export async function advanceTransferFlow(
   const preflight = await ensureExecutionPreflight(session, deps, client);
   events.push(...preflight.events);
   if (preflight.blockedResult) {
-    return preflight.blockedResult;
+    return prependReplyContext(preflight.blockedResult, savedContactReplyNote);
   }
 
   if (!session.execution.confirmed) {
@@ -2365,9 +2475,12 @@ export async function advanceTransferFlow(
     if (hints.confirm) {
       session.execution.confirmed = true;
     } else {
-      return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, events);
+      return prependReplyContext(
+        reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, events),
+        savedContactReplyNote
+      );
     }
   }
 
-  return handleExecution(session, { ...deps, client });
+  return prependReplyContext(await handleExecution(session, { ...deps, client }), savedContactReplyNote);
 }
