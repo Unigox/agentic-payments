@@ -206,7 +206,8 @@ If they want to top up later: that's fine, proceed to Step 5.
 
 When the agent restarts and finds `UNIGOX_EVM_LOGIN_PRIVATE_KEY` in `.env`:
 - Log in silently using the saved EVM login key
-- If `UNIGOX_EVM_SIGNING_PRIVATE_KEY` is missing, block transfer execution and ask for the separate exported signing key before proceeding
+- At the start of the next send flow, surface the current UNIGOX username and current wallet balance instead of re-asking auth-path questions
+- If `UNIGOX_EVM_SIGNING_PRIVATE_KEY` is missing, ask only for the separate exported signing key before proceeding
 - If login fails, re-run onboarding and ask which wallet connection path the user wants to use: EVM or TON
 
 When the agent restarts and finds only legacy `UNIGOX_PRIVATE_KEY` in `.env`:
@@ -216,6 +217,7 @@ When the agent restarts and finds only legacy `UNIGOX_PRIVATE_KEY` in `.env`:
 
 When the agent restarts and finds `UNIGOX_TON_MNEMONIC` in `.env`:
 - Log in silently using TON auth
+- At the start of the next send flow, surface the current UNIGOX username and current wallet balance instead of restarting onboarding
 - If login fails, check `UNIGOX_TON_ADDRESS` and re-run onboarding if needed, again asking which wallet connection path the user wants: EVM or TON
 
 When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:

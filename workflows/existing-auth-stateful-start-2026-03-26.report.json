@@ -1,0 +1,76 @@
+{
+  "engine": {
+    "status": "completed",
+    "run_id": "send_money_existing_auth_stateful_start_20260326",
+    "goal": "Fix the send-money flow so existing stored UNIGOX auth is detected in the real chat entry path, auth questions are skipped when credentials are already usable, and the flow surfaces the current username and balance at the start.",
+    "completed_steps": [
+      "inspect_current_start_flow",
+      "design_stateful_start_fix",
+      "implement_and_document",
+      "validate_with_tests",
+      "commit_fix"
+    ],
+    "total_steps": 5,
+    "drift_flags_total": 0,
+    "corrections_total": 0,
+    "trace_entries": 10
+  },
+  "meta": {
+    "total_findings": 0,
+    "critical": 0,
+    "warnings": 0,
+    "info": 0,
+    "findings": [],
+    "verdict": "clean"
+  },
+  "step_outputs": {
+    "inspect_current_start_flow": {
+      "files_reviewed": [
+        "skills/send-money/scripts/transfer-orchestrator.ts",
+        "skills/send-money/scripts/transfer-orchestrator.test.ts",
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md"
+      ],
+      "root_cause": "startTransferFlow treated deps.authState as authoritative and skipped stored env/.env detection whenever any authState object was injected, so stale false or partial auth state could re-trigger onboarding even when usable keys were already stored locally.",
+      "count": 6
+    },
+    "design_stateful_start_fix": {
+      "design_notes": "Merge injected auth state with detected stored auth; hydrate username plus balance at transfer start when auth is already usable; show the startup snapshot only once in the first transfer reply; and narrow auth prompts to the missing credential instead of restarting auth-path selection.",
+      "summary": "Fix the real transfer entry path, not just the helper, and mirror the behavior in docs/tests.",
+      "count": 2
+    },
+    "implement_and_document": {
+      "changed_files": [
+        "skills/send-money/scripts/transfer-orchestrator.ts",
+        "skills/send-money/scripts/transfer-orchestrator.test.ts",
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md",
+        "skills/send-money/workflows/existing-auth-stateful-start-2026-03-26.yaml",
+        "skills/send-money/workflows/existing-auth-stateful-start-2026-03-26.report.json"
+      ],
+      "docs_updated": [
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md"
+      ],
+      "count": 8
+    },
+    "validate_with_tests": {
+      "tests_run": [
+        "cd skills/send-money && node --test scripts/transfer-orchestrator.test.ts"
+      ],
+      "test_results": "PASS (21/21 tests). Added regressions for stale injected auth state vs stored split EVM auth and for stored-login-but-missing-signing-key startup behavior.",
+      "count": 1
+    },
+    "commit_fix": {
+      "status": "completed",
+      "commit_sha": "captured in git history / task summary",
+      "count": 1
+    }
+  }
+}

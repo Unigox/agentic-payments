@@ -1,0 +1,80 @@
+goal: "Fix the send-money flow so existing stored UNIGOX auth is detected in the real chat entry path, auth questions are skipped when credentials are already usable, and the flow surfaces the current username and balance at the start."
+run_id: "send_money_existing_auth_stateful_start_20260326"
+constraints:
+  - "use_modular_builder_process"
+  - "keep_changes_local_to_send_money_skill"
+  - "fix_real_entry_path_not_just_helper_logic"
+  - "update_docs_and_tests"
+  - "commit_only_relevant_send_money_files"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "root_cause"
+  - "files_reviewed"
+  - "design_notes"
+  - "changed_files"
+  - "docs_updated"
+  - "tests_run"
+  - "test_results"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_current_start_flow"
+    name: "Inspect the current send-money start flow, auth-state loading, and live entry-path docs"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:root_cause"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_stateful_start_fix"
+    name: "Design the stateful start fix for auth detection, username hydration, and early balance surfacing"
+    required_predecessors:
+      - "inspect_current_start_flow"
+    required_checks:
+      - "root_cause_known"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:summary"
+      - "min_count:1"
+    external_action: false
+
+  - id: "implement_and_document"
+    name: "Implement the start-flow fix in the orchestrator and update user-facing skill docs"
+    required_predecessors:
+      - "design_stateful_start_fix"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_with_tests"
+    name: "Run targeted regression tests for existing-auth startup and missing-auth prompts"
+    required_predecessors:
+      - "implement_and_document"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_fix"
+    name: "Commit the completed send-money stateful-start fix with a descriptive message"
+    required_predecessors:
+      - "validate_with_tests"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false

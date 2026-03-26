@@ -9,6 +9,8 @@ This document defines the higher-level chat/orchestration flow implemented in `s
    - Parse any recipient, amount, or currency hints from the first message.
 
 2. **Auth gate (transfer only)**
+   - On flow start, first resolve stored auth from process env, the skill `.env`, or `~/.openclaw/.env`.
+   - If stored auth is already usable, skip auth-path/key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance in the first reply.
    - If replayable UNIGOX auth is missing, ask exactly:
      - **EVM wallet connection**
      - **TON wallet connection**
@@ -18,7 +20,7 @@ This document defines the higher-level chat/orchestration flow implemented in `s
    - After the user pastes either EVM key, try to delete that message if the runtime/channel supports it.
    - If automatic deletion is unavailable, block the flow, tell the user to delete the key-containing message themselves, and require explicit `deleted` confirmation before continuing.
    - Verify the **login wallet key**, surface the current UNIGOX username, and only then ask for the separate **UNIGOX-exported EVM signing key**.
-   - If EVM login is configured but the exported signing key is still missing, block transfer execution before recipient collection.
+   - If EVM login is configured but the exported signing key is still missing, ask only for that missing signing key instead of restarting auth-path selection.
    - Do not continue to execution until auth/onboarding is completed.
 
 3. **Recipient gate**

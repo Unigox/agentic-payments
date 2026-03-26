@@ -5,6 +5,8 @@ import os from "os";
 import path from "path";
 
 import { detectAuthState, loadUnigoxConfigFromEnv, startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
+
+process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP = "1";
 import { validatePaymentDetailInput } from "./unigox-client.ts";
 import type {
   CurrencyPaymentData,
@@ -34,9 +36,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
     }
   }
 
-  try {
-    return fn();
-  } finally {
+  const restore = () => {
     for (const [key, value] of Object.entries(original)) {
       if (value === undefined) {
         delete process.env[key];
@@ -44,6 +44,18 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
         process.env[key] = value;
       }
     }
+  };
+
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      return (result as Promise<unknown>).finally(restore) as T;
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
   }
 }
 
@@ -576,7 +588,7 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
   assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
   assert.match(res.reply, /keep escrow locked/i);
-  assert.deepEqual(client.calls.slice(0, 7), ["getProfile", "getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
+  assert.deepEqual(client.calls.slice(0, 8), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
@@ -736,7 +748,7 @@ test("insufficient balance blocks before trade creation and before confirmation"
   assert.ok(res.events.some((event) => event.type === "balance_checked"));
   assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
   assert.match(res.reply, /will not place the trade/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance"]);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance"]);
 });
 
 test("changing currency mid-flow resets payment selection and asks for a new method", async () => {
@@ -972,6 +984,50 @@ test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are av
   assert.equal(result.evmLoginPrivateKey, "0xlogin");
   assert.equal(result.evmSigningPrivateKey, "0xsign");
   assert.equal(result.email, "agent@example.com");
+});
+
+test("stored split EVM auth overrides stale injected auth state and shows username plus balance at flow start", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "stateful", balance: 250 });
+
+  const res = await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, async () => startTransferFlow("Hey I want to make a transfer", makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  })));
+
+  assert.equal(res.session.stage, "awaiting_recipient_mode");
+  assert.match(res.reply, /@stateful/i);
+  assert.match(res.reply, /Current wallet balance: 250\.00 USD/i);
+  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
+  assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
+  assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
+});
+
+test("stored EVM login without signing key skips auth-choice questions and asks only for the missing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "stateful", balance: 250 });
+
+  const res = await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, async () => startTransferFlow("Hey I want to make a transfer", makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  })));
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /@stateful/i);
+  assert.match(res.reply, /Current wallet balance: 250\.00 USD/i);
+  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
+  assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
 });
 
 test("missing EVM auth asks the user to sign in on unigox.com before requesting the login key", async () => {

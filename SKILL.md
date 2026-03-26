@@ -18,7 +18,7 @@ Conversational money transfer via UNIGOX P2P exchange.
 
 On first use, check if the environment is configured. Read `references/onboarding.md` and follow it step by step.
 
-**Quick check**: look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_MNEMONIC` for TON. Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
+**Quick check**: before asking any onboarding question, look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_MNEMONIC` for TON. Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If stored auth is already usable, skip auth-path and key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance at the start of the send flow. Only ask auth questions for the missing piece (for example the exported signing key). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
 
 The onboarding flow:
 1. Explain what this skill does and the security model
@@ -92,6 +92,7 @@ If the user changes currency or payment method mid-flow, clear the dependent sel
 ### 4. Confirm
 
 Always run balance / identity preflight before the final confirmation.
+If stored auth already exists, the flow should also feel stateful at the very start: surface the current username and current balance in the first reply instead of re-asking setup questions.
 
 Example:
 > "You're signed in as @grape on UNIGOX. Current wallet balance: 250.00 USD. Send €50 to Svetlana Example via Revolut (@svetlana)?"
@@ -103,17 +104,18 @@ Only execute after explicit user confirmation.
 Use the UNIGOX client module. See `references/integration.md` for code patterns.
 
 ```
-1. If login is needed and no replayable wallet path is configured, ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?"
-2. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen wallet path
-3. For EVM, first confirm the user has already signed in on unigox.com with that wallet, then verify login with `UNIGOX_EVM_LOGIN_PRIVATE_KEY`, and only after that require the separate exported signing key before transfer execution
-4. Login with the configured auth mode (EVM login key or TON wallet auth)
-5. Fetch the current UNIGOX username when available and tell the user during onboarding / auth confirmation
-6. Check wallet balance early in the same conversational flow, before trade creation and before the final confirmation prompt
-7. If balance is insufficient, stop there — do **not** create a trade request
-8. Ensure payment detail exists on UNIGOX
-9. Create trade request (SELL crypto → fiat to recipient)
-10. Report trade request ID to user
-11. Wait for vendor match / status and handle the main unhappy paths:
+1. On flow start, check stored auth first (`UNIGOX_EVM_LOGIN_PRIVATE_KEY`, `UNIGOX_EVM_SIGNING_PRIVATE_KEY` / `UNIGOX_PRIVATE_KEY`, `UNIGOX_TON_MNEMONIC`, `UNIGOX_EMAIL`) instead of defaulting to onboarding.
+2. If login is needed and no replayable wallet path is configured, ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?"
+3. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen wallet path
+4. For EVM, first confirm the user has already signed in on unigox.com with that wallet, then verify login with `UNIGOX_EVM_LOGIN_PRIVATE_KEY`, and only after that require the separate exported signing key before transfer execution
+5. Login with the configured auth mode (EVM login key or TON wallet auth)
+6. Fetch the current UNIGOX username when available and show it early
+7. Check wallet balance early in the same conversational flow, including at flow start when stored auth is already usable, before trade creation and before the final confirmation prompt
+8. If balance is insufficient, stop there — do **not** create a trade request
+9. Ensure payment detail exists on UNIGOX
+10. Create trade request (SELL crypto → fiat to recipient)
+11. Report trade request ID to user
+12. Wait for vendor match / status and handle the main unhappy paths:
    - missing auth
    - insufficient balance
    - invalid field input
@@ -164,6 +166,7 @@ Preferred auth environment variables:
 - **Trade type is SELL** (sell crypto to send fiat)
 - **Show security warnings** on first run and when balance is high
 - **When auth is missing or needs recovery, explicitly ask for the wallet sign-in path first**: EVM wallet connection or TON wallet connection
+- **If stored auth is already usable, do not re-ask auth-path or key-collection questions.** Surface the current username and current balance first, then continue the send flow.
 - **If the user chooses EVM, do not ask for a key immediately**. First confirm they have already signed in on unigox.com with that wallet; only after that confirmation should you ask for the login wallet key
 - **Before requesting either EVM key, show the isolated-wallet warning**: newly created / isolated wallet only, never the main wallet
 - **After the user pastes an EVM key, try to delete that message if the runtime supports it**; otherwise instruct the user to delete it themselves and wait for explicit confirmation before continuing

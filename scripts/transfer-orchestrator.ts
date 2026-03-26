@@ -188,6 +188,10 @@ export interface AuthState {
   username?: string;
 }
 
+interface ResolvedAuthState extends AuthState {
+  balanceUsd?: number;
+}
+
 export interface SecretSubmissionState {
   kind: SecretKind;
   value: string;
@@ -244,6 +248,8 @@ export interface TransferSession {
     choice?: AuthChoice;
     evmSigningKeyAvailable?: boolean;
     username?: string;
+    balanceUsd?: number;
+    startupSnapshotShown?: boolean;
     pendingSecret?: SecretSubmissionState;
   };
   execution: {
@@ -494,6 +500,7 @@ function createSession(goal: TransferGoal, deps: TransferFlowDeps): TransferSess
     auth: {
       checked: false,
       available: false,
+      startupSnapshotShown: false,
     },
     execution: {
       confirmed: false,
@@ -507,11 +514,46 @@ function withUpdate(session: TransferSession, deps: TransferFlowDeps): TransferS
   return session;
 }
 
+function buildStartupAuthSnapshot(session: TransferSession): string | undefined {
+  const parts: string[] = [];
+  const formattedUsername = formatUsername(session.auth.username);
+  if (formattedUsername) {
+    parts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
+  }
+  if (typeof session.auth.balanceUsd === "number") {
+    parts.push(`Current wallet balance: ${session.auth.balanceUsd.toFixed(2)} USD.`);
+  }
+  return parts.length ? parts.join(" ") : undefined;
+}
+
+function decorateStartupReply(session: TransferSession, message: string): string {
+  if (session.goal !== "transfer" || !session.auth.available || session.auth.startupSnapshotShown) return message;
+
+  const snapshot = buildStartupAuthSnapshot(session);
+  if (!snapshot) return message;
+
+  const snapshotParts: string[] = [];
+  if (!/signed in as/i.test(message)) {
+    const formattedUsername = formatUsername(session.auth.username);
+    if (formattedUsername) {
+      snapshotParts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
+    }
+  }
+  if (!/Current wallet balance:/i.test(message) && typeof session.auth.balanceUsd === "number") {
+    snapshotParts.push(`Current wallet balance: ${session.auth.balanceUsd.toFixed(2)} USD.`);
+  }
+
+  session.auth.startupSnapshotShown = true;
+  if (!snapshotParts.length) return message;
+  return `${snapshotParts.join(" ")} ${message}`;
+}
+
 function reply(session: TransferSession, message: string, options?: string[], events: TransferFlowEvent[] = []): TransferFlowResult {
-  session.lastPrompt = message;
+  const finalMessage = decorateStartupReply(session, message);
+  session.lastPrompt = finalMessage;
   return {
     session,
-    reply: message,
+    reply: finalMessage,
     options,
     done: session.status === "completed" || session.status === "cancelled",
     events,
@@ -519,6 +561,9 @@ function reply(session: TransferSession, message: string, options?: string[], ev
 }
 
 function getEnvCandidates(): string[] {
+  if (process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP === "1") {
+    return [];
+  }
   return [
     path.join(SKILL_DIR, ".env"),
     path.join(process.env.HOME || "", ".openclaw", ".env"),
@@ -572,6 +617,19 @@ export function detectAuthState(): AuthState {
     authMode: email ? "email" : undefined,
     emailFallbackAvailable: !!email,
     evmSigningKeyAvailable: false,
+  };
+}
+
+function resolveInitialAuthState(authState?: AuthState): ResolvedAuthState {
+  const detected = detectAuthState();
+  if (!authState) return detected;
+
+  return {
+    hasReplayableAuth: authState.hasReplayableAuth || detected.hasReplayableAuth,
+    authMode: authState.authMode || detected.authMode,
+    emailFallbackAvailable: authState.emailFallbackAvailable || detected.emailFallbackAvailable,
+    evmSigningKeyAvailable: authState.evmSigningKeyAvailable === true || detected.evmSigningKeyAvailable === true,
+    username: authState.username || detected.username,
   };
 }
 
@@ -766,6 +824,31 @@ async function maybeHydrateAuthIdentity(
     }
   } catch {
     // Username is a nice UX enhancement, not a hard blocker.
+  }
+}
+
+async function maybeHydrateStartupAuthStatus(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client?: TransferExecutionClient
+): Promise<void> {
+  if (!session.auth.available) return;
+
+  let executionClient: TransferExecutionClient;
+  try {
+    executionClient = client || await getExecutionClient(deps);
+  } catch {
+    return;
+  }
+
+  await maybeHydrateAuthIdentity(session, deps, executionClient);
+
+  if (typeof session.auth.balanceUsd === "number") return;
+  try {
+    const balance = await executionClient.getWalletBalance();
+    session.auth.balanceUsd = balance.totalUsd;
+  } catch {
+    // Early balance surfacing improves UX but should not block the flow.
   }
 }
 
@@ -1554,6 +1637,7 @@ async function ensureExecutionPreflight(
   }
 
   const balance = await client.getWalletBalance();
+  session.auth.balanceUsd = balance.totalUsd;
   session.execution.preflight = {
     balanceUsd: balance.totalUsd,
     amount,
@@ -1780,7 +1864,7 @@ export async function advanceTransferFlow(
   }
 
   if (!session.auth.checked) {
-    const auth = deps.authState || detectAuthState();
+    const auth = resolveInitialAuthState(deps.authState);
     session.auth = {
       checked: true,
       available: auth.hasReplayableAuth,
@@ -1788,7 +1872,12 @@ export async function advanceTransferFlow(
       choice: session.auth.choice,
       evmSigningKeyAvailable: auth.evmSigningKeyAvailable,
       username: auth.username,
+      balanceUsd: auth.balanceUsd,
+      startupSnapshotShown: false,
     };
+    if (session.goal === "transfer" && session.auth.available) {
+      await maybeHydrateStartupAuthStatus(session, deps);
+    }
   }
 
   const authOnboardingReply = await maybeHandleAuthOnboardingTurn(session, normalizedTurn, deps);
