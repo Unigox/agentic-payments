@@ -185,8 +185,10 @@ If they want to top up now:
 - First ask which top-up method they want:
   - another UNIGOX user sends funds directly to their username
   - external / on-chain deposit
+- Before the top-up ask, load the best available preflight quote / best-offer data if UNIGOX exposes it for the exact payout route. Show the current rate basis, the estimated total wallet coverage needed, and the current shortfall in the same flow. If it is not a locked quote, label it clearly as an estimate and explain that the final matched rate / required amount can still change.
 - If they choose the internal UNIGOX route:
   - clearly show their current UNIGOX username
+  - tell them exactly how much they still need to top up based on that preflight quote / estimate
   - tell them to have the other UNIGOX user send funds directly to that username
   - do **not** switch into token + chain questions for this route unless they explicitly change to external deposit
 - If they choose the external / on-chain route:

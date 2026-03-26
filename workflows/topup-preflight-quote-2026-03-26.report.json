@@ -1,0 +1,92 @@
+{
+  "workflow": "topup-preflight-quote-2026-03-26.yaml",
+  "engine_report": {
+    "status": "completed",
+    "run_id": "send_money_topup_preflight_quote_20260326",
+    "goal": "Fix the send-money internal top-up flow so it shows preflight rate / quote economics and the required top-up amount before asking the user to fund their wallet.",
+    "completed_steps": [
+      "inspect_current_quote_gap",
+      "design_preflight_quote_fix",
+      "implement_preflight_quote_fix",
+      "validate_preflight_quote_fix",
+      "commit_preflight_quote_fix"
+    ],
+    "total_steps": 5,
+    "drift_flags_total": 0,
+    "corrections_total": 0,
+    "trace_entries": 10
+  },
+  "step_outputs": {
+    "inspect_current_quote_gap": {
+      "status": "done",
+      "summary": "Inspected the insufficient-balance path, found it compared wallet USD directly to fiat send amount, and confirmed the repo already exposes an authenticated /best-offer preflight endpoint via the frontend.",
+      "files_reviewed": [
+        "scripts/transfer-orchestrator.ts",
+        "scripts/unigox-client.ts",
+        "scripts/transfer-orchestrator.test.ts",
+        "../repos/unigox.com/hooks/offer/use-best-offer.ts"
+      ],
+      "root_cause": "The internal top-up path surfaced username-only instructions after a raw balance check. It did not fetch best-offer economics before blocking, so the user never saw the required top-up amount or rate basis early enough.",
+      "quote_source": "Use the existing authenticated trades /best-offer endpoint keyed by payment_details_id for a route-specific preflight estimate before trade creation.",
+      "count": 1
+    },
+    "design_preflight_quote_fix": {
+      "status": "done",
+      "summary": "Locked a design that ensures payment detail before the insufficient-balance branch, fetches the current best-offer estimate, and reuses the same quote basis in confirmation + internal top-up guidance.",
+      "design_notes": [
+        "Add a PreflightQuote model and client method that wraps the existing /best-offer endpoint.",
+        "Persist quote + paymentDetailsId in execution.preflight so the flow can reuse them after top-up and during trade creation.",
+        "Always label the preview as an estimate because the backend exposes a live best offer, not a locked quote."
+      ],
+      "flow_sequence": [
+        "collect payout details",
+        "ensure payment detail",
+        "fetch best-offer preflight estimate",
+        "show balance + rate basis + shortfall + estimate caveat",
+        "offer internal username top-up or external deposit"
+      ],
+      "count": 1
+    },
+    "implement_preflight_quote_fix": {
+      "status": "done",
+      "summary": "Implemented preflight quote loading, richer insufficient-balance / internal top-up copy, trade-request reuse of the quoted crypto amount, and docs/test updates.",
+      "changed_files": [
+        "scripts/transfer-orchestrator.ts",
+        "scripts/unigox-client.ts",
+        "scripts/transfer-orchestrator.test.ts",
+        "SKILL.md",
+        "README.md",
+        "references/onboarding.md",
+        "references/transfer-flow.md",
+        "workflows/topup-preflight-quote-2026-03-26.yaml",
+        "workflows/topup-preflight-quote-2026-03-26.report.json"
+      ],
+      "docs_updated": [
+        "SKILL.md",
+        "README.md",
+        "references/onboarding.md",
+        "references/transfer-flow.md"
+      ],
+      "count": 9
+    },
+    "validate_preflight_quote_fix": {
+      "status": "done",
+      "summary": "Ran the transfer orchestrator regression suite plus import smoke checks after the code/docs changes.",
+      "tests_run": [
+        "node --test scripts/transfer-orchestrator.test.ts",
+        "node --input-type=module -e \"await import('./scripts/unigox-client.ts'); await import('./scripts/transfer-orchestrator.ts'); console.log('imports ok')\""
+      ],
+      "test_results": [
+        "26/26 transfer-orchestrator tests passed.",
+        "Module import smoke check passed for unigox-client.ts and transfer-orchestrator.ts."
+      ],
+      "count": 2
+    },
+    "commit_preflight_quote_fix": {
+      "status": "done",
+      "summary": "Committed the send-money preflight quote UX fix in the skill repo.",
+      "commit_sha": "46ba731ca2fff98a4d543ce6723d48eae4e6c7ff",
+      "count": 1
+    }
+  }
+}

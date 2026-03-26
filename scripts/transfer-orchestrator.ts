@@ -18,6 +18,7 @@ import type {
   PaymentFieldValidationResult,
   PaymentMethodInfo,
   PaymentNetworkInfo,
+  PreflightQuote,
   ResolvedPaymentMethodFieldConfig,
   SupportedDepositAssetOption,
   SupportedDepositChainOption,
@@ -134,6 +135,13 @@ export interface TransferExecutionClient {
     fiatCurrencyCode: string;
     details: Record<string, string>;
   }): Promise<PaymentDetail>;
+  getPreflightQuote?(params: {
+    tradeType: "BUY" | "SELL";
+    cryptoCurrencyCode?: string;
+    fiatAmount: number;
+    paymentDetailsId: number;
+    tradePartner?: "licensed" | "p2p" | "all";
+  }): Promise<PreflightQuote | undefined>;
   createTradeRequest(params: {
     tradeType: "BUY" | "SELL";
     cryptoCurrencyCode?: string;
@@ -214,6 +222,8 @@ export interface ExecutionPreflightState {
   amount: number;
   currency: string;
   checkedAt: string;
+  paymentDetailsId?: number;
+  quote?: PreflightQuote;
 }
 
 export interface SelectedPaymentMethod {
@@ -786,6 +796,50 @@ function buildUsernameReminder(username: string | undefined): string | undefined
   return `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
 }
 
+function formatFixed(value: number, digits = 2): string {
+  return value.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
+function formatQuoteAmount(value: number, currency: string, digits = 4): string {
+  return `${formatFixed(value, digits)} ${currency}`;
+}
+
+function formatRate(value: number, baseCurrency: string, quoteCurrency: string): string {
+  const digits = value >= 100 ? 2 : value >= 1 ? 4 : 6;
+  return `1 ${baseCurrency} ≈ ${formatFixed(value, digits)} ${quoteCurrency}`;
+}
+
+function buildPreflightQuoteSummary(preflight: ExecutionPreflightState | undefined): string | undefined {
+  const quote = preflight?.quote;
+  if (!quote) return undefined;
+  const route = [quote.paymentMethodName, quote.paymentNetworkName].filter(Boolean).join(" / ");
+  const feePart = quote.feeCryptoAmount > 0 ? ` (includes ~${formatQuoteAmount(quote.feeCryptoAmount, quote.cryptoCurrencyCode)})` : "";
+  const routePart = route ? ` via ${route}` : "";
+  return `Current best-offer estimate: ${formatQuoteAmount(quote.totalCryptoAmount, quote.cryptoCurrencyCode)} total to deliver ${formatFixed(quote.fiatAmount, 2)} ${quote.fiatCurrencyCode}${feePart} at ${formatRate(quote.vendorOfferRate, quote.cryptoCurrencyCode, quote.fiatCurrencyCode)}${routePart}.`;
+}
+
+function buildPreflightQuoteCaveat(preflight: ExecutionPreflightState | undefined): string | undefined {
+  if (!preflight?.quote) return undefined;
+  return "This is a live estimate from the current best offer, not a locked quote, so the final rate / required amount can still change when the trade request is created and matched.";
+}
+
+function getRequiredBalanceUsd(preflight: ExecutionPreflightState | undefined): number | undefined {
+  if (!preflight) return undefined;
+  return preflight.quote?.totalCryptoAmount ?? preflight.amount;
+}
+
+function getTopUpShortfallUsd(preflight: ExecutionPreflightState | undefined): number | undefined {
+  const required = getRequiredBalanceUsd(preflight);
+  if (required === undefined) return undefined;
+  return Math.max(required - preflight!.balanceUsd, 0);
+}
+
+function buildTopUpShortfallLine(preflight: ExecutionPreflightState | undefined): string | undefined {
+  const shortfall = getTopUpShortfallUsd(preflight);
+  if (shortfall === undefined || shortfall <= 0) return undefined;
+  return `You need about ${formatFixed(shortfall, 2)} USD more in the wallet before I can place the trade.`;
+}
+
 function chooseTopUpMethod(text: string | undefined): TopUpMethod | undefined {
   const value = cleanText(text);
   if (!value) return undefined;
@@ -808,14 +862,20 @@ function buildTopUpMethodPrompt(username: string | undefined): string {
   ].join(" ");
 }
 
-function buildInternalTopUpInstructions(username: string | undefined): string {
+function buildInternalTopUpInstructions(username: string | undefined, preflight?: ExecutionPreflightState): string {
   const formatted = formatUsername(username);
+  const shortfall = getTopUpShortfallUsd(preflight);
   return [
+    buildPreflightQuoteSummary(preflight),
+    buildTopUpShortfallLine(preflight),
+    buildPreflightQuoteCaveat(preflight),
     formatted
       ? `Your current UNIGOX username is ${formatted}.`
       : "I couldn't hydrate your UNIGOX username just yet, so this internal route is only useful once that username is visible.",
     formatted
-      ? `Ask the other UNIGOX user to send the funds directly to ${formatted} inside UNIGOX.`
+      ? shortfall && shortfall > 0
+        ? `Ask the other UNIGOX user to send about ${formatFixed(shortfall, 2)} USD more directly to ${formatted} inside UNIGOX.`
+        : `Ask the other UNIGOX user to send the required funds directly to ${formatted} inside UNIGOX.`
       : "If you want, switch to external / on-chain deposit instead and I'll guide that route step by step.",
     formatted ? "This internal UNIGOX route does not need a token + chain deposit flow first." : undefined,
     "When the funds arrive, tell me to recheck the balance.",
@@ -1189,6 +1249,8 @@ function buildConfirmationMessage(session: TransferSession): string {
   return [
     buildUsernameReminder(session.auth.username),
     balanceLine,
+    buildPreflightQuoteSummary(session.execution.preflight),
+    buildPreflightQuoteCaveat(session.execution.preflight),
     `Send ${session.amount} ${session.currency} to ${session.recipientName} via ${summarizePayment(session)}?`,
     `Details: ${maskDetailMap(session.details)}`,
     "Reply 'confirm' to place the trade, or tell me what to change.",
@@ -1539,7 +1601,7 @@ async function maybeHandleTopUpTurn(
       session.stage = "awaiting_balance_resolution";
       return reply(
         withUpdate(session, deps),
-        buildInternalTopUpInstructions(session.auth.username),
+        buildInternalTopUpInstructions(session.auth.username, session.execution.preflight),
         ["recheck balance", "external / on-chain deposit", "change amount"]
       );
     }
@@ -1911,34 +1973,87 @@ async function ensureExecutionPreflight(
     return { events };
   }
 
+  const settings = loadSendMoneySettings(deps.settingsFilePath || DEFAULT_SETTINGS_FILE);
   const balance = await client.getWalletBalance();
   session.auth.balanceUsd = balance.totalUsd;
+
+  let paymentDetailsId: number | undefined;
+  let quote: PreflightQuote | undefined;
+  const paymentDetail = await client.ensurePaymentDetail({
+    paymentMethodId: session.payment!.methodId,
+    paymentNetworkId: session.payment!.networkId,
+    fiatCurrencyCode: session.currency!,
+    details: session.details,
+  });
+  paymentDetailsId = paymentDetail.id;
+  session.execution.paymentDetailsId = paymentDetail.id;
+  events.push({
+    type: "payment_detail_ensured",
+    message: `Ensured payment detail #${paymentDetail.id}.`,
+    data: { paymentDetailId: paymentDetail.id },
+  });
+
+  try {
+    quote = await client.getPreflightQuote?.({
+      tradeType: "SELL",
+      cryptoCurrencyCode: "USDC",
+      fiatAmount: amount,
+      paymentDetailsId: paymentDetail.id,
+      tradePartner: settings.tradePartner,
+    });
+  } catch {
+    // Quote is a UX improvement but should not block the flow if the preview endpoint is unavailable.
+  }
+
   session.execution.preflight = {
     balanceUsd: balance.totalUsd,
     amount,
     currency: session.currency || "",
     checkedAt: nowIso(deps),
+    paymentDetailsId,
+    quote,
   };
+
+  const requiredBalanceUsd = getRequiredBalanceUsd(session.execution.preflight) ?? amount;
   events.push({
     type: "balance_checked",
-    message: `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
-    data: { balance: balance.totalUsd, amount, currency: session.currency },
+    message: [
+      `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
+      buildPreflightQuoteSummary(session.execution.preflight),
+      buildTopUpShortfallLine(session.execution.preflight),
+      buildPreflightQuoteCaveat(session.execution.preflight),
+    ].filter(Boolean).join(" "),
+    data: {
+      balance: balance.totalUsd,
+      amount,
+      currency: session.currency,
+      paymentDetailsId,
+      requiredBalanceUsd,
+      quoteType: quote?.quoteType,
+      vendorOfferRate: quote?.vendorOfferRate,
+      totalCryptoAmount: quote?.totalCryptoAmount,
+    },
   });
 
-  if (balance.totalUsd < amount) {
+  if (balance.totalUsd < requiredBalanceUsd) {
     session.status = "blocked";
     session.topUp = undefined;
     session.stage = "awaiting_topup_method";
     const message = [
       buildUsernameReminder(session.auth.username),
       `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
-      `That is below the requested ${amount} ${session.currency}, so I will not place the trade.`,
+      buildPreflightQuoteSummary(session.execution.preflight),
+      buildTopUpShortfallLine(session.execution.preflight),
+      quote
+        ? "Until the wallet covers that current estimate, I will not place the trade."
+        : `That is below the requested ${amount} ${session.currency}, so I will not place the trade.`,
+      buildPreflightQuoteCaveat(session.execution.preflight),
       buildTopUpMethodPrompt(session.auth.username),
     ].filter(Boolean).join(" ");
     events.push({
       type: "blocked_insufficient_balance",
       message,
-      data: { balance: balance.totalUsd, amount },
+      data: { balance: balance.totalUsd, amount, requiredBalanceUsd, paymentDetailsId },
     });
     return {
       events,
@@ -1967,25 +2082,34 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
     return preflight.blockedResult;
   }
 
-  const paymentDetail = await client.ensurePaymentDetail({
-    paymentMethodId: session.payment!.methodId,
-    paymentNetworkId: session.payment!.networkId,
-    fiatCurrencyCode: session.currency!,
-    details: session.details,
-  });
-  session.execution.paymentDetailsId = paymentDetail.id;
-  events.push({
-    type: "payment_detail_ensured",
-    message: `Ensured payment detail #${paymentDetail.id}.`,
-    data: { paymentDetailId: paymentDetail.id },
-  });
+  let paymentDetailsId = session.execution.preflight?.paymentDetailsId;
+  if (!paymentDetailsId) {
+    const paymentDetail = await client.ensurePaymentDetail({
+      paymentMethodId: session.payment!.methodId,
+      paymentNetworkId: session.payment!.networkId,
+      fiatCurrencyCode: session.currency!,
+      details: session.details,
+    });
+    paymentDetailsId = paymentDetail.id;
+    session.execution.paymentDetailsId = paymentDetail.id;
+    events.push({
+      type: "payment_detail_ensured",
+      message: `Ensured payment detail #${paymentDetail.id}.`,
+      data: { paymentDetailId: paymentDetail.id },
+    });
+  }
 
+  if (!paymentDetailsId) {
+    throw new Error("Missing payment details id for trade execution.");
+  }
+
+  const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || amount;
   const tradeRequest = await client.createTradeRequest({
     tradeType: "SELL",
     fiatCurrencyCode: session.currency!,
     fiatAmount: amount,
-    cryptoAmount: amount,
-    paymentDetailsId: paymentDetail.id,
+    cryptoAmount: quotedCryptoAmount,
+    paymentDetailsId,
     paymentMethodId: session.payment!.methodId,
     paymentNetworkId: session.payment!.networkId,
     tradePartner: settings.tradePartner,

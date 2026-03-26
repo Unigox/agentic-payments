@@ -120,11 +120,17 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 
 ### Insufficient balance
 - Surface the current balance in the same chat flow before confirmation.
-- Stop before `ensurePaymentDetail()` / `createTradeRequest()`.
+- Stop before `createTradeRequest()`.
+- Before asking how the user wants to top up, compute the best available preflight economics for the intended transfer when UNIGOX exposes them (prefer the exact payout-detail-based best-offer / quote path over a rough fiat-only comparison).
+- Show, in the same flow:
+  - the current rate / quote basis
+  - the estimated total wallet coverage needed for the transfer
+  - the current top-up shortfall
+  - a clear caveat if the preflight quote is still only an estimate and not a locked quote
 - Ask for the top-up method first:
   - another UNIGOX user sends funds directly to the current username
   - external / on-chain deposit
-- If the user chooses the internal UNIGOX route, show the username clearly and tell them to have the other user send to that username. Do **not** ask token + chain for that route.
+- If the user chooses the internal UNIGOX route, show the username clearly and tell them how much they still need to top up before asking the other user to send to that username. Do **not** ask token + chain for that route.
 - If the user chooses external / on-chain deposit, keep the token -> chain -> single-address sequence.
 - Still allow the user to change the amount instead of topping up.
 

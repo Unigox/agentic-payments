@@ -179,7 +179,8 @@ Preferred auth environment variables:
 - **TON auth only covers JWT acquisition** — keep using the existing post-login APIs unchanged
 - **EVM-signed actions** like receipt confirmation / escrow release, escrow withdraw, and bridge-out require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`)
 - **Ask for top-up method first when funding is needed**. Offer at least: another UNIGOX user sends to the user's username, or an external/on-chain deposit
-- **Internal UNIGOX top-ups stay internal**. Show the current username clearly and tell the user to have the other UNIGOX user send to that username; do not ask token + chain unless they switch to external deposit
+- **Show preflight economics before the top-up ask whenever possible**. Use the best available UNIGOX preflight quote / best-offer data to show the current rate basis, estimated total wallet coverage needed, and the current shortfall before asking how the user wants to fund the wallet
+- **Internal UNIGOX top-ups stay internal**. Show the current username clearly, tell the user how much they need to top up, include the rate / quote basis plus an explicit estimate-vs-locked-quote caveat, and do not ask token + chain unless they switch to external deposit
 - **Do not dump every deposit address at once**. For the external/on-chain top-up path, ask token first, then network, then return only the one relevant address for that selection
 - **Deposit options must come from the real frontend-supported routes** exposed by `getBridgeTokens()` plus the frontend wallet rules (`enabled_for_deposit`, main assets shown to users, XAI excluded, supported address families only)
 - **Do not offer unsupported deposit routes** such as NEAR / intent-style paths that are not actually selectable in the frontend deposit flow

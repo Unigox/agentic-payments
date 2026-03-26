@@ -13,6 +13,7 @@ import type {
   DepositFlowSelection,
   NetworkFieldConfig,
   PaymentDetail,
+  PreflightQuote,
   ResolvedPaymentMethodFieldConfig,
   SupportedDepositAssetOption,
   TradeRequest,
@@ -524,7 +525,22 @@ function makeClient(options: {
   confirmFiatReceivedError?: string;
   username?: string;
   depositOptions?: SupportedDepositAssetOption[];
-} = {}): TransferExecutionClient & { calls: string[] } {
+  preflightQuote?: Partial<PreflightQuote>;
+} = {}): TransferExecutionClient & {
+  calls: string[];
+  lastCreateTradeRequestParams?: {
+    tradeType: "BUY" | "SELL";
+    cryptoCurrencyCode?: string;
+    fiatCurrencyCode: string;
+    fiatAmount: number;
+    cryptoAmount: number;
+    paymentDetailsId: number;
+    paymentMethodId: number;
+    paymentNetworkId: number;
+    preferredVendor?: string;
+    tradePartner?: "licensed" | "p2p" | "all";
+  };
+} {
   const calls: string[] = [];
   const balance = options.balance ?? 1000;
   const waitMode = options.waitMode ?? "matched";
@@ -534,7 +550,7 @@ function makeClient(options: {
   const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
   let tradeStatusIndex = 0;
 
-  return {
+  const client: TransferExecutionClient & { calls: string[]; lastCreateTradeRequestParams?: any } = {
     calls,
     async getProfile() {
       calls.push("getProfile");
@@ -548,8 +564,25 @@ function makeClient(options: {
       calls.push("ensurePaymentDetail");
       return { id: 9001, fiat_currency_code: "EUR", details: {} } as PaymentDetail;
     },
-    async createTradeRequest(): Promise<TradeRequest> {
+    async getPreflightQuote(params): Promise<PreflightQuote> {
+      calls.push(`getPreflightQuote:${params.fiatAmount}`);
+      return {
+        quoteType: "estimate",
+        source: "best_offer",
+        cryptoCurrencyCode: "USDC",
+        fiatCurrencyCode: "EUR",
+        fiatAmount: params.fiatAmount,
+        totalCryptoAmount: params.fiatAmount + 1.25,
+        feeCryptoAmount: 0.25,
+        vendorOfferRate: 0.95,
+        paymentMethodName: "Revolut",
+        paymentNetworkName: "Revolut Username",
+        ...options.preflightQuote,
+      };
+    },
+    async createTradeRequest(params): Promise<TradeRequest> {
       calls.push("createTradeRequest");
+      client.lastCreateTradeRequestParams = params;
       return { id: 7001, status: "created", trade_type: "SELL" } as TradeRequest;
     },
     async waitForTradeMatch(): Promise<TradeRequest> {
@@ -608,6 +641,8 @@ function makeClient(options: {
       };
     },
   };
+
+  return client;
 }
 
 function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>, overrides: Partial<TransferFlowDeps> = {}): TransferFlowDeps {
@@ -658,6 +693,8 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   res = await advanceTransferFlow(res.session, "50", deps);
   assert.equal(res.session.stage, "awaiting_confirmation");
   assert.match(res.reply, /Current wallet balance: 1000\.00 USD/i);
+  assert.match(res.reply, /Current best-offer estimate:/i);
+  assert.match(res.reply, /not a locked quote/i);
   assert.match(res.reply, /@grape404/i);
 
   res = await advanceTransferFlow(res.session, "confirm", deps);
@@ -667,7 +704,7 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
   assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
   assert.match(res.reply, /keep escrow locked/i);
-  assert.deepEqual(client.calls.slice(0, 8), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
+  assert.deepEqual(client.calls.slice(0, 9), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:50", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
@@ -911,11 +948,16 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   assert.equal(res.session.status, "blocked");
   assert.ok(res.events.some((event) => event.type === "balance_checked"));
   assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
+  assert.match(res.reply, /Current best-offer estimate:/i);
+  assert.match(res.reply, /26\.25 USDC total to deliver 25 EUR/i);
+  assert.match(res.reply, /1 USDC ≈ 0\.95 EUR/i);
+  assert.match(res.reply, /You need about 16\.25 USD more in the wallet/i);
+  assert.match(res.reply, /not a locked quote/i);
   assert.match(res.reply, /will not place the trade/i);
   assert.match(res.reply, /How would you like to top up the wallet/i);
   assert.match(res.reply, /Another UNIGOX user sends funds directly to your username/i);
   assert.match(res.reply, /External \/ on-chain deposit/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance"]);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:25"]);
 });
 
 test("internal UNIGOX top-up shows username and skips token-chain questions", async () => {
@@ -949,10 +991,13 @@ test("internal UNIGOX top-up shows username and skips token-chain questions", as
   assert.equal(res.session.stage, "awaiting_balance_resolution");
   assert.equal(res.session.topUp?.method, "internal_username");
   assert.match(res.reply, /@alexwallet/i);
-  assert.match(res.reply, /send the funds directly to @alexwallet inside UNIGOX/i);
+  assert.match(res.reply, /Current best-offer estimate:/i);
+  assert.match(res.reply, /You need about 16\.25 USD more in the wallet/i);
+  assert.match(res.reply, /send about 16\.25 USD more directly to @alexwallet inside UNIGOX/i);
+  assert.match(res.reply, /not a locked quote/i);
   assert.doesNotMatch(res.reply, /Which token do you want to deposit/i);
   assert.doesNotMatch(res.reply, /Which network should I use/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance"]);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:25"]);
 });
 
 test("external top-up keeps token then chain then single-address flow", async () => {
@@ -1001,11 +1046,55 @@ test("external top-up keeps token then chain then single-address flow", async ()
     "getProfile",
     "getWalletBalance",
     "getWalletBalance",
+    "ensurePaymentDetail",
+    "getPreflightQuote:25",
     "getSupportedDepositOptions",
     "getSupportedDepositOptions",
     "getSupportedDepositOptions",
     "describeDepositSelection:USDT:728126428",
   ]);
+});
+
+test("trade creation reuses the preflight quote amount instead of the raw fiat amount", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balance: 100,
+    preflightQuote: {
+      fiatAmount: 25,
+      totalCryptoAmount: 26.25,
+      feeCryptoAmount: 0.25,
+      vendorOfferRate: 0.95,
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /Current best-offer estimate:/i);
+  assert.match(res.reply, /not a locked quote/i);
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 26.25);
+  assert.equal(client.lastCreateTradeRequestParams?.fiatAmount, 25);
 });
 
 test("changing currency mid-flow resets payment selection and asks for a new method", async () => {

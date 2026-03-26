@@ -125,6 +125,19 @@ export interface TradeRequest {
   trade?: { id: number; status: string };
 }
 
+export interface PreflightQuote {
+  quoteType: "estimate";
+  source: "best_offer";
+  cryptoCurrencyCode: string;
+  fiatCurrencyCode: string;
+  fiatAmount: number;
+  totalCryptoAmount: number;
+  feeCryptoAmount: number;
+  vendorOfferRate: number;
+  paymentMethodName?: string;
+  paymentNetworkName?: string;
+}
+
 export interface TradeSignaturePayload {
   domain: Record<string, unknown>;
   types: Record<string, Array<{ name: string; type: string }>>;
@@ -940,6 +953,49 @@ export class UnigoxClient {
   }
 
   // ── Trade Requests ──────────────────────────────────────────────
+
+  async getPreflightQuote(params: {
+    tradeType: "BUY" | "SELL";
+    cryptoCurrencyCode?: string;
+    fiatAmount: number;
+    paymentDetailsId: number;
+    tradePartner?: "licensed" | "p2p" | "all";
+  }): Promise<PreflightQuote | undefined> {
+    const query = new URLSearchParams({
+      crypto_currency: params.cryptoCurrencyCode || "USDC",
+      amount: String(params.fiatAmount),
+      is_amount_in_fiat: "true",
+      payment_details_id: String(params.paymentDetailsId),
+      trade_type: params.tradeType,
+      trade_partner: params.tradePartner || "licensed",
+    });
+
+    const res = await this.authedGet(APIS.trades, `/best-offer?${query.toString()}`);
+    const data = unwrap<any>(res);
+    const offer = data?.offer;
+    if (!data?.found || !offer || offer.no_matching_offers) {
+      return undefined;
+    }
+
+    const totalCryptoAmount = Number(offer.total_crypto_amount || 0);
+    const vendorOfferRate = Number(offer.vendor_offer_rate || 0);
+    if (!(totalCryptoAmount > 0) || !(vendorOfferRate > 0)) {
+      return undefined;
+    }
+
+    return {
+      quoteType: "estimate",
+      source: "best_offer",
+      cryptoCurrencyCode: offer.crypto_currency_code || params.cryptoCurrencyCode || "USDC",
+      fiatCurrencyCode: offer.fiat_currency_code,
+      fiatAmount: Number(offer.fiat_amount || params.fiatAmount || 0),
+      totalCryptoAmount,
+      feeCryptoAmount: Number(offer.fee_crypto_amount || 0),
+      vendorOfferRate,
+      paymentMethodName: offer.payment_method?.name,
+      paymentNetworkName: offer.payment_network?.name,
+    };
+  }
 
   async createTradeRequest(params: {
     tradeType: "BUY" | "SELL";

@@ -1,0 +1,83 @@
+goal: "Fix the send-money internal top-up flow so it shows preflight rate / quote economics and the required top-up amount before asking the user to fund their wallet."
+run_id: "send_money_topup_preflight_quote_20260326"
+constraints:
+  - "use_modular_builder_process"
+  - "keep_scope_to_preflight_quote_and_topup_guidance"
+  - "prefer_existing_unigox_quote_or_best-offer_api_if_available"
+  - "surface_estimate_vs_locked_quote_caveat_clearly"
+  - "keep_internal_topup_in_same_flow_without_waiting_for_balance_arrival"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "root_cause"
+  - "design_notes"
+  - "quote_source"
+  - "flow_sequence"
+  - "changed_files"
+  - "docs_updated"
+  - "tests_run"
+  - "test_results"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_current_quote_gap"
+    name: "Inspect the current insufficient-balance path, available quote APIs, and docs/tests"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:root_cause"
+      - "has_key:quote_source"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_preflight_quote_fix"
+    name: "Lock the preflight quote / top-up UX design and estimate caveat wording"
+    required_predecessors:
+      - "inspect_current_quote_gap"
+    required_checks:
+      - "root_cause_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:flow_sequence"
+      - "min_count:1"
+    external_action: false
+
+  - id: "implement_preflight_quote_fix"
+    name: "Implement preflight quote loading, internal top-up guidance, and docs updates"
+    required_predecessors:
+      - "design_preflight_quote_fix"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_preflight_quote_fix"
+    name: "Run regression tests for insufficient-balance quote guidance and trade creation inputs"
+    required_predecessors:
+      - "implement_preflight_quote_fix"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_preflight_quote_fix"
+    name: "Commit the send-money preflight quote UX fix"
+    required_predecessors:
+      - "validate_preflight_quote_fix"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false
