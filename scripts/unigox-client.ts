@@ -197,10 +197,16 @@ export interface DepositFlowSelection {
   chainId: number;
 }
 
+export interface WalletBalanceAsset {
+  assetCode: string;
+  amount: number;
+}
+
 export interface WalletBalance {
   usdc: number;
   usdt: number;
   totalUsd: number;
+  assets?: WalletBalanceAsset[];
 }
 
 export interface EscrowBalance {
@@ -1104,7 +1110,15 @@ export class UnigoxClient {
     const usdc = Number(ethers.formatUnits(usdcRaw, TOKENS.USDC.decimals));
     const usdt = Number(ethers.formatUnits(usdtRaw, TOKENS.USDT.decimals));
 
-    return { usdc, usdt, totalUsd: usdc + usdt };
+    return {
+      usdc,
+      usdt,
+      totalUsd: usdc + usdt,
+      assets: [
+        { assetCode: "USDC", amount: usdc },
+        { assetCode: "USDT", amount: usdt },
+      ],
+    };
   }
 
   // ── Escrow Balances ─────────────────────────────────────────────

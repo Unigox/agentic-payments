@@ -120,12 +120,16 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 
 ### Insufficient balance
 - Surface the current balance in the same chat flow before confirmation.
+- Show both the total wallet balance and the per-asset balances, at least for USDC and USDT.
 - Stop before `createTradeRequest()`.
 - Before asking how the user wants to top up, compute the best available preflight economics for the intended transfer when UNIGOX exposes them (prefer the exact payout-detail-based best-offer / quote path over a rough fiat-only comparison).
+- Evaluate sellability per asset, not only against the combined wallet total.
 - Show, in the same flow:
   - the current rate / quote basis
   - the estimated total wallet coverage needed for the transfer
+  - which single asset can fund the SELL, if any
   - the current top-up shortfall
+  - a clear explanation when the combined total is enough but no single asset covers the trade on its own
   - a clear caveat if the preflight quote is still only an estimate and not a locked quote
 - Ask for the top-up method first:
   - another UNIGOX user sends funds directly to the current username

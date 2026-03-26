@@ -518,6 +518,7 @@ async function stubGetPaymentMethodFieldConfig(params: {
 
 function makeClient(options: {
   balance?: number;
+  balances?: Partial<Record<"USDC" | "USDT", number>>;
   waitMode?: "matched" | "no_match" | "timeout";
   matchedTradeStatus?: string;
   getTradeStatuses?: string[];
@@ -526,6 +527,7 @@ function makeClient(options: {
   username?: string;
   depositOptions?: SupportedDepositAssetOption[];
   preflightQuote?: Partial<PreflightQuote>;
+  preflightQuotesByAsset?: Partial<Record<"USDC" | "USDT", Partial<PreflightQuote> | null>>;
 } = {}): TransferExecutionClient & {
   calls: string[];
   lastCreateTradeRequestParams?: {
@@ -542,7 +544,9 @@ function makeClient(options: {
   };
 } {
   const calls: string[] = [];
-  const balance = options.balance ?? 1000;
+  const usdcBalance = options.balances?.USDC ?? options.balance ?? 1000;
+  const usdtBalance = options.balances?.USDT ?? 0;
+  const totalBalance = usdcBalance + usdtBalance;
   const waitMode = options.waitMode ?? "matched";
   const username = options.username ?? "grape404";
   const depositOptions = options.depositOptions ?? DEPOSIT_OPTIONS;
@@ -558,18 +562,29 @@ function makeClient(options: {
     },
     async getWalletBalance(): Promise<WalletBalance> {
       calls.push("getWalletBalance");
-      return { usdc: balance, usdt: 0, totalUsd: balance };
+      return {
+        usdc: usdcBalance,
+        usdt: usdtBalance,
+        totalUsd: totalBalance,
+        assets: [
+          { assetCode: "USDC", amount: usdcBalance },
+          { assetCode: "USDT", amount: usdtBalance },
+        ],
+      };
     },
     async ensurePaymentDetail(): Promise<PaymentDetail> {
       calls.push("ensurePaymentDetail");
       return { id: 9001, fiat_currency_code: "EUR", details: {} } as PaymentDetail;
     },
-    async getPreflightQuote(params): Promise<PreflightQuote> {
-      calls.push(`getPreflightQuote:${params.fiatAmount}`);
+    async getPreflightQuote(params): Promise<PreflightQuote | undefined> {
+      const assetCode = (params.cryptoCurrencyCode || "USDC") as "USDC" | "USDT";
+      calls.push(`getPreflightQuote:${assetCode}:${params.fiatAmount}`);
+      const override = options.preflightQuotesByAsset?.[assetCode];
+      if (override === null) return undefined;
       return {
         quoteType: "estimate",
         source: "best_offer",
-        cryptoCurrencyCode: "USDC",
+        cryptoCurrencyCode: assetCode,
         fiatCurrencyCode: "EUR",
         fiatAmount: params.fiatAmount,
         totalCryptoAmount: params.fiatAmount + 1.25,
@@ -578,6 +593,8 @@ function makeClient(options: {
         paymentMethodName: "Revolut",
         paymentNetworkName: "Revolut Username",
         ...options.preflightQuote,
+        ...override,
+        cryptoCurrencyCode: override?.cryptoCurrencyCode || options.preflightQuote?.cryptoCurrencyCode || assetCode,
       };
     },
     async createTradeRequest(params): Promise<TradeRequest> {
@@ -704,7 +721,7 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
   assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
   assert.match(res.reply, /keep escrow locked/i);
-  assert.deepEqual(client.calls.slice(0, 9), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:50", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
+  assert.deepEqual(client.calls.slice(0, 10), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:50", "getPreflightQuote:USDT:50", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
@@ -951,13 +968,13 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   assert.match(res.reply, /Current best-offer estimate:/i);
   assert.match(res.reply, /26\.25 USDC total to deliver 25 EUR/i);
   assert.match(res.reply, /1 USDC ≈ 0\.95 EUR/i);
-  assert.match(res.reply, /You need about 16\.25 USD more in the wallet/i);
+  assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
   assert.match(res.reply, /not a locked quote/i);
   assert.match(res.reply, /will not place the trade/i);
   assert.match(res.reply, /How would you like to top up the wallet/i);
   assert.match(res.reply, /Another UNIGOX user sends funds directly to your username/i);
   assert.match(res.reply, /External \/ on-chain deposit/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:25"]);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:25", "getPreflightQuote:USDT:25"]);
 });
 
 test("internal UNIGOX top-up shows username and skips token-chain questions", async () => {
@@ -992,12 +1009,12 @@ test("internal UNIGOX top-up shows username and skips token-chain questions", as
   assert.equal(res.session.topUp?.method, "internal_username");
   assert.match(res.reply, /@alexwallet/i);
   assert.match(res.reply, /Current best-offer estimate:/i);
-  assert.match(res.reply, /You need about 16\.25 USD more in the wallet/i);
+  assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
   assert.match(res.reply, /send about 16\.25 USD more directly to @alexwallet inside UNIGOX/i);
   assert.match(res.reply, /not a locked quote/i);
   assert.doesNotMatch(res.reply, /Which token do you want to deposit/i);
   assert.doesNotMatch(res.reply, /Which network should I use/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:25"]);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:25", "getPreflightQuote:USDT:25"]);
 });
 
 test("external top-up keeps token then chain then single-address flow", async () => {
@@ -1047,7 +1064,8 @@ test("external top-up keeps token then chain then single-address flow", async ()
     "getWalletBalance",
     "getWalletBalance",
     "ensurePaymentDetail",
-    "getPreflightQuote:25",
+    "getPreflightQuote:USDC:25",
+    "getPreflightQuote:USDT:25",
     "getSupportedDepositOptions",
     "getSupportedDepositOptions",
     "getSupportedDepositOptions",
@@ -1095,6 +1113,93 @@ test("trade creation reuses the preflight quote amount instead of the raw fiat a
   res = await advanceTransferFlow(res.session, "confirm", deps);
   assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 26.25);
   assert.equal(client.lastCreateTradeRequestParams?.fiatAmount, 25);
+});
+
+test("preflight selects the single asset that can cover the trade and execution uses that asset", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 20, USDT: 40 },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 26.25, feeCryptoAmount: 0.25, vendorOfferRate: 0.95 },
+      USDT: { totalCryptoAmount: 25.75, feeCryptoAmount: 0.25, vendorOfferRate: 0.97 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /Current wallet balance: 60\.00 USD total/i);
+  assert.match(res.reply, /USDC: 20\.00 USD/i);
+  assert.match(res.reply, /USDT: 40\.00 USD/i);
+  assert.match(res.reply, /25\.75 USDT total to deliver 25 EUR/i);
+  assert.match(res.reply, /currently coverable with USDT/i);
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoCurrencyCode, "USDT");
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 25.75);
+});
+
+test("aggregate balance is not treated as sellable when no single asset covers the trade", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 20, USDT: 10 },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 26.25, feeCryptoAmount: 0.25, vendorOfferRate: 0.95 },
+      USDT: { totalCryptoAmount: 26.75, feeCryptoAmount: 0.25, vendorOfferRate: 0.94 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_topup_method");
+  assert.equal(res.session.status, "blocked");
+  assert.match(res.reply, /Current wallet balance: 30\.00 USD total/i);
+  assert.match(res.reply, /USDC: 20\.00 USD/i);
+  assert.match(res.reply, /USDT: 10\.00 USD/i);
+  assert.match(res.reply, /high enough in aggregate/i);
+  assert.match(res.reply, /single asset/i);
+  assert.match(res.reply, /USDC: 20\.00 available, needs about 26\.25/i);
+  assert.match(res.reply, /USDT: 10\.00 available, needs about 26\.75/i);
+  assert.match(res.reply, /You need about 6\.25 USD more in one asset/i);
+  assert.match(res.reply, /Until one asset covers that current estimate on its own/i);
 });
 
 test("changing currency mid-flow resets payment selection and asks for a new method", async () => {
@@ -1332,9 +1437,9 @@ test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are av
   assert.equal(result.email, "agent@example.com");
 });
 
-test("stored split EVM auth overrides stale injected auth state and shows username plus balance at flow start", async () => {
+test("stored split EVM auth overrides stale injected auth state and shows username plus split balance at flow start", async () => {
   const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "stateful", balance: 250 });
+  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
 
   const res = await withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
@@ -1348,7 +1453,9 @@ test("stored split EVM auth overrides stale injected auth state and shows userna
 
   assert.equal(res.session.stage, "awaiting_recipient_mode");
   assert.match(res.reply, /@stateful/i);
-  assert.match(res.reply, /Current wallet balance: 250\.00 USD/i);
+  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
+  assert.match(res.reply, /USDC: 200\.00 USD/i);
+  assert.match(res.reply, /USDT: 50\.00 USD/i);
   assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
   assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
   assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
@@ -1356,7 +1463,7 @@ test("stored split EVM auth overrides stale injected auth state and shows userna
 
 test("stored EVM login without signing key skips auth-choice questions and asks only for the missing key", async () => {
   const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "stateful", balance: 250 });
+  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
 
   const res = await withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
@@ -1370,7 +1477,9 @@ test("stored EVM login without signing key skips auth-choice questions and asks 
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /@stateful/i);
-  assert.match(res.reply, /Current wallet balance: 250\.00 USD/i);
+  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
+  assert.match(res.reply, /USDC: 200\.00 USD/i);
+  assert.match(res.reply, /USDT: 50\.00 USD/i);
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
   assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);

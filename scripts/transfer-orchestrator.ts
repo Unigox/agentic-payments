@@ -26,6 +26,7 @@ import type {
   UnigoxClientConfig,
   UserProfile,
   WalletBalance,
+  WalletBalanceAsset,
 } from "./unigox-client.ts";
 import {
   createInitialSettlementState,
@@ -209,12 +210,22 @@ export interface AuthState {
 
 interface ResolvedAuthState extends AuthState {
   balanceUsd?: number;
+  walletBalance?: WalletBalance;
 }
 
 export interface SecretSubmissionState {
   kind: SecretKind;
   value: string;
   note?: string;
+}
+
+export interface AssetCoverageState {
+  assetCode: string;
+  balanceUsd: number;
+  requiredUsd: number;
+  shortfallUsd: number;
+  coversTransfer: boolean;
+  quote?: PreflightQuote;
 }
 
 export interface ExecutionPreflightState {
@@ -224,6 +235,12 @@ export interface ExecutionPreflightState {
   checkedAt: string;
   paymentDetailsId?: number;
   quote?: PreflightQuote;
+  walletBalanceAssets?: WalletBalanceAsset[];
+  assetCoverage?: AssetCoverageState[];
+  selectedAssetCode?: string;
+  sellAssetBalanceUsd?: number;
+  sellAssetRequiredUsd?: number;
+  aggregateBalanceEnoughButSingleAssetInsufficient?: boolean;
 }
 
 export interface SelectedPaymentMethod {
@@ -277,6 +294,7 @@ export interface TransferSession {
     evmSigningKeyAvailable?: boolean;
     username?: string;
     balanceUsd?: number;
+    walletBalance?: WalletBalance;
     startupSnapshotShown?: boolean;
     pendingSecret?: SecretSubmissionState;
   };
@@ -558,8 +576,9 @@ function buildStartupAuthSnapshot(session: TransferSession): string | undefined 
   if (formattedUsername) {
     parts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
   }
-  if (typeof session.auth.balanceUsd === "number") {
-    parts.push(`Current wallet balance: ${session.auth.balanceUsd.toFixed(2)} USD.`);
+  const balanceLine = buildWalletBalanceLine(session.auth.walletBalance, session.auth.balanceUsd);
+  if (balanceLine) {
+    parts.push(balanceLine);
   }
   return parts.length ? parts.join(" ") : undefined;
 }
@@ -577,8 +596,11 @@ function decorateStartupReply(session: TransferSession, message: string): string
       snapshotParts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
     }
   }
-  if (!/Current wallet balance:/i.test(message) && typeof session.auth.balanceUsd === "number") {
-    snapshotParts.push(`Current wallet balance: ${session.auth.balanceUsd.toFixed(2)} USD.`);
+  if (!/Current wallet balance:/i.test(message)) {
+    const balanceLine = buildWalletBalanceLine(session.auth.walletBalance, session.auth.balanceUsd);
+    if (balanceLine) {
+      snapshotParts.push(balanceLine);
+    }
   }
 
   session.auth.startupSnapshotShown = true;
@@ -809,6 +831,71 @@ function formatRate(value: number, baseCurrency: string, quoteCurrency: string):
   return `1 ${baseCurrency} ≈ ${formatFixed(value, digits)} ${quoteCurrency}`;
 }
 
+function formatUsdAmount(value: number): string {
+  return value.toFixed(2);
+}
+
+const SELLABLE_ASSET_ORDER = ["USDC", "USDT"] as const;
+
+function getWalletBalanceAssets(balance: WalletBalance | undefined): WalletBalanceAsset[] {
+  if (!balance) return [];
+
+  const preferred = balance.assets?.length
+    ? balance.assets
+    : [
+        { assetCode: "USDC", amount: balance.usdc },
+        { assetCode: "USDT", amount: balance.usdt },
+      ];
+
+  const byAsset = new Map<string, number>();
+  for (const entry of preferred) {
+    if (!entry?.assetCode) continue;
+    byAsset.set(entry.assetCode.toUpperCase(), Number(entry.amount || 0));
+  }
+
+  if (!byAsset.has("USDC")) byAsset.set("USDC", Number(balance.usdc || 0));
+  if (!byAsset.has("USDT")) byAsset.set("USDT", Number(balance.usdt || 0));
+
+  const order = new Map<string, number>(SELLABLE_ASSET_ORDER.map((asset, index) => [asset, index]));
+  return Array.from(byAsset.entries())
+    .map(([assetCode, amount]) => ({ assetCode, amount }))
+    .sort((a, b) => (order.get(a.assetCode) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.assetCode) ?? Number.MAX_SAFE_INTEGER) || a.assetCode.localeCompare(b.assetCode));
+}
+
+function buildWalletBalanceLine(balance: WalletBalance | undefined, fallbackTotalUsd?: number): string | undefined {
+  if (!balance && typeof fallbackTotalUsd !== "number") return undefined;
+  const assets = getWalletBalanceAssets(balance);
+  const totalUsd = typeof balance?.totalUsd === "number"
+    ? balance.totalUsd
+    : typeof fallbackTotalUsd === "number"
+      ? fallbackTotalUsd
+      : assets.reduce((sum, entry) => sum + entry.amount, 0);
+  const assetSummary = assets.length
+    ? assets.map((entry) => `${entry.assetCode}: ${formatUsdAmount(entry.amount)} USD`).join(", ")
+    : undefined;
+  return assetSummary
+    ? `Current wallet balance: ${formatUsdAmount(totalUsd)} USD total (${assetSummary}).`
+    : `Current wallet balance: ${formatUsdAmount(totalUsd)} USD.`;
+}
+
+function getSelectedAssetCoverage(preflight: ExecutionPreflightState | undefined): AssetCoverageState | undefined {
+  if (!preflight?.assetCoverage?.length) return undefined;
+  return preflight.assetCoverage.find((entry) => entry.assetCode === preflight.selectedAssetCode);
+}
+
+function buildAssetCoverageLine(preflight: ExecutionPreflightState | undefined): string | undefined {
+  if (!preflight?.assetCoverage?.length) return undefined;
+  const selected = getSelectedAssetCoverage(preflight);
+  if (selected) {
+    return `One SELL trade must be covered by a single asset. This transfer is currently coverable with ${selected.assetCode}.`;
+  }
+  if (!preflight.aggregateBalanceEnoughButSingleAssetInsufficient) return undefined;
+  const coverage = preflight.assetCoverage
+    .map((entry) => `${entry.assetCode}: ${formatUsdAmount(entry.balanceUsd)} available, needs about ${formatUsdAmount(entry.requiredUsd)}`)
+    .join("; ");
+  return `Your total wallet balance is high enough in aggregate, but one SELL trade must be funded by a single asset, not a combined USDC + USDT balance. Coverage right now: ${coverage}.`;
+}
+
 function buildPreflightQuoteSummary(preflight: ExecutionPreflightState | undefined): string | undefined {
   const quote = preflight?.quote;
   if (!quote) return undefined;
@@ -825,19 +912,95 @@ function buildPreflightQuoteCaveat(preflight: ExecutionPreflightState | undefine
 
 function getRequiredBalanceUsd(preflight: ExecutionPreflightState | undefined): number | undefined {
   if (!preflight) return undefined;
-  return preflight.quote?.totalCryptoAmount ?? preflight.amount;
+  return preflight.sellAssetRequiredUsd ?? preflight.quote?.totalCryptoAmount ?? preflight.amount;
 }
 
 function getTopUpShortfallUsd(preflight: ExecutionPreflightState | undefined): number | undefined {
   const required = getRequiredBalanceUsd(preflight);
   if (required === undefined) return undefined;
-  return Math.max(required - preflight!.balanceUsd, 0);
+  const balance = preflight?.sellAssetBalanceUsd ?? preflight?.balanceUsd;
+  if (balance === undefined) return undefined;
+  return Math.max(required - balance, 0);
 }
 
 function buildTopUpShortfallLine(preflight: ExecutionPreflightState | undefined): string | undefined {
   const shortfall = getTopUpShortfallUsd(preflight);
   if (shortfall === undefined || shortfall <= 0) return undefined;
-  return `You need about ${formatFixed(shortfall, 2)} USD more in the wallet before I can place the trade.`;
+  if (preflight?.assetCoverage?.length) {
+    return `You need about ${formatUsdAmount(shortfall)} USD more in one asset before I can place the trade.`;
+  }
+  return `You need about ${formatUsdAmount(shortfall)} USD more in the wallet before I can place the trade.`;
+}
+
+function compareAssetCoverage(a: AssetCoverageState, b: AssetCoverageState): number {
+  if (a.coversTransfer !== b.coversTransfer) return a.coversTransfer ? -1 : 1;
+  if (a.shortfallUsd !== b.shortfallUsd) return a.shortfallUsd - b.shortfallUsd;
+  if (a.requiredUsd !== b.requiredUsd) return a.requiredUsd - b.requiredUsd;
+  return (SELLABLE_ASSET_ORDER.indexOf(a.assetCode as typeof SELLABLE_ASSET_ORDER[number]) === -1 ? Number.MAX_SAFE_INTEGER : SELLABLE_ASSET_ORDER.indexOf(a.assetCode as typeof SELLABLE_ASSET_ORDER[number]))
+    - (SELLABLE_ASSET_ORDER.indexOf(b.assetCode as typeof SELLABLE_ASSET_ORDER[number]) === -1 ? Number.MAX_SAFE_INTEGER : SELLABLE_ASSET_ORDER.indexOf(b.assetCode as typeof SELLABLE_ASSET_ORDER[number]));
+}
+
+async function buildAssetCoverageState(params: {
+  client: TransferExecutionClient;
+  balance: WalletBalance;
+  amount: number;
+  paymentDetailsId: number;
+  tradePartner?: "licensed" | "p2p" | "all";
+}): Promise<{
+  assetCoverage: AssetCoverageState[];
+  selected?: AssetCoverageState;
+  best?: AssetCoverageState;
+  quote?: PreflightQuote;
+  selectedAssetCode?: string;
+  sellAssetBalanceUsd?: number;
+  sellAssetRequiredUsd?: number;
+  aggregateBalanceEnoughButSingleAssetInsufficient: boolean;
+}> {
+  const assets = getWalletBalanceAssets(params.balance)
+    .filter((entry) => SELLABLE_ASSET_ORDER.includes(entry.assetCode as typeof SELLABLE_ASSET_ORDER[number]));
+
+  const assetCoverage = await Promise.all(assets.map(async (asset) => {
+    let quote: PreflightQuote | undefined;
+    if (params.client.getPreflightQuote) {
+      try {
+        quote = await params.client.getPreflightQuote({
+          tradeType: "SELL",
+          cryptoCurrencyCode: asset.assetCode,
+          fiatAmount: params.amount,
+          paymentDetailsId: params.paymentDetailsId,
+          tradePartner: params.tradePartner,
+        });
+      } catch {
+        // Asset quote lookup is a UX improvement; fall back to rough amount coverage.
+      }
+    }
+
+    const requiredUsd = quote?.totalCryptoAmount ?? params.amount;
+    const shortfallUsd = Math.max(requiredUsd - asset.amount, 0);
+    return {
+      assetCode: asset.assetCode,
+      balanceUsd: asset.amount,
+      requiredUsd,
+      shortfallUsd,
+      coversTransfer: shortfallUsd <= 0,
+      quote,
+    } satisfies AssetCoverageState;
+  }));
+
+  const ordered = [...assetCoverage].sort(compareAssetCoverage);
+  const selected = ordered.find((entry) => entry.coversTransfer);
+  const best = ordered[0];
+  const requiredForAggregate = best?.requiredUsd ?? params.amount;
+  return {
+    assetCoverage: ordered,
+    selected,
+    best,
+    quote: selected?.quote ?? best?.quote,
+    selectedAssetCode: selected?.assetCode,
+    sellAssetBalanceUsd: selected?.balanceUsd ?? best?.balanceUsd,
+    sellAssetRequiredUsd: selected?.requiredUsd ?? best?.requiredUsd,
+    aggregateBalanceEnoughButSingleAssetInsufficient: Boolean(!selected && params.balance.totalUsd >= requiredForAggregate),
+  };
 }
 
 function chooseTopUpMethod(text: string | undefined): TopUpMethod | undefined {
@@ -867,6 +1030,7 @@ function buildInternalTopUpInstructions(username: string | undefined, preflight?
   const shortfall = getTopUpShortfallUsd(preflight);
   return [
     buildPreflightQuoteSummary(preflight),
+    buildAssetCoverageLine(preflight),
     buildTopUpShortfallLine(preflight),
     buildPreflightQuoteCaveat(preflight),
     formatted
@@ -1013,10 +1177,11 @@ async function maybeHydrateStartupAuthStatus(
 
   await maybeHydrateAuthIdentity(session, deps, executionClient);
 
-  if (typeof session.auth.balanceUsd === "number") return;
+  if (typeof session.auth.balanceUsd === "number" && session.auth.walletBalance) return;
   try {
     const balance = await executionClient.getWalletBalance();
     session.auth.balanceUsd = balance.totalUsd;
+    session.auth.walletBalance = balance;
   } catch {
     // Early balance surfacing improves UX but should not block the flow.
   }
@@ -1244,12 +1409,18 @@ function summarizePayment(session: TransferSession): string {
 
 function buildConfirmationMessage(session: TransferSession): string {
   const balanceLine = typeof session.execution.preflight?.balanceUsd === "number"
-    ? `Current wallet balance: ${session.execution.preflight.balanceUsd.toFixed(2)} USD.`
+    ? buildWalletBalanceLine({
+        usdc: session.execution.preflight.walletBalanceAssets?.find((entry) => entry.assetCode === "USDC")?.amount || 0,
+        usdt: session.execution.preflight.walletBalanceAssets?.find((entry) => entry.assetCode === "USDT")?.amount || 0,
+        totalUsd: session.execution.preflight.balanceUsd,
+        assets: session.execution.preflight.walletBalanceAssets,
+      }, session.execution.preflight.balanceUsd)
     : undefined;
   return [
     buildUsernameReminder(session.auth.username),
     balanceLine,
     buildPreflightQuoteSummary(session.execution.preflight),
+    buildAssetCoverageLine(session.execution.preflight),
     buildPreflightQuoteCaveat(session.execution.preflight),
     `Send ${session.amount} ${session.currency} to ${session.recipientName} via ${summarizePayment(session)}?`,
     `Details: ${maskDetailMap(session.details)}`,
@@ -1976,9 +2147,9 @@ async function ensureExecutionPreflight(
   const settings = loadSendMoneySettings(deps.settingsFilePath || DEFAULT_SETTINGS_FILE);
   const balance = await client.getWalletBalance();
   session.auth.balanceUsd = balance.totalUsd;
+  session.auth.walletBalance = balance;
 
   let paymentDetailsId: number | undefined;
-  let quote: PreflightQuote | undefined;
   const paymentDetail = await client.ensurePaymentDetail({
     paymentMethodId: session.payment!.methodId,
     paymentNetworkId: session.payment!.networkId,
@@ -1993,17 +2164,14 @@ async function ensureExecutionPreflight(
     data: { paymentDetailId: paymentDetail.id },
   });
 
-  try {
-    quote = await client.getPreflightQuote?.({
-      tradeType: "SELL",
-      cryptoCurrencyCode: "USDC",
-      fiatAmount: amount,
-      paymentDetailsId: paymentDetail.id,
-      tradePartner: settings.tradePartner,
-    });
-  } catch {
-    // Quote is a UX improvement but should not block the flow if the preview endpoint is unavailable.
-  }
+  const assetCoverageState = await buildAssetCoverageState({
+    client,
+    balance,
+    amount,
+    paymentDetailsId: paymentDetail.id,
+    tradePartner: settings.tradePartner,
+  });
+  const quote = assetCoverageState.quote;
 
   session.execution.preflight = {
     balanceUsd: balance.totalUsd,
@@ -2012,14 +2180,21 @@ async function ensureExecutionPreflight(
     checkedAt: nowIso(deps),
     paymentDetailsId,
     quote,
+    walletBalanceAssets: getWalletBalanceAssets(balance),
+    assetCoverage: assetCoverageState.assetCoverage,
+    selectedAssetCode: assetCoverageState.selectedAssetCode,
+    sellAssetBalanceUsd: assetCoverageState.sellAssetBalanceUsd,
+    sellAssetRequiredUsd: assetCoverageState.sellAssetRequiredUsd,
+    aggregateBalanceEnoughButSingleAssetInsufficient: assetCoverageState.aggregateBalanceEnoughButSingleAssetInsufficient,
   };
 
   const requiredBalanceUsd = getRequiredBalanceUsd(session.execution.preflight) ?? amount;
   events.push({
     type: "balance_checked",
     message: [
-      `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
+      buildWalletBalanceLine(balance, balance.totalUsd),
       buildPreflightQuoteSummary(session.execution.preflight),
+      buildAssetCoverageLine(session.execution.preflight),
       buildTopUpShortfallLine(session.execution.preflight),
       buildPreflightQuoteCaveat(session.execution.preflight),
     ].filter(Boolean).join(" "),
@@ -2029,31 +2204,39 @@ async function ensureExecutionPreflight(
       currency: session.currency,
       paymentDetailsId,
       requiredBalanceUsd,
+      selectedAssetCode: session.execution.preflight.selectedAssetCode,
       quoteType: quote?.quoteType,
       vendorOfferRate: quote?.vendorOfferRate,
       totalCryptoAmount: quote?.totalCryptoAmount,
     },
   });
 
-  if (balance.totalUsd < requiredBalanceUsd) {
+  if (!session.execution.preflight.selectedAssetCode) {
     session.status = "blocked";
     session.topUp = undefined;
     session.stage = "awaiting_topup_method";
     const message = [
       buildUsernameReminder(session.auth.username),
-      `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
+      buildWalletBalanceLine(balance, balance.totalUsd),
       buildPreflightQuoteSummary(session.execution.preflight),
+      buildAssetCoverageLine(session.execution.preflight),
       buildTopUpShortfallLine(session.execution.preflight),
       quote
-        ? "Until the wallet covers that current estimate, I will not place the trade."
-        : `That is below the requested ${amount} ${session.currency}, so I will not place the trade.`,
+        ? "Until one asset covers that current estimate on its own, I will not place the trade."
+        : `Until one asset covers the requested ${amount} ${session.currency} on its own, I will not place the trade.`,
       buildPreflightQuoteCaveat(session.execution.preflight),
       buildTopUpMethodPrompt(session.auth.username),
     ].filter(Boolean).join(" ");
     events.push({
       type: "blocked_insufficient_balance",
       message,
-      data: { balance: balance.totalUsd, amount, requiredBalanceUsd, paymentDetailsId },
+      data: {
+        balance: balance.totalUsd,
+        amount,
+        requiredBalanceUsd,
+        paymentDetailsId,
+        selectedAssetCode: session.execution.preflight.selectedAssetCode,
+      },
     });
     return {
       events,
@@ -2104,8 +2287,10 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
   }
 
   const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || amount;
+  const sellAssetCode = session.execution.preflight?.selectedAssetCode || session.execution.preflight?.quote?.cryptoCurrencyCode || "USDC";
   const tradeRequest = await client.createTradeRequest({
     tradeType: "SELL",
+    cryptoCurrencyCode: sellAssetCode,
     fiatCurrencyCode: session.currency!,
     fiatAmount: amount,
     cryptoAmount: quotedCryptoAmount,

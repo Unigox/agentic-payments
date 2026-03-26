@@ -81,7 +81,7 @@ Two options:
 > send €200 to john on revolut
 ```
 
-Your agent resolves the recipient, walks method selection step by step, checks the balance early, and only then asks for final confirmation. Recipient gets paid only after you confirm.
+Your agent resolves the recipient, walks method selection step by step, checks the balance early, and only then asks for final confirmation. Balance reporting now shows both the total wallet balance and the per-asset split (for example USDC and USDT), and the preflight makes it explicit that one SELL trade must be funded by a single asset rather than the combined total. Recipient gets paid only after you confirm.
 
 The orchestration layer also handles the real chat edges: saved vs new recipients, live payment-method/network selection, provider-first then network-specific detail collection, field-by-field validation, stale contact updates, save-contact-only mode, insufficient balance before trade creation, and no-vendor-match follow-up. See `references/transfer-flow.md`.
 

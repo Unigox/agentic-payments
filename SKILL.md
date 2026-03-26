@@ -100,7 +100,7 @@ Always run balance / identity preflight before the final confirmation.
 If stored auth already exists, the flow should also feel stateful at the very start: surface the current username and current balance in the first reply instead of re-asking setup questions.
 
 Example:
-> "You're signed in as @grape on UNIGOX. Current wallet balance: 250.00 USD. Send €50 to Svetlana Example via Revolut (@svetlana)?"
+> "You're signed in as @grape on UNIGOX. Current wallet balance: 250.00 USD total (USDC: 200.00 USD, USDT: 50.00 USD). Send €50 to Svetlana Example via Revolut (@svetlana)?"
 
 Only execute after explicit user confirmation.
 

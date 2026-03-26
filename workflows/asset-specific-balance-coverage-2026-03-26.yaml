@@ -1,0 +1,81 @@
+goal: "Fix the send-money balance UX so wallet balance is shown split by sellable asset and transfer preflight enforces single-asset sellability instead of aggregated balance."
+run_id: "send_money_asset_specific_balance_20260326"
+constraints:
+  - "use_modular_builder_process"
+  - "keep_scope_to_balance_display_sellability_and_preflight"
+  - "do_not_imply_combined_usdc_plus_usdt_is_sellable_as_one_trade"
+  - "prefer_existing_unigox_quote_api_per_asset_when_available"
+  - "update_docs_tests_and_commit_in_skill_repo"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "root_cause"
+  - "design_notes"
+  - "flow_sequence"
+  - "changed_files"
+  - "docs_updated"
+  - "tests_run"
+  - "test_results"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_balance_and_preflight_gap"
+    name: "Inspect the current balance display, preflight logic, and existing tests/docs"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:root_cause"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_asset_specific_sellability_fix"
+    name: "Lock the split-balance display and single-asset sellability design"
+    required_predecessors:
+      - "inspect_balance_and_preflight_gap"
+    required_checks:
+      - "root_cause_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:flow_sequence"
+      - "min_count:1"
+    external_action: false
+
+  - id: "implement_asset_specific_sellability_fix"
+    name: "Implement wallet split display, asset-specific preflight coverage, and docs updates"
+    required_predecessors:
+      - "design_asset_specific_sellability_fix"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_asset_specific_sellability_fix"
+    name: "Run regression tests for split balance display and single-asset transfer coverage"
+    required_predecessors:
+      - "implement_asset_specific_sellability_fix"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_asset_specific_sellability_fix"
+    name: "Commit the send-money asset-specific balance UX fix"
+    required_predecessors:
+      - "validate_asset_specific_sellability_fix"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false
