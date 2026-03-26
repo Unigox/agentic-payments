@@ -1,0 +1,81 @@
+goal: "Fix the send-money insufficient-balance top-up UX so it asks for top-up method first, supports internal UNIGOX username funding, and keeps external deposits token -> chain -> single-address."
+run_id: "send_money_topup_internal_username_20260326"
+constraints:
+  - "use_modular_builder_process"
+  - "keep_scope_to_topup_ux_bug_only"
+  - "keep_topup_flow_conversational_and_stepwise"
+  - "internal_unigox_topup_must_not_trigger_external_token_chain_questions"
+  - "external_deposit_must_remain_token_then_chain_then_single_address"
+allowed_scope:
+  - "status"
+  - "summary"
+  - "files_reviewed"
+  - "root_cause"
+  - "design_notes"
+  - "flow_sequence"
+  - "changed_files"
+  - "docs_updated"
+  - "tests_run"
+  - "test_results"
+  - "commit_sha"
+  - "count"
+max_auto_corrections: 1
+hard_stop_threshold: 2
+workflow:
+  - id: "inspect_current_topup_flow"
+    name: "Inspect the current insufficient-balance and top-up flow in code, tests, and docs"
+    required_predecessors: []
+    required_checks:
+      - "task_scope_locked"
+    acceptance_criteria:
+      - "has_key:files_reviewed"
+      - "has_key:root_cause"
+      - "min_count:1"
+    external_action: false
+
+  - id: "design_topup_fix"
+    name: "Lock the exact conversational top-up sequence for internal username funding vs external deposits"
+    required_predecessors:
+      - "inspect_current_topup_flow"
+    required_checks:
+      - "root_cause_present"
+    acceptance_criteria:
+      - "has_key:design_notes"
+      - "has_key:flow_sequence"
+      - "min_count:1"
+    external_action: false
+
+  - id: "implement_topup_fix"
+    name: "Implement the top-up method selection flow and update the skill docs"
+    required_predecessors:
+      - "design_topup_fix"
+    required_checks:
+      - "design_locked"
+    acceptance_criteria:
+      - "has_key:changed_files"
+      - "has_key:docs_updated"
+      - "min_count:1"
+    external_action: false
+
+  - id: "validate_topup_fix"
+    name: "Run regression tests for insufficient-balance top-up flow plus external deposit sequencing"
+    required_predecessors:
+      - "implement_topup_fix"
+    required_checks:
+      - "changes_present"
+    acceptance_criteria:
+      - "has_key:tests_run"
+      - "has_key:test_results"
+      - "min_count:1"
+    external_action: false
+
+  - id: "commit_topup_fix"
+    name: "Commit the send-money top-up UX fix"
+    required_predecessors:
+      - "validate_topup_fix"
+    required_checks:
+      - "validation_complete"
+    acceptance_criteria:
+      - "has_key:commit_sha"
+      - "has_key:status"
+    external_action: false

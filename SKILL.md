@@ -32,8 +32,10 @@ The onboarding flow:
 9. Only after successful EVM login, collect and save the separate **UNIGOX-exported signing** key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY`, legacy alias `UNIGOX_PRIVATE_KEY` still supported), with the same isolated-wallet warning and secret-cleanup rule
 10. For TON, verify TON login and only ask for an EVM signing key later if signed EVM actions are needed
 11. Optionally link the other wallet path later if the user wants flexibility
-12. If the user wants to top up, do it step by step: first ask which token they want to deposit, then ask which supported chain/network they want for that token, and only then show the single relevant deposit address
-13. Use the frontend-supported deposit options as the source of truth: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
+12. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+13. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+14. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
+15. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 
@@ -173,7 +175,9 @@ Preferred auth environment variables:
 - **Email OTP is fallback**, not the first phrasing for repeatable sign-in. Use it when the chosen wallet path is not ready yet or for recovery
 - **TON auth only covers JWT acquisition** — keep using the existing post-login APIs unchanged
 - **EVM-signed actions** like receipt confirmation / escrow release, escrow withdraw, and bridge-out require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`)
-- **Do not dump every deposit address at once**. For top-ups, ask token first, then network, then return only the one relevant address for that selection
+- **Ask for top-up method first when funding is needed**. Offer at least: another UNIGOX user sends to the user's username, or an external/on-chain deposit
+- **Internal UNIGOX top-ups stay internal**. Show the current username clearly and tell the user to have the other UNIGOX user send to that username; do not ask token + chain unless they switch to external deposit
+- **Do not dump every deposit address at once**. For the external/on-chain top-up path, ask token first, then network, then return only the one relevant address for that selection
 - **Deposit options must come from the real frontend-supported routes** exposed by `getBridgeTokens()` plus the frontend wallet rules (`enabled_for_deposit`, main assets shown to users, XAI excluded, supported address families only)
 - **Do not offer unsupported deposit routes** such as NEAR / intent-style paths that are not actually selectable in the frontend deposit flow
 - Save new contacts immediately for persistence

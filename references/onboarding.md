@@ -182,12 +182,20 @@ Let the user add as many contacts as they want. When they're done or say they wa
 > We're all set. Now, in order to send money, we need to have a little balance. You can top up your balance when we're sending it, or you can top up in advance so the sending is faster. Which one would you like to go with?
 
 If they want to top up now:
-- First ask which token they want to deposit: the user-facing wallet flow currently exposes main deposit assets such as USDC and USDT
-- Fetch / derive the available deposit routes from the same frontend-supported source the wallet UI uses: `getBridgeTokens()` filtered by `chain.enabled_for_deposit`, main user-facing assets, XAI exclusion, and supported address families only (EVM, Solana, Tron/TVM, TON)
-- Then ask which supported chain / network they want for that token
-- Only after the token + chain are both chosen, show the single relevant deposit address for that route
-- Mention they can also find the same address flow on unigox.com
-- Do **not** dump every address up front and do **not** mention unsupported routes that are not selectable in the frontend deposit flow (for example NEAR / intent-style routes)
+- First ask which top-up method they want:
+  - another UNIGOX user sends funds directly to their username
+  - external / on-chain deposit
+- If they choose the internal UNIGOX route:
+  - clearly show their current UNIGOX username
+  - tell them to have the other UNIGOX user send funds directly to that username
+  - do **not** switch into token + chain questions for this route unless they explicitly change to external deposit
+- If they choose the external / on-chain route:
+  - first ask which token they want to deposit: the user-facing wallet flow currently exposes main deposit assets such as USDC and USDT
+  - fetch / derive the available deposit routes from the same frontend-supported source the wallet UI uses: `getBridgeTokens()` filtered by `chain.enabled_for_deposit`, main user-facing assets, XAI exclusion, and supported address families only (EVM, Solana, Tron/TVM, TON)
+  - then ask which supported chain / network they want for that token
+  - only after the token + chain are both chosen, show the single relevant deposit address for that route
+  - mention they can also find the same address flow on unigox.com
+  - do **not** dump every address up front and do **not** mention unsupported routes that are not selectable in the frontend deposit flow (for example NEAR / intent-style routes)
 - If no crypto: mention on-ramp available in EUR, NGN, and KES
 
 If they want to top up later: that's fine, proceed to Step 5.

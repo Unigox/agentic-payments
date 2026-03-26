@@ -121,7 +121,12 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 ### Insufficient balance
 - Surface the current balance in the same chat flow before confirmation.
 - Stop before `ensurePaymentDetail()` / `createTradeRequest()`.
-- Ask the user to fund the wallet or change the amount.
+- Ask for the top-up method first:
+  - another UNIGOX user sends funds directly to the current username
+  - external / on-chain deposit
+- If the user chooses the internal UNIGOX route, show the username clearly and tell them to have the other user send to that username. Do **not** ask token + chain for that route.
+- If the user chooses external / on-chain deposit, keep the token -> chain -> single-address sequence.
+- Still allow the user to change the amount instead of topping up.
 
 ### No vendor match / matching timeout reached
 - Keep the contact data intact.

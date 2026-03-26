@@ -12,12 +12,15 @@ import UnigoxClient, {
 import type {
   AgenticPaymentsSettings,
   CurrencyPaymentData,
+  DepositFlowSelection,
   NetworkFieldConfig,
   PaymentDetail,
   PaymentFieldValidationResult,
   PaymentMethodInfo,
   PaymentNetworkInfo,
   ResolvedPaymentMethodFieldConfig,
+  SupportedDepositAssetOption,
+  SupportedDepositChainOption,
   TradeRequest,
   UnigoxClientConfig,
   UserProfile,
@@ -53,6 +56,7 @@ const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 
 type AuthChoice = "evm" | "ton" | "email";
 type SecretKind = "evm_login_key" | "evm_signing_key";
+type TopUpMethod = "internal_username" | "external_deposit";
 
 export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
@@ -71,6 +75,9 @@ export type TransferStage =
   | "awaiting_save_contact_decision"
   | "awaiting_amount"
   | "awaiting_confirmation"
+  | "awaiting_topup_method"
+  | "awaiting_external_deposit_asset"
+  | "awaiting_external_deposit_chain"
   | "awaiting_balance_resolution"
   | "awaiting_match_status"
   | "awaiting_no_match_resolution"
@@ -141,6 +148,8 @@ export interface TransferExecutionClient {
   getTradeRequest?(tradeRequestId: number): Promise<TradeRequest>;
   getTrade?(tradeId: number): Promise<SettlementTrade | undefined>;
   confirmFiatReceived?(tradeId: number): Promise<SettlementTrade | undefined>;
+  getSupportedDepositOptions?(): Promise<SupportedDepositAssetOption[]>;
+  describeDepositSelection?(selection: DepositFlowSelection): Promise<SupportedDepositChainOption & { depositAddress: string }>;
 }
 
 export interface TransferFlowDeps {
@@ -220,6 +229,12 @@ export interface DetailCollectionState {
   lastError?: string;
 }
 
+export interface TopUpState {
+  method?: TopUpMethod;
+  assetCode?: SupportedDepositAssetOption["assetCode"];
+  chainId?: number;
+}
+
 export interface TransferSession {
   id: string;
   goal: TransferGoal;
@@ -235,6 +250,7 @@ export interface TransferSession {
   currency?: string;
   amount?: number;
   payment?: SelectedPaymentMethod;
+  topUp?: TopUpState;
   details: Record<string, string>;
   detailCollection: DetailCollectionState;
   saveContactDecision?: "pending" | "yes" | "no";
@@ -756,6 +772,88 @@ function buildUsernameReminder(username: string | undefined): string | undefined
   const formatted = formatUsername(username);
   if (!formatted) return undefined;
   return `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
+}
+
+function chooseTopUpMethod(text: string | undefined): TopUpMethod | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  if (/(another\s+unigox\s+(?:user|wallet)|internal(?:\s+unigox)?|my username|send to (?:my )?username|username transfer)/i.test(value)) {
+    return "internal_username";
+  }
+  if (/(external|on-?chain|deposit address|wallet address|crypto deposit|from another wallet|token and chain|network deposit)/i.test(value)) {
+    return "external_deposit";
+  }
+  return undefined;
+}
+
+function buildTopUpMethodPrompt(username: string | undefined): string {
+  const formatted = formatUsername(username);
+  return [
+    "How would you like to top up the wallet?",
+    formatted ? `1) Another UNIGOX user sends funds directly to your username ${formatted}.` : "1) Another UNIGOX user sends funds directly to your UNIGOX username.",
+    "2) External / on-chain deposit to your wallet address.",
+    "You can also change the transfer amount instead.",
+  ].join(" ");
+}
+
+function buildInternalTopUpInstructions(username: string | undefined): string {
+  const formatted = formatUsername(username);
+  return [
+    formatted
+      ? `Your current UNIGOX username is ${formatted}.`
+      : "I couldn't hydrate your UNIGOX username just yet, so this internal route is only useful once that username is visible.",
+    formatted
+      ? `Ask the other UNIGOX user to send the funds directly to ${formatted} inside UNIGOX.`
+      : "If you want, switch to external / on-chain deposit instead and I'll guide that route step by step.",
+    formatted ? "This internal UNIGOX route does not need a token + chain deposit flow first." : undefined,
+    "When the funds arrive, tell me to recheck the balance.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildExternalDepositAssetPrompt(options: SupportedDepositAssetOption[]): string {
+  const assets = options.map((entry) => entry.assetCode).join(", ");
+  return `For an external / on-chain deposit, which token do you want to deposit? Available options here: ${assets}.`;
+}
+
+function buildExternalDepositChainPrompt(option: SupportedDepositAssetOption): string {
+  const chains = option.chains.map((entry) => entry.chainName).join(", ");
+  return `Which network should I use for ${option.assetCode}? Supported ${option.assetCode} deposit networks here: ${chains}.`;
+}
+
+function buildExternalDepositInstructions(selection: SupportedDepositChainOption & { depositAddress: string }): string {
+  return [
+    `Send ${selection.assetCode} on ${selection.chainName} to this deposit address: ${selection.depositAddress}`,
+    "This is the single relevant address for that token + network choice.",
+    "Once the transfer lands, tell me to recheck the balance.",
+  ].join(" ");
+}
+
+function chooseDepositAssetOption(options: SupportedDepositAssetOption[], text: string | undefined): SupportedDepositAssetOption | undefined {
+  const query = normalizeMatchValue(text);
+  if (!query) return undefined;
+  return options.find((option) => {
+    const candidates = [option.assetCode, ...option.tokenCodes];
+    return candidates.some((candidate) => {
+      const normalized = normalizeMatchValue(candidate);
+      return normalized === query || normalized.includes(query) || query.includes(normalized);
+    });
+  });
+}
+
+function chooseDepositChainOption(chains: SupportedDepositChainOption[], text: string | undefined): SupportedDepositChainOption | undefined {
+  const query = normalizeMatchValue(text);
+  if (!query) return undefined;
+  return chains.find((chain) => {
+    const candidates = [chain.chainName, chain.chainType, `${chain.assetCode} ${chain.chainName}`, `${chain.tokenCode} ${chain.chainName}`];
+    return candidates.some((candidate) => {
+      const normalized = normalizeMatchValue(candidate);
+      return normalized === query || normalized.includes(query) || query.includes(normalized);
+    });
+  });
+}
+
+function wantsBalanceRecheck(text: string | undefined): boolean {
+  return /^(recheck|check|refresh|retry|continue|done|funded|topped up|balance updated|try again)(?:\s+balance)?$/i.test(cleanText(text));
 }
 
 function buildEvmKeySecurityWarning(kind: SecretKind): string {
@@ -1333,6 +1431,138 @@ function settlementDecisionStageActive(session: TransferSession): boolean {
   ].includes(session.stage);
 }
 
+async function maybeHandleTopUpTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (![
+    "awaiting_topup_method",
+    "awaiting_external_deposit_asset",
+    "awaiting_external_deposit_chain",
+    "awaiting_balance_resolution",
+  ].includes(session.stage)) {
+    return undefined;
+  }
+
+  const hints = parseIntentHints(turn.text);
+  if (hints.changeAmount || hints.changeCurrency) {
+    return undefined;
+  }
+
+  const selectionText = turn.option || turn.text;
+
+  if (session.stage === "awaiting_balance_resolution") {
+    if (wantsBalanceRecheck(selectionText)) {
+      const client = await getExecutionClient(deps);
+      clearExecutionPreflight(session);
+      const preflight = await ensureExecutionPreflight(session, deps, client);
+      if (preflight.blockedResult) {
+        return preflight.blockedResult;
+      }
+      session.status = "active";
+      session.topUp = undefined;
+      session.stage = "awaiting_confirmation";
+      return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, preflight.events);
+    }
+
+    const methodChoice = chooseTopUpMethod(selectionText);
+    if (methodChoice || /\b(top up|fund wallet|deposit)\b/i.test(cleanText(selectionText))) {
+      session.stage = "awaiting_topup_method";
+      return maybeHandleTopUpTurn(session, turn, deps);
+    }
+
+    return undefined;
+  }
+
+  const methodChoice = chooseTopUpMethod(selectionText);
+
+  if (session.stage === "awaiting_topup_method") {
+    if (!methodChoice) {
+      return reply(
+        withUpdate(session, deps),
+        buildTopUpMethodPrompt(session.auth.username),
+        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"]
+      );
+    }
+
+    if (methodChoice === "internal_username") {
+      const client = await getExecutionClient(deps);
+      await maybeHydrateAuthIdentity(session, deps, client);
+      session.status = "blocked";
+      session.topUp = { method: methodChoice };
+      session.stage = "awaiting_balance_resolution";
+      return reply(
+        withUpdate(session, deps),
+        buildInternalTopUpInstructions(session.auth.username),
+        ["recheck balance", "external / on-chain deposit", "change amount"]
+      );
+    }
+
+    const client = await getExecutionClient(deps);
+    if (!client.getSupportedDepositOptions) {
+      throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
+    }
+    const options = await client.getSupportedDepositOptions();
+    session.status = "blocked";
+    session.topUp = { method: methodChoice };
+    session.stage = "awaiting_external_deposit_asset";
+    return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
+  }
+
+  const client = await getExecutionClient(deps);
+  if (!client.getSupportedDepositOptions) {
+    throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
+  }
+  const options = await client.getSupportedDepositOptions();
+
+  if (session.stage === "awaiting_external_deposit_asset") {
+    const asset = chooseDepositAssetOption(options, selectionText);
+    if (!asset) {
+      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
+    }
+    session.topUp = {
+      ...session.topUp,
+      method: "external_deposit",
+      assetCode: asset.assetCode,
+      chainId: undefined,
+    };
+    session.stage = "awaiting_external_deposit_chain";
+    return reply(withUpdate(session, deps), buildExternalDepositChainPrompt(asset), asset.chains.map((chain) => chain.chainName));
+  }
+
+  if (session.stage === "awaiting_external_deposit_chain") {
+    const asset = options.find((option) => option.assetCode === session.topUp?.assetCode);
+    if (!asset) {
+      session.stage = "awaiting_external_deposit_asset";
+      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
+    }
+    const chain = chooseDepositChainOption(asset.chains, selectionText);
+    if (!chain) {
+      return reply(withUpdate(session, deps), buildExternalDepositChainPrompt(asset), asset.chains.map((entry) => entry.chainName));
+    }
+    if (!client.describeDepositSelection) {
+      throw new Error("This UNIGOX client cannot resolve a single deposit address for the chosen external top-up route.");
+    }
+    const resolved = await client.describeDepositSelection({ assetCode: asset.assetCode, chainId: chain.chainId });
+    session.status = "blocked";
+    session.topUp = {
+      ...session.topUp,
+      method: "external_deposit",
+      assetCode: asset.assetCode,
+      chainId: chain.chainId,
+    };
+    session.stage = "awaiting_balance_resolution";
+    return reply(
+      withUpdate(session, deps),
+      buildExternalDepositInstructions(resolved),
+      ["recheck balance", "another UNIGOX user sends to my username", "change amount"]
+    );
+  }
+
+  return undefined;
+}
+
 async function maybeHandleSettlementTurn(
   session: TransferSession,
   turn: TransferTurn,
@@ -1652,11 +1882,13 @@ async function ensureExecutionPreflight(
 
   if (balance.totalUsd < amount) {
     session.status = "blocked";
-    session.stage = "awaiting_balance_resolution";
+    session.topUp = undefined;
+    session.stage = "awaiting_topup_method";
     const message = [
       buildUsernameReminder(session.auth.username),
       `Current wallet balance: ${balance.totalUsd.toFixed(2)} USD.`,
-      `That is below the requested ${amount} ${session.currency}, so I will not place the trade. Fund the wallet or change the amount first.`,
+      `That is below the requested ${amount} ${session.currency}, so I will not place the trade.`,
+      buildTopUpMethodPrompt(session.auth.username),
     ].filter(Boolean).join(" ");
     events.push({
       type: "blocked_insufficient_balance",
@@ -1665,7 +1897,12 @@ async function ensureExecutionPreflight(
     });
     return {
       events,
-      blockedResult: reply(withUpdate(session, deps), message, ["change amount", "fund wallet"], events),
+      blockedResult: reply(
+        withUpdate(session, deps),
+        message,
+        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"],
+        events
+      ),
     };
   }
 
@@ -1885,6 +2122,9 @@ export async function advanceTransferFlow(
 
   applyHintsToSession(session, stageAwareHints);
   applyMidFlowChanges(session, hints);
+
+  const topUpReply = await maybeHandleTopUpTurn(session, normalizedTurn, deps);
+  if (topUpReply) return topUpReply;
 
   if (session.goal === "transfer" && !session.auth.available) {
     session.status = "blocked";

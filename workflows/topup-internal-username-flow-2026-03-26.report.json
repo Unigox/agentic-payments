@@ -1,0 +1,76 @@
+{
+  "engine": {
+    "status": "completed",
+    "run_id": "send_money_topup_internal_username_20260326",
+    "goal": "Fix the send-money insufficient-balance top-up UX so it asks for top-up method first, supports internal UNIGOX username funding, and keeps external deposits token -> chain -> single-address.",
+    "completed_steps": [
+      "inspect_current_topup_flow",
+      "design_topup_fix",
+      "implement_topup_fix",
+      "validate_topup_fix",
+      "commit_topup_fix"
+    ],
+    "total_steps": 5,
+    "drift_flags_total": 0,
+    "corrections_total": 0,
+    "trace_entries": 10
+  },
+  "meta": {
+    "total_findings": 0,
+    "critical": 0,
+    "warnings": 0,
+    "info": 0,
+    "findings": [],
+    "verdict": "clean"
+  },
+  "step_outputs": {
+    "inspect_current_topup_flow": {
+      "files_reviewed": [
+        "skills/send-money/scripts/transfer-orchestrator.ts",
+        "skills/send-money/scripts/transfer-orchestrator.test.ts",
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md"
+      ],
+      "root_cause": "The insufficient-balance branch jumped straight from a blocked balance check to a generic fund-wallet message. It never forced a top-up method choice first, so users who wanted another UNIGOX user to fund them were pushed into the external deposit token/chain flow by default.",
+      "count": 6
+    },
+    "design_topup_fix": {
+      "design_notes": "Insert an explicit top-up-method step after insufficient balance, add internal-username vs external-deposit subflows, keep recheck/change-amount behavior intact, and reuse the existing frontend-filtered external deposit token -> chain -> single-address flow only when the user actually chooses external deposit.",
+      "flow_sequence": "insufficient balance -> ask top-up method -> internal UNIGOX username instructions OR external deposit token -> chain -> single address -> recheck balance -> return to confirmation when funded",
+      "count": 2
+    },
+    "implement_topup_fix": {
+      "changed_files": [
+        "skills/send-money/scripts/transfer-orchestrator.ts",
+        "skills/send-money/scripts/transfer-orchestrator.test.ts",
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md",
+        "skills/send-money/workflows/topup-internal-username-flow-2026-03-26.yaml",
+        "skills/send-money/workflows/topup-internal-username-flow-2026-03-26.report.json"
+      ],
+      "docs_updated": [
+        "skills/send-money/SKILL.md",
+        "skills/send-money/README.md",
+        "skills/send-money/references/onboarding.md",
+        "skills/send-money/references/transfer-flow.md"
+      ],
+      "count": 8
+    },
+    "validate_topup_fix": {
+      "tests_run": [
+        "cd skills/send-money && node --test scripts/transfer-orchestrator.test.ts"
+      ],
+      "test_results": "PASS (23/23 tests). Added regressions for insufficient-balance top-up method prompting, internal UNIGOX username funding, and external token -> chain -> single-address deposit sequencing.",
+      "count": 1
+    },
+    "commit_topup_fix": {
+      "status": "completed",
+      "commit_sha": "captured in git history / task summary",
+      "count": 1
+    }
+  }
+}

@@ -10,9 +10,11 @@ process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP = "1";
 import { validatePaymentDetailInput } from "./unigox-client.ts";
 import type {
   CurrencyPaymentData,
+  DepositFlowSelection,
   NetworkFieldConfig,
   PaymentDetail,
   ResolvedPaymentMethodFieldConfig,
+  SupportedDepositAssetOption,
   TradeRequest,
   WalletBalance,
 } from "./unigox-client.ts";
@@ -427,6 +429,61 @@ const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
   },
 };
 
+const DEPOSIT_OPTIONS: SupportedDepositAssetOption[] = [
+  {
+    assetCode: "USDC",
+    tokenCodes: ["USDC"],
+    chains: [
+      {
+        assetCode: "USDC",
+        tokenCode: "USDC",
+        tokenName: "USD Coin",
+        tokenAddress: "0xusdc",
+        chainId: 1,
+        chainName: "Ethereum",
+        chainType: "EVM",
+        addressKey: "evmAddress",
+      },
+      {
+        assetCode: "USDC",
+        tokenCode: "USDC",
+        tokenName: "USD Coin",
+        tokenAddress: "So11111111111111111111111111111111111111112",
+        chainId: 1399811149,
+        chainName: "Solana",
+        chainType: "Solana",
+        addressKey: "solanaAddress",
+      },
+    ],
+  },
+  {
+    assetCode: "USDT",
+    tokenCodes: ["USDT"],
+    chains: [
+      {
+        assetCode: "USDT",
+        tokenCode: "USDT",
+        tokenName: "Tether USD",
+        tokenAddress: "TetherTronToken",
+        chainId: 728126428,
+        chainName: "Tron",
+        chainType: "TVM",
+        addressKey: "tronAddress",
+      },
+      {
+        assetCode: "USDT",
+        tokenCode: "USDT",
+        tokenName: "Tether USD",
+        tokenAddress: "TonTokenAddress",
+        chainId: -239,
+        chainName: "TON",
+        chainType: "TON",
+        addressKey: "tonAddress",
+      },
+    ],
+  },
+];
+
 function makeFieldConfigKey(currency: string, methodSlug?: string, networkSlug?: string) {
   return `${currency.toUpperCase()}:${methodSlug}:${networkSlug}`;
 }
@@ -466,11 +523,13 @@ function makeClient(options: {
   confirmFiatReceivedStatus?: string;
   confirmFiatReceivedError?: string;
   username?: string;
+  depositOptions?: SupportedDepositAssetOption[];
 } = {}): TransferExecutionClient & { calls: string[] } {
   const calls: string[] = [];
   const balance = options.balance ?? 1000;
   const waitMode = options.waitMode ?? "matched";
   const username = options.username ?? "grape404";
+  const depositOptions = options.depositOptions ?? DEPOSIT_OPTIONS;
   let currentTradeStatus = options.matchedTradeStatus ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
   const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
   let tradeStatusIndex = 0;
@@ -527,6 +586,26 @@ function makeClient(options: {
       currentTradeStatus = options.confirmFiatReceivedStatus ?? "fiat_payment_confirmed_by_seller_escrow_release_started";
       tradeStatuses.push(currentTradeStatus);
       return { id: 8801, status: currentTradeStatus };
+    },
+    async getSupportedDepositOptions(): Promise<SupportedDepositAssetOption[]> {
+      calls.push("getSupportedDepositOptions");
+      return depositOptions;
+    },
+    async describeDepositSelection(selection: DepositFlowSelection) {
+      calls.push(`describeDepositSelection:${selection.assetCode}:${selection.chainId}`);
+      const asset = depositOptions.find((entry) => entry.assetCode === selection.assetCode);
+      const chain = asset?.chains.find((entry) => entry.chainId === selection.chainId);
+      if (!asset || !chain) throw new Error(`Unsupported test deposit selection: ${JSON.stringify(selection)}`);
+      const addresses = {
+        evmAddress: "0xEvmDepositAddress",
+        solanaAddress: "So1anaDepositAddress111111111111111111111111111",
+        tronAddress: "TRON-DEPOSIT-ADDRESS",
+        tonAddress: "TON-DEPOSIT-ADDRESS",
+      } as const;
+      return {
+        ...chain,
+        depositAddress: addresses[chain.addressKey],
+      };
     },
   };
 }
@@ -718,7 +797,7 @@ test("bank-style SEPA flows collect bank name when required", async () => {
   assert.match(res.reply, /Which bank should receive this payout/i);
 });
 
-test("insufficient balance blocks before trade creation and before confirmation", async () => {
+test("insufficient balance blocks before trade creation and asks for top-up method first", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -743,12 +822,105 @@ test("insufficient balance blocks before trade creation and before confirmation"
   const deps = makeDeps(file, client);
 
   const res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_balance_resolution");
+  assert.equal(res.session.stage, "awaiting_topup_method");
   assert.equal(res.session.status, "blocked");
   assert.ok(res.events.some((event) => event.type === "balance_checked"));
   assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
   assert.match(res.reply, /will not place the trade/i);
+  assert.match(res.reply, /How would you like to top up the wallet/i);
+  assert.match(res.reply, /Another UNIGOX user sends funds directly to your username/i);
+  assert.match(res.reply, /External \/ on-chain deposit/i);
   assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance"]);
+});
+
+test("internal UNIGOX top-up shows username and skips token-chain questions", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ balance: 10, username: "alexwallet" });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_topup_method");
+
+  res = await advanceTransferFlow(res.session, "top up from another UNIGOX wallet", deps);
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
+  assert.equal(res.session.topUp?.method, "internal_username");
+  assert.match(res.reply, /@alexwallet/i);
+  assert.match(res.reply, /send the funds directly to @alexwallet inside UNIGOX/i);
+  assert.doesNotMatch(res.reply, /Which token do you want to deposit/i);
+  assert.doesNotMatch(res.reply, /Which network should I use/i);
+  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance"]);
+});
+
+test("external top-up keeps token then chain then single-address flow", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ balance: 10, username: "alexwallet" });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_topup_method");
+
+  res = await advanceTransferFlow(res.session, "external / on-chain deposit", deps);
+  assert.equal(res.session.stage, "awaiting_external_deposit_asset");
+  assert.match(res.reply, /which token do you want to deposit/i);
+  assert.match(res.reply, /USDC, USDT/i);
+
+  res = await advanceTransferFlow(res.session, "USDT", deps);
+  assert.equal(res.session.stage, "awaiting_external_deposit_chain");
+  assert.match(res.reply, /Which network should I use for USDT/i);
+  assert.match(res.reply, /Tron, TON/i);
+
+  res = await advanceTransferFlow(res.session, "Tron", deps);
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
+  assert.match(res.reply, /Send USDT on Tron to this deposit address: TRON-DEPOSIT-ADDRESS/i);
+  assert.match(res.reply, /single relevant address/i);
+  assert.doesNotMatch(res.reply, /TON-DEPOSIT-ADDRESS/i);
+  assert.deepEqual(client.calls, [
+    "getProfile",
+    "getWalletBalance",
+    "getWalletBalance",
+    "getSupportedDepositOptions",
+    "getSupportedDepositOptions",
+    "getSupportedDepositOptions",
+    "describeDepositSelection:USDT:728126428",
+  ]);
 });
 
 test("changing currency mid-flow resets payment selection and asks for a new method", async () => {
