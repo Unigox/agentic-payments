@@ -544,6 +544,9 @@ function makeClient(options: {
   kycStatus?: KycVerificationData;
   initializeKycResponse?: KycVerificationData;
   createTradeRequestError?: string;
+  requestEmailOtpError?: string;
+  verifyEmailOtpError?: string;
+  verifyEmailOtpToken?: string;
 } = {}): TransferExecutionClient & {
   calls: string[];
   lastCreateTradeRequestParams?: {
@@ -628,6 +631,19 @@ function makeClient(options: {
         verification_url: "https://verify.example/kyc-session",
         verification_seconds_left: 900,
       };
+    },
+    async requestEmailOTP(): Promise<void> {
+      calls.push("requestEmailOTP");
+      if (options.requestEmailOtpError) {
+        throw new Error(options.requestEmailOtpError);
+      }
+    },
+    async verifyEmailOTP(code: string): Promise<string> {
+      calls.push(`verifyEmailOTP:${code}`);
+      if (options.verifyEmailOtpError) {
+        throw new Error(options.verifyEmailOtpError);
+      }
+      return options.verifyEmailOtpToken ?? "email-token";
     },
     async getPreflightQuote(params): Promise<PreflightQuote | undefined> {
       const assetCode = (params.cryptoCurrencyCode || "USDC") as "USDC" | "USDT";
@@ -3050,6 +3066,107 @@ test("missing EVM auth asks the user to sign in on unigox.com before requesting 
   assert.match(afterSignin.reply, /Which wallet key did you use to sign in on UNIGOX/i);
   assert.match(afterSignin.reply, /NEWLY CREATED \/ ISOLATED wallet/i);
   assert.match(afterSignin.reply, /must NOT be your main wallet/i);
+});
+
+test("email OTP choice asks for an email address when none is configured, then advances after OTP verification", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  const res = await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: undefined,
+  }, async () => {
+    let result = await startTransferFlow("send 20 EUR to mom", deps);
+    assert.equal(result.session.stage, "awaiting_auth_choice");
+
+    result = await advanceTransferFlow(result.session, "email OTP", deps);
+    assert.equal(result.session.stage, "awaiting_email_address");
+    assert.match(result.reply, /What email address should I use/i);
+
+    result = await advanceTransferFlow(result.session, "eyesonaleks@gmail.com", deps);
+    assert.equal(result.session.stage, "awaiting_email_otp");
+    assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
+
+    result = await advanceTransferFlow(result.session, "123456", deps);
+    assert.equal(result.session.stage, "awaiting_confirmation");
+    assert.equal(result.session.auth.mode, "email");
+    assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
+    assert.equal(result.session.auth.emailAuthToken, "email-login-token");
+    assert.match(result.reply, /Send 20 EUR to Mom via Revolut/i);
+    return result;
+  });
+
+  assert.ok(client.calls.includes("requestEmailOTP"));
+  assert.ok(client.calls.includes("verifyEmailOTP:123456"));
+  assert.equal(res.session.stage, "awaiting_confirmation");
+});
+
+test("configured recovery email skips the email-address step and requests the OTP immediately", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ username: "emailuser" });
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: true },
+  });
+
+  await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "eyesonaleks@gmail.com",
+  }, async () => {
+    let result = await startTransferFlow("send 20 EUR to mom", deps);
+    result = await advanceTransferFlow(result.session, "email OTP", deps);
+    assert.equal(result.session.stage, "awaiting_email_otp");
+    assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
+    assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
+  });
+
+  assert.ok(client.calls.includes("requestEmailOTP"));
 });
 
 test("EVM login without exported signing key blocks before transfer execution", async () => {

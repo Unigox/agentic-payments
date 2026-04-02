@@ -71,6 +71,8 @@ export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
   | "resolving"
   | "awaiting_auth_choice"
+  | "awaiting_email_address"
+  | "awaiting_email_otp"
   | "awaiting_evm_wallet_signin"
   | "awaiting_evm_login_key"
   | "awaiting_evm_signing_key"
@@ -362,6 +364,9 @@ export interface TransferSession {
     available: boolean;
     mode?: "evm" | "ton" | "email";
     choice?: AuthChoice;
+    emailAddress?: string;
+    emailAuthToken?: string;
+    emailAuthTokenExpiresAt?: string;
     evmSigningKeyAvailable?: boolean;
     username?: string;
     kycStatus?: string;
@@ -599,6 +604,20 @@ function parseKycIdentityInput(text: string | undefined): { fullName?: string; c
     fullName: fullNameMatch?.[1]?.trim() || undefined,
     countryCode: resolveCountryCode(countryMatch?.[1]),
   };
+}
+
+function parseEmailAddress(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match?.[0]?.trim();
+}
+
+function parseOtpCode(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  const inline = value.match(/\b(\d{4,8})\b/);
+  return inline?.[1];
 }
 
 const DETAIL_LABELS: Record<string, string> = {
@@ -1082,10 +1101,41 @@ export function loadSendMoneySettings(filePath = DEFAULT_SETTINGS_FILE): Agentic
   }
 }
 
-async function getExecutionClient(deps: TransferFlowDeps): Promise<TransferExecutionClient> {
+function buildExecutionClientConfig(session: TransferSession | undefined, deps: TransferFlowDeps): UnigoxClientConfig {
+  let config: UnigoxClientConfig | undefined = deps.clientConfig;
+  if (!config) {
+    try {
+      config = loadUnigoxConfigFromEnv();
+    } catch {
+      if (!session?.auth.emailAddress) throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
+      config = {
+        authMode: "email",
+        email: session.auth.emailAddress,
+      };
+    }
+  }
+
+  const sessionTokenExpiresAt = session?.auth.emailAuthTokenExpiresAt
+    ? Date.parse(session.auth.emailAuthTokenExpiresAt)
+    : undefined;
+
+  if (session?.auth.mode === "email") {
+    return {
+      ...config,
+      authMode: "email",
+      email: session.auth.emailAddress || config.email || getStoredEmailAddress(deps),
+      ...(session?.auth.emailAuthToken ? { sessionToken: session.auth.emailAuthToken } : {}),
+      ...(sessionTokenExpiresAt ? { sessionTokenExpiresAt } : {}),
+    };
+  }
+
+  return config;
+}
+
+async function getExecutionClient(deps: TransferFlowDeps, session?: TransferSession): Promise<TransferExecutionClient> {
   if (deps.client) return deps.client;
   if (deps.clientFactory) return deps.clientFactory();
-  return new UnigoxClient(deps.clientConfig || loadUnigoxConfigFromEnv());
+  return new UnigoxClient(buildExecutionClientConfig(session, deps));
 }
 
 async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps): Promise<{ success: boolean; message?: string; username?: string }> {
@@ -1580,13 +1630,29 @@ function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
   ].filter(Boolean).join(" ");
 }
 
+function getStoredEmailAddress(deps: TransferFlowDeps): string | undefined {
+  if (deps.clientConfig?.email) return deps.clientConfig.email;
+  return loadEnvValue("UNIGOX_EMAIL");
+}
+
+function buildEmailAddressPrompt(existingEmail?: string): string {
+  if (existingEmail) {
+    return `I can use ${existingEmail} for email OTP recovery. Reply with that email again if you want to use it, or send a different email address.`;
+  }
+  return "What email address should I use for OTP onboarding or recovery?";
+}
+
+function buildEmailOtpPrompt(email: string): string {
+  return `I sent a 6-digit code to ${email}. What’s the code?`;
+}
+
 async function maybeHydrateAuthIdentity(
   session: TransferSession,
   deps: TransferFlowDeps,
   client?: TransferExecutionClient
 ): Promise<void> {
   if (!session.auth.available) return;
-  const executionClient = client || await getExecutionClient(deps);
+  const executionClient = client || await getExecutionClient(deps, session);
   if (!executionClient.getProfile) return;
   try {
     const profile = await executionClient.getProfile();
@@ -1621,7 +1687,7 @@ async function maybeHydrateStartupAuthStatus(
 
   let executionClient: TransferExecutionClient;
   try {
-    executionClient = client || await getExecutionClient(deps);
+    executionClient = client || await getExecutionClient(deps, session);
   } catch {
     return;
   }
@@ -1674,6 +1740,8 @@ async function maybeRefreshStoredAuthState(
 
   if ([
     "awaiting_auth_choice",
+    "awaiting_email_address",
+    "awaiting_email_otp",
     "awaiting_evm_wallet_signin",
     "awaiting_evm_login_key",
     "awaiting_evm_signing_key",
@@ -1766,6 +1834,115 @@ async function finalizeEvmSigningKey(
   return resumed;
 }
 
+async function startEmailOtpFlow(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  emailAddress: string
+): Promise<TransferFlowResult> {
+  const client = await getExecutionClient(deps, {
+    ...session,
+    auth: {
+      ...session.auth,
+      emailAddress,
+      mode: "email",
+    },
+  });
+  if (!client.requestEmailOTP) {
+    session.stage = "awaiting_auth_choice";
+    session.status = "blocked";
+    return reply(
+      withUpdate(session, deps),
+      "This skill setup cannot send email OTP codes automatically yet. Please choose EVM wallet connection or TON wallet connection instead.",
+      ["EVM wallet connection", "TON wallet connection"],
+      [{
+        type: "blocked_missing_auth",
+        message: "Email OTP request is not available in this client setup.",
+      }]
+    );
+  }
+  try {
+    await client.requestEmailOTP();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.stage = "awaiting_email_address";
+    session.auth.emailAddress = emailAddress;
+    session.status = "blocked";
+    return reply(
+      withUpdate(session, deps),
+      `I couldn’t send the email OTP yet (${message}). Double-check the email address and send it again.`,
+      undefined,
+      [{
+        type: "blocked_missing_auth",
+        message,
+      }]
+    );
+  }
+
+  session.auth.emailAddress = emailAddress;
+  session.auth.choice = "email";
+  session.auth.mode = "email";
+  session.status = "blocked";
+  session.stage = "awaiting_email_otp";
+  return reply(withUpdate(session, deps), buildEmailOtpPrompt(emailAddress), undefined, [{
+    type: "blocked_missing_auth",
+    message: buildEmailOtpPrompt(emailAddress),
+  }]);
+}
+
+async function finalizeEmailOtpVerification(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient,
+  emailAddress: string,
+  otpCode: string
+): Promise<TransferFlowResult> {
+  if (!client.verifyEmailOTP) {
+    session.stage = "awaiting_auth_choice";
+    session.status = "blocked";
+    return reply(
+      withUpdate(session, deps),
+      "This skill setup cannot verify email OTP codes automatically yet. Please choose EVM wallet connection or TON wallet connection instead.",
+      ["EVM wallet connection", "TON wallet connection"],
+      [{
+        type: "blocked_missing_auth",
+        message: "Email OTP verification is not available in this client setup.",
+      }]
+    );
+  }
+  try {
+    const token = await client.verifyEmailOTP(otpCode);
+    session.auth.available = true;
+    session.auth.mode = "email";
+    session.auth.choice = "email";
+    session.auth.emailAddress = emailAddress;
+    session.auth.emailAuthToken = token;
+    session.auth.emailAuthTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
+    session.auth.checked = true;
+    session.status = "active";
+    session.stage = "resolving";
+    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
+    const resumed = await advanceTransferFlow(session, { text: "" }, { ...deps, client });
+    resumed.events = [{
+      type: "blocked_missing_auth",
+      message: `Email OTP verified for ${emailAddress}.`,
+    }, ...resumed.events];
+    return resumed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    session.stage = "awaiting_email_otp";
+    session.status = "blocked";
+    return reply(
+      withUpdate(session, deps),
+      `That OTP code didn’t work (${message}). ${buildEmailOtpPrompt(emailAddress)}`,
+      undefined,
+      [{
+        type: "blocked_missing_auth",
+        message,
+      }]
+    );
+  }
+}
+
 async function maybeHandleAuthOnboardingTurn(
   session: TransferSession,
   turn: TransferTurn,
@@ -1804,11 +1981,22 @@ async function maybeHandleAuthOnboardingTurn(
     session.status = "blocked";
 
     if (hintedChoice === "ton" || hintedChoice === "email") {
-      session.stage = "awaiting_auth_choice";
       session.auth.choice = hintedChoice;
-      const followUp = hintedChoice === "ton"
-        ? "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login."
-        : "Please provide the email address to use for OTP onboarding / recovery.";
+      if (hintedChoice === "ton") {
+        session.stage = "awaiting_auth_choice";
+        const followUp = "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login.";
+        return reply(withUpdate(session, deps), followUp, undefined, [{
+          type: "blocked_missing_auth",
+          message: followUp,
+        }]);
+      }
+
+      const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
+      if (storedEmail) {
+        return startEmailOtpFlow(session, deps, storedEmail);
+      }
+      session.stage = "awaiting_email_address";
+      const followUp = buildEmailAddressPrompt();
       return reply(withUpdate(session, deps), followUp, undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
@@ -1831,6 +2019,51 @@ async function maybeHandleAuthOnboardingTurn(
       type: "blocked_missing_auth",
       message: reminder,
     }]);
+  }
+
+  if (session.stage === "awaiting_email_address") {
+    session.status = "blocked";
+    const emailAddress = parseEmailAddress(responseText) || session.auth.emailAddress || getStoredEmailAddress(deps);
+    if (!emailAddress) {
+      const prompt = buildEmailAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    return startEmailOtpFlow(session, deps, emailAddress);
+  }
+
+  if (session.stage === "awaiting_email_otp") {
+    session.status = "blocked";
+    const emailAddress = session.auth.emailAddress || getStoredEmailAddress(deps);
+    if (!emailAddress) {
+      session.stage = "awaiting_email_address";
+      const prompt = buildEmailAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const otpCode = parseOtpCode(responseText);
+    if (!otpCode) {
+      const prompt = buildEmailOtpPrompt(emailAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const client = await getExecutionClient(deps, {
+      ...session,
+      auth: {
+        ...session.auth,
+        emailAddress,
+        mode: "email",
+      },
+    });
+    return finalizeEmailOtpVerification(session, deps, client, emailAddress, otpCode);
   }
 
   if (session.stage === "awaiting_evm_login_key") {
@@ -2523,7 +2756,7 @@ async function resolveSavedRecipientQuery(
   }
 
   try {
-    const client = await getExecutionClient(deps);
+    const client = await getExecutionClient(deps, session);
     if (!client.listPaymentDetails) {
       return { resolution: localResolution, source: "local" };
     }
@@ -3098,7 +3331,7 @@ async function refreshSettlementForSession(
 ): Promise<SettlementSnapshot | undefined> {
   const state = ensureSettlementState(session);
   if (!state) return undefined;
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   const snapshot = mode === "poll"
     ? await pollSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides))
     : await refreshSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides));
@@ -3146,7 +3379,7 @@ async function maybeHandleTopUpTurn(
 
   if (session.stage === "awaiting_balance_resolution") {
     if (wantsBalanceRecheck(selectionText)) {
-      const client = await getExecutionClient(deps);
+      const client = await getExecutionClient(deps, session);
       clearExecutionPreflight(session);
       const preflight = await ensureExecutionPreflight(session, deps, client);
       if (preflight.blockedResult) {
@@ -3179,7 +3412,7 @@ async function maybeHandleTopUpTurn(
     }
 
     if (methodChoice === "internal_username") {
-      const client = await getExecutionClient(deps);
+      const client = await getExecutionClient(deps, session);
       await maybeHydrateAuthIdentity(session, deps, client);
       session.status = "blocked";
       session.topUp = { method: methodChoice };
@@ -3191,7 +3424,7 @@ async function maybeHandleTopUpTurn(
       );
     }
 
-    const client = await getExecutionClient(deps);
+    const client = await getExecutionClient(deps, session);
     if (!client.getSupportedDepositOptions) {
       throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
     }
@@ -3202,7 +3435,7 @@ async function maybeHandleTopUpTurn(
     return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   if (!client.getSupportedDepositOptions) {
     throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
   }
@@ -3286,7 +3519,7 @@ async function maybeHandlePartnerPaymentDetailsTurn(
     collection.index += 1;
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   if (!client.createOrUpdatePartnerPaymentDetails || !client.revalidateTradePaymentDetails) {
     session.stage = "awaiting_trade_settlement";
     session.status = "active";
@@ -3451,7 +3684,7 @@ async function maybeHandleSettlementTurn(
       return reply(withUpdate(session, deps), deferred.prompt, deferred.options, [...events, ...deferred.events.map(mapSettlementEvent)]);
     }
 
-    const client = await getExecutionClient(deps);
+    const client = await getExecutionClient(deps, session);
     if (!client.confirmFiatReceived) {
       const deferred = noteDeferredPlaceholder(session.execution.settlement || {}, "confirm_fiat_received_integration_missing");
       session.execution.settlement = deferred.state;
@@ -3517,7 +3750,7 @@ async function maybeHandleKycTurn(
     return undefined;
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   const existingVerificationResult = await maybeResumeExistingKycVerification(session, deps, client);
   if (existingVerificationResult) {
     return existingVerificationResult;
@@ -3632,7 +3865,7 @@ async function maybeHandleOutstandingTradeReminderTurn(
     );
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   if (!client.confirmFiatReceived) {
     return reply(
       withUpdate(session, deps),
@@ -3674,7 +3907,7 @@ async function maybeHandlePendingPriceChangeTurn(
   const responseText = cleanText(turn.option || turn.text);
   const wantsConfirm = /^(confirm(?: new price)?|accept(?: new price)?|go ahead|proceed|continue)$/i.test(responseText);
   const wantsCancel = /^(cancel|stop|reject(?: new price)?|decline)$/i.test(responseText);
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   const tradeRequestId = session.execution.tradeRequestId;
   const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0;
   const sellAssetCode = session.execution.preflight?.selectedAssetCode
@@ -3825,7 +4058,7 @@ async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedH
     return reply(withUpdate(session, deps), snapshot.prompt, snapshot.options, events);
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   let tradeRequest: TradeRequest | undefined;
   if (client.getTradeRequest) {
     tradeRequest = await client.getTradeRequest(session.execution.tradeRequestId);
@@ -4144,7 +4377,7 @@ async function ensureExecutionPreflight(
 
 async function handleExecution(session: TransferSession, deps: TransferFlowDeps): Promise<TransferFlowResult> {
   const events: TransferFlowEvent[] = [];
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   const settings = loadSendMoneySettings(deps.settingsFilePath || DEFAULT_SETTINGS_FILE);
   const amount = session.amount || 0;
 
@@ -4300,7 +4533,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -4454,13 +4687,32 @@ export async function advanceTransferFlow(
     session.stage = "awaiting_auth_choice";
     if (hints.authChoice) {
       session.auth.choice = hints.authChoice;
-      const followUp = hints.authChoice === "evm"
-        ? "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used."
-        : hints.authChoice === "ton"
-          ? "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login."
-          : "Please provide the email address to use for OTP onboarding / recovery.";
-      session.stage = hints.authChoice === "evm" ? "awaiting_evm_wallet_signin" : "awaiting_auth_choice";
-      return reply(withUpdate(session, deps), followUp, hints.authChoice === "evm" ? ["I signed in", "TON wallet connection", "email OTP"] : undefined, [{
+      if (hints.authChoice === "evm") {
+        const followUp = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
+        session.stage = "awaiting_evm_wallet_signin";
+        return reply(withUpdate(session, deps), followUp, ["I signed in", "TON wallet connection", "email OTP"], [{
+          type: "blocked_missing_auth",
+          message: followUp,
+        }]);
+      }
+
+      if (hints.authChoice === "ton") {
+        const followUp = "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login.";
+        session.stage = "awaiting_auth_choice";
+        return reply(withUpdate(session, deps), followUp, undefined, [{
+          type: "blocked_missing_auth",
+          message: followUp,
+        }]);
+      }
+
+      const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
+      if (storedEmail) {
+        return startEmailOtpFlow(session, deps, storedEmail);
+      }
+
+      session.stage = "awaiting_email_address";
+      const followUp = buildEmailAddressPrompt();
+      return reply(withUpdate(session, deps), followUp, undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
       }]);
@@ -4788,7 +5040,7 @@ export async function advanceTransferFlow(
     }
   }
 
-  const client = await getExecutionClient(deps);
+  const client = await getExecutionClient(deps, session);
   const preflight = await ensureExecutionPreflight(session, deps, client);
   events.push(...preflight.events);
   if (preflight.blockedResult) {

@@ -110,6 +110,8 @@ export interface UnigoxClientConfig {
   tonMnemonic?: string | string[];
   tonAddress?: string;
   tonNetwork?: string;
+  sessionToken?: string;
+  sessionTokenExpiresAt?: number;
 }
 
 export interface PaymentDetail {
@@ -500,6 +502,12 @@ export class UnigoxClient {
     this.tonMnemonicWords = this.parseTonMnemonic(config.tonMnemonic);
     this.tonAddressOverride = config.tonAddress ? this.normalizeTonAddress(config.tonAddress) : null;
     this.tonNetwork = config.tonNetwork || "-239";
+    if (config.sessionToken) {
+      this.token = config.sessionToken;
+      this.tokenExpiresAt = config.sessionTokenExpiresAt && config.sessionTokenExpiresAt > Date.now()
+        ? config.sessionTokenExpiresAt
+        : Date.now() + 50 * 60 * 1000;
+    }
   }
 
   get address(): string {

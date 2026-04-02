@@ -48,7 +48,7 @@ Do not answer those turns from general memory or generic chat reasoning.
 Before any user-facing text, run the session-aware transfer runner:
 
 ```bash
-cat <<'EOF' | node --experimental-strip-types skills/send-money/scripts/run-transfer-turn.ts --json
+cat <<'EOF' | bash skills/send-money/scripts/run-transfer-turn.sh --json
 <verbatim user message>
 EOF
 ```
@@ -60,6 +60,7 @@ Use the runner JSON as the source of truth for the user-facing reply.
 - When the current channel supports buttons or quick replies, render each option as a button instead of spelling it out in prose. Telegram should get buttons when possible.
 - Only fall back to plain text choices when the channel cannot render buttons.
 - Do not paraphrase human field labels back into machine keys like `full_name=` once the runner has already formatted them cleanly.
+- The shell wrapper self-installs the skill's `scripts/` npm dependencies on first run before launching the TypeScript runner. Do not bypass it with a direct `node ... run-transfer-turn.ts` call unless you have already verified the dependencies are present.
 
 Do not freestyle recipient resolution, saved-recipient lookup, balance wording, onboarding wording, or action choices when the runner can answer them.
 
