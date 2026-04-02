@@ -3132,7 +3132,7 @@ test("missing EVM auth asks the user to sign in on unigox.com before requesting 
   assert.match(afterSignin.reply, /must NOT be your main wallet/i);
 });
 
-test("email OTP choice asks for an email address when none is configured, then advances after OTP verification", async () => {
+test("email OTP choice asks for an email address when none is configured, then blocks early on the missing signing key after OTP verification", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3177,20 +3177,21 @@ test("email OTP choice asks for an email address when none is configured, then a
     assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
 
     result = await advanceTransferFlow(result.session, "123456", deps);
-    assert.equal(result.session.stage, "awaiting_confirmation");
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
     assert.equal(result.session.auth.mode, "email");
     assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
     assert.equal(result.session.auth.emailAuthToken, "email-login-token");
-    assert.match(result.reply, /Send 20 EUR to Mom via Revolut/i);
+    assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
+    assert.match(result.reply, /early beta access for agentic payments/i);
     return result;
   });
 
   assert.ok(client.calls.includes("requestEmailOTP"));
   assert.ok(client.calls.includes("verifyEmailOTP:123456"));
-  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
 });
 
-test("configured recovery email skips the email-address step and requests the OTP immediately", async () => {
+test("configured recovery email skips the email-address step and still blocks early on the missing signing key after OTP verification", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3228,9 +3229,15 @@ test("configured recovery email skips the email-address step and requests the OT
     assert.equal(result.session.stage, "awaiting_email_otp");
     assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
     assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
+
+    result = await advanceTransferFlow(result.session, "123456", deps);
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+    assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
+    assert.match(result.reply, /early beta access for agentic payments/i);
   });
 
   assert.ok(client.calls.includes("requestEmailOTP"));
+  assert.ok(client.calls.includes("verifyEmailOTP:123456"));
 });
 
 test("EVM login without exported signing key blocks before transfer execution", async () => {

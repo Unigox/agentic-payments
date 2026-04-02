@@ -5133,7 +5133,7 @@ export async function advanceTransferFlow(
     );
   }
 
-  if (session.goal === "transfer" && session.auth.available && session.auth.mode !== "email" && !session.auth.evmSigningKeyAvailable) {
+  if (session.goal === "transfer" && session.auth.available && !session.auth.evmSigningKeyAvailable) {
     await maybeHydrateAuthIdentity(session, deps);
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";

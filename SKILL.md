@@ -107,13 +107,14 @@ The onboarding flow:
 9. Only after successful EVM login, collect and save the separate **UNIGOX-exported signing** key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY`, legacy alias `UNIGOX_PRIVATE_KEY` still supported), with the same isolated-wallet warning and secret-cleanup rule
 10. Explain clearly why it is needed: login auth only gets a UNIGOX session; secure in-app actions like funding trade escrow, confirming receipt, and releasing escrow still require the separate exported signing key
 11. If the user cannot find the export option in UNIGOX settings, explain that their account likely still needs early beta access for agentic payments and tell them to contact UNIGOX support / `hello@unigox.com` to enable it
-12. For TON, collect the raw TON address first, then the TON mnemonic, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
-13. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
-14. Optionally link the other wallet path later if the user wants flexibility
-15. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
-16. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
-17. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
-18. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
+12. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — EVM, TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
+13. For TON, collect the raw TON address first, then the TON mnemonic, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
+14. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
+15. Optionally link the other wallet path later if the user wants flexibility
+16. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+17. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+18. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
+19. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 
