@@ -2,6 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { Address } from "@ton/ton";
 
 import UnigoxClient, {
   getPaymentMethodsForCurrency as defaultGetPaymentMethodsForCurrency,
@@ -64,7 +65,7 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 
 type AuthChoice = "evm" | "ton" | "email";
-type SecretKind = "evm_login_key" | "evm_signing_key";
+type SecretKind = "evm_login_key" | "evm_signing_key" | "ton_mnemonic";
 type TopUpMethod = "internal_username" | "external_deposit";
 
 export type TransferGoal = "transfer" | "save_contact_only";
@@ -76,6 +77,8 @@ export type TransferStage =
   | "awaiting_evm_wallet_signin"
   | "awaiting_evm_login_key"
   | "awaiting_evm_signing_key"
+  | "awaiting_ton_address"
+  | "awaiting_ton_mnemonic"
   | "awaiting_secret_cleanup_confirmation"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
@@ -212,8 +215,11 @@ export interface TransferFlowDeps {
   clientFactory?: () => Promise<TransferExecutionClient>;
   clientConfig?: UnigoxClientConfig;
   verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
+  verifyTonLogin?: (params: { mnemonic: string; tonAddress?: string }) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
+  persistTonMnemonic?: (mnemonic: string) => Promise<void> | void;
+  persistTonAddress?: (tonAddress: string) => Promise<void> | void;
   handleSensitiveInput?: (params: {
     kind: SecretKind;
     secret: string;
@@ -368,6 +374,7 @@ export interface TransferSession {
     emailAuthToken?: string;
     emailAuthTokenExpiresAt?: string;
     evmSigningKeyAvailable?: boolean;
+    tonAddress?: string;
     username?: string;
     kycStatus?: string;
     kycCountryCode?: string;
@@ -618,6 +625,35 @@ function parseOtpCode(text: string | undefined): string | undefined {
   if (!value) return undefined;
   const inline = value.match(/\b(\d{4,8})\b/);
   return inline?.[1];
+}
+
+function parseTonAddress(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+
+  const candidates = value.match(/[A-Za-z0-9_-]{48,80}/g) || [];
+  for (const candidate of candidates) {
+    try {
+      return Address.parse(candidate).toRawString().toLowerCase();
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return undefined;
+}
+
+function parseTonMnemonic(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+
+  const words = value
+    .split(/\s+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (words.length < 12 || words.length > 24) return undefined;
+  if (!words.every((entry) => /^[a-z]+$/i.test(entry))) return undefined;
+  return words.join(" ");
 }
 
 const DETAIL_LABELS: Record<string, string> = {
@@ -1189,6 +1225,66 @@ async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps):
   }
 }
 
+async function verifyTonLoginInput(
+  mnemonic: string,
+  tonAddress: string | undefined,
+  deps: TransferFlowDeps
+): Promise<{ success: boolean; message?: string; username?: string }> {
+  if (deps.verifyTonLogin) {
+    const result = await deps.verifyTonLogin({ mnemonic, tonAddress });
+    if (!result) return { success: true };
+    return {
+      success: result.success ?? result.ok ?? true,
+      message: result.message,
+      username: result.username,
+    };
+  }
+
+  let email: string | undefined;
+  let frontendUrl: string | undefined;
+  let evmSigningPrivateKey: string | undefined;
+  if (deps.clientConfig) {
+    email = deps.clientConfig.email;
+    frontendUrl = deps.clientConfig.frontendUrl;
+    evmSigningPrivateKey = deps.clientConfig.evmSigningPrivateKey || deps.clientConfig.privateKey;
+  } else {
+    try {
+      const config = loadUnigoxConfigFromEnv();
+      email = config.email;
+      frontendUrl = config.frontendUrl;
+      evmSigningPrivateKey = config.evmSigningPrivateKey || config.privateKey;
+    } catch {
+      // Verification can proceed with the supplied TON credentials alone.
+    }
+  }
+
+  try {
+    const client = new UnigoxClient({
+      authMode: "ton",
+      tonMnemonic: mnemonic,
+      ...(tonAddress ? { tonAddress } : {}),
+      ...(email ? { email } : {}),
+      ...(frontendUrl ? { frontendUrl } : {}),
+      ...(evmSigningPrivateKey ? { evmSigningPrivateKey } : {}),
+    });
+    await client.login();
+
+    let username: string | undefined;
+    try {
+      username = (await client.getProfile())?.username;
+    } catch {
+      // Username is helpful but optional for a successful verification.
+    }
+
+    return { success: true, username };
+  } catch (error) {
+    return {
+      success: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function clearExecutionPreflight(session: TransferSession): void {
   session.execution.preflight = undefined;
 }
@@ -1582,7 +1678,9 @@ function wantsBalanceRecheck(text: string | undefined): boolean {
 function buildEvmKeySecurityWarning(kind: SecretKind): string {
   const keyLabel = kind === "evm_login_key"
     ? "login wallet key"
-    : "UNIGOX-exported signing key";
+    : kind === "evm_signing_key"
+      ? "UNIGOX-exported signing key"
+      : "TON mnemonic";
   return [
     "🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨",
     `Use a NEWLY CREATED / ISOLATED wallet for this ${keyLabel}.`,
@@ -1614,14 +1712,35 @@ function buildMissingSigningKeyPrompt(username: string | undefined): string {
     buildUsernameReminder(username),
     buildEvmKeySecurityWarning("evm_signing_key"),
     "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release.",
-    "Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY (UNIGOX_PRIVATE_KEY still works as a legacy alias).",
+    "Paste it here and I’ll store it locally on this machine so I can reuse it safely across turns.",
   ].filter(Boolean).join(" ");
+}
+
+function getStoredTonAddress(deps: TransferFlowDeps): string | undefined {
+  return deps.clientConfig?.tonAddress || loadEnvValue("UNIGOX_TON_ADDRESS");
+}
+
+function buildTonAddressPrompt(): string {
+  return [
+    "I can do TON login here.",
+    "First send the raw TON address for the wallet you use on UNIGOX.",
+  ].join(" ");
+}
+
+function buildTonMnemonicPrompt(tonAddress: string): string {
+  return [
+    buildEvmKeySecurityWarning("ton_mnemonic"),
+    `Got the TON address: ${tonAddress}.`,
+    "Now send the TON mnemonic for that same wallet and I’ll verify the TON login here.",
+  ].join(" ");
 }
 
 function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
   const label = secret.kind === "evm_login_key"
     ? "login wallet key"
-    : "UNIGOX-exported signing key";
+    : secret.kind === "evm_signing_key"
+      ? "UNIGOX-exported signing key"
+      : "TON mnemonic";
   return [
     secret.note,
     `⚠️ For safety, please delete the message that contains your ${label} from this chat right now.`,
@@ -1745,6 +1864,8 @@ async function maybeRefreshStoredAuthState(
     "awaiting_evm_wallet_signin",
     "awaiting_evm_login_key",
     "awaiting_evm_signing_key",
+    "awaiting_ton_address",
+    "awaiting_ton_mnemonic",
     "awaiting_secret_cleanup_confirmation",
   ].includes(session.stage)) {
     session.status = "active";
@@ -1825,6 +1946,54 @@ async function finalizeEvmSigningKey(
   session.auth.mode = "evm";
   session.auth.choice = "evm";
   session.auth.evmSigningKeyAvailable = true;
+  session.status = "active";
+  session.stage = "resolving";
+  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
+  if (prefixEvents.length) {
+    resumed.events = [...prefixEvents, ...resumed.events];
+  }
+  return resumed;
+}
+
+async function finalizeTonMnemonic(
+  session: TransferSession,
+  mnemonic: string,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  session.auth.pendingSecret = undefined;
+  const verification = await verifyTonLoginInput(mnemonic, session.auth.tonAddress, deps);
+  if (!verification.success) {
+    session.stage = "awaiting_ton_mnemonic";
+    const failure = `That TON wallet didn't verify. Please double-check the mnemonic and TON address for the wallet linked to UNIGOX and try again.${verification.message ? ` (${verification.message})` : ""}`;
+    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: failure,
+    }]);
+  }
+
+  if (session.auth.tonAddress) {
+    await deps.persistTonAddress?.(session.auth.tonAddress);
+  }
+  await deps.persistTonMnemonic?.(mnemonic);
+
+  session.auth.available = true;
+  session.auth.mode = "ton";
+  session.auth.choice = "ton";
+  session.auth.username = verification.username || session.auth.username;
+  if (!session.auth.username) {
+    await maybeHydrateAuthIdentity(session, deps);
+  }
+
+  if (!session.auth.evmSigningKeyAvailable) {
+    session.stage = "awaiting_evm_signing_key";
+    const followUp = ["TON login works.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+    return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: followUp,
+    }]);
+  }
+
   session.status = "active";
   session.stage = "resolving";
   const resumed = await advanceTransferFlow(session, { text: "" }, deps);
@@ -1974,6 +2143,9 @@ async function maybeHandleAuthOnboardingTurn(
     if (pendingSecret.kind === "evm_login_key") {
       return finalizeEvmLoginKey(session, pendingSecret.value, deps);
     }
+    if (pendingSecret.kind === "ton_mnemonic") {
+      return finalizeTonMnemonic(session, pendingSecret.value, deps);
+    }
     return finalizeEvmSigningKey(session, pendingSecret.value, deps);
   }
 
@@ -1983,8 +2155,10 @@ async function maybeHandleAuthOnboardingTurn(
     if (hintedChoice === "ton" || hintedChoice === "email") {
       session.auth.choice = hintedChoice;
       if (hintedChoice === "ton") {
-        session.stage = "awaiting_auth_choice";
-        const followUp = "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login.";
+        const storedTonAddress = getStoredTonAddress(deps);
+        session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+        session.stage = storedTonAddress ? "awaiting_ton_mnemonic" : "awaiting_ton_address";
+        const followUp = storedTonAddress ? buildTonMnemonicPrompt(storedTonAddress) : buildTonAddressPrompt();
         return reply(withUpdate(session, deps), followUp, undefined, [{
           type: "blocked_missing_auth",
           message: followUp,
@@ -2091,7 +2265,65 @@ async function maybeHandleAuthOnboardingTurn(
     return finalizeEvmLoginKey(session, responseText, deps, events);
   }
 
-  if (session.stage === "awaiting_evm_signing_key" && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
+  if (session.stage === "awaiting_ton_address") {
+    session.status = "blocked";
+    const tonAddress = parseTonAddress(responseText) || session.auth.tonAddress || getStoredTonAddress(deps);
+    if (!tonAddress) {
+      const prompt = buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    session.auth.choice = "ton";
+    session.auth.mode = "ton";
+    session.auth.tonAddress = tonAddress;
+    session.stage = "awaiting_ton_mnemonic";
+    const prompt = buildTonMnemonicPrompt(tonAddress);
+    return reply(withUpdate(session, deps), prompt, undefined, [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  if (session.stage === "awaiting_ton_mnemonic") {
+    session.status = "blocked";
+    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
+    if (!tonAddress) {
+      session.stage = "awaiting_ton_address";
+      const prompt = buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const mnemonic = parseTonMnemonic(responseText);
+    if (!mnemonic) {
+      const prompt = buildTonMnemonicPrompt(tonAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
+    if (secretHandling.needsManualCleanup) {
+      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+        type: "secret_cleanup_required",
+        message: prompt,
+      }]);
+    }
+
+    const events = secretHandling.deleted
+      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." } as TransferFlowEvent]
+      : [];
+    return finalizeTonMnemonic(session, mnemonic, deps, events);
+  }
+
+  if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
       const prompt = buildMissingSigningKeyPrompt(session.auth.username);
@@ -4533,7 +4765,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_ton_address", "awaiting_ton_mnemonic", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -4697,8 +4929,10 @@ export async function advanceTransferFlow(
       }
 
       if (hints.authChoice === "ton") {
-        const followUp = "Please provide the TON mnemonic and raw TON address so onboarding can verify TON login.";
-        session.stage = "awaiting_auth_choice";
+        const storedTonAddress = getStoredTonAddress(deps);
+        session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+        const followUp = storedTonAddress ? buildTonMnemonicPrompt(storedTonAddress) : buildTonAddressPrompt();
+        session.stage = storedTonAddress ? "awaiting_ton_mnemonic" : "awaiting_ton_address";
         return reply(withUpdate(session, deps), followUp, undefined, [{
           type: "blocked_missing_auth",
           message: followUp,
@@ -4729,7 +4963,7 @@ export async function advanceTransferFlow(
     );
   }
 
-  if (session.goal === "transfer" && session.auth.available && session.auth.mode === "evm" && !session.auth.evmSigningKeyAvailable) {
+  if (session.goal === "transfer" && session.auth.available && session.auth.mode !== "email" && !session.auth.evmSigningKeyAvailable) {
     await maybeHydrateAuthIdentity(session, deps);
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";

@@ -3283,3 +3283,71 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
   assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
   assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
 });
+
+test("successful TON login verification persists TON auth and then asks for the EVM signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { tonAddress: [] as string[], tonMnemonic: [] as string[], signing: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
+      success: mnemonic.includes("abandon") && tonAddress?.includes("0:"),
+      username: "tonuser",
+    }),
+    persistTonAddress: async (tonAddress) => {
+      persisted.tonAddress.push(tonAddress);
+    },
+    persistTonMnemonic: async (mnemonic) => {
+      persisted.tonMnemonic.push(mnemonic);
+    },
+    persistEvmSigningKey: async (signingKey) => {
+      persisted.signing.push(signingKey);
+    },
+  });
+
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+  const tonMnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "ton", deps);
+  assert.equal(res.session.stage, "awaiting_ton_address");
+  assert.match(res.reply, /raw TON address/i);
+
+  res = await advanceTransferFlow(res.session, tonAddress, deps);
+  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
+  assert.match(res.reply, /TON mnemonic/i);
+
+  res = await advanceTransferFlow(res.session, tonMnemonic, deps);
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+  assert.match(res.reply, /delete the message/i);
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /TON login works/i);
+  assert.match(res.reply, /UNIGOX EVM signing key/i);
+  assert.match(res.reply, /@tonuser/i);
+  assert.equal(persisted.tonAddress.length, 1);
+  assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
+  assert.deepEqual(persisted.tonMnemonic, [tonMnemonic]);
+
+  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
+  assert.equal(res.session.stage, "awaiting_payment_method");
+});
+
+test("stored TON auth without a signing key prompts for the UNIGOX signing key instead of failing later", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+  });
+
+  const res = await startTransferFlow("send 50 EUR to mom", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.doesNotMatch(res.reply, /Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY/i);
+});

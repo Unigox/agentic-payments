@@ -105,12 +105,13 @@ The onboarding flow:
 7. Right after the user pastes an EVM key, try to delete that key-containing chat message if the runtime/channel supports it; otherwise stop and ask the user to delete it themselves, then wait for explicit "deleted" confirmation before continuing
 8. After successful EVM login, tell the user their current UNIGOX username and remind them they can change it in the agent flow or on the web
 9. Only after successful EVM login, collect and save the separate **UNIGOX-exported signing** key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY`, legacy alias `UNIGOX_PRIVATE_KEY` still supported), with the same isolated-wallet warning and secret-cleanup rule
-10. For TON, verify TON login and only ask for an EVM signing key later if signed EVM actions are needed
-11. Optionally link the other wallet path later if the user wants flexibility
-12. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
-13. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
-14. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
-15. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
+10. For TON, collect the raw TON address first, then the TON mnemonic, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
+11. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
+12. Optionally link the other wallet path later if the user wants flexibility
+13. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+14. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+15. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
+16. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 

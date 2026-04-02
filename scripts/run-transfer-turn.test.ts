@@ -83,6 +83,40 @@ function makeFieldConfig(): ResolvedPaymentMethodFieldConfig {
   } as ResolvedPaymentMethodFieldConfig;
 }
 
+function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
+  const original: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    original[key] = process.env[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  const restore = () => {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      return (result as Promise<unknown>).finally(restore) as T;
+    }
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
+
 test("runner persists session state and resumes it on the next turn", async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-"));
   const deps = {
@@ -236,4 +270,58 @@ test("resolveRunnerSessionKey uses OpenClaw session variables", () => {
     resolveRunnerSessionKey({ OPENCLAW_SESSION_ID: "agent:main:telegram:g-agent-main-main" } as NodeJS.ProcessEnv),
     "agent-main-telegram-g-agent-main-main"
   );
+});
+
+test("runner persists TON auth secrets into the skill env file by default", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-ton-"));
+  const envPath = path.join(stateDir, ".env");
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+  const tonMnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+
+  await withEnv({ SEND_MONEY_ENV_PATH: envPath }, async () => {
+    const deps = {
+      authState: { hasReplayableAuth: false, authMode: undefined, emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+      verifyTonLogin: async ({ mnemonic, tonAddress: normalizedAddress }: { mnemonic: string; tonAddress?: string }) => ({
+        success: mnemonic === tonMnemonic && Boolean(normalizedAddress?.startsWith("0:")),
+        username: "tonuser",
+      }),
+      handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
+    };
+
+    await runTransferTurn({
+      text: "send 50 EUR to mom",
+      sessionKey: "telegram:main",
+      stateDir,
+      deps,
+    });
+
+    await runTransferTurn({
+      text: "ton",
+      sessionKey: "telegram:main",
+      stateDir,
+      deps,
+    });
+
+    await runTransferTurn({
+      text: tonAddress,
+      sessionKey: "telegram:main",
+      stateDir,
+      deps,
+    });
+
+    const result = await runTransferTurn({
+      text: tonMnemonic,
+      sessionKey: "telegram:main",
+      stateDir,
+      deps,
+    });
+
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+  });
+
+  const envBody = fs.readFileSync(envPath, "utf-8");
+  assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
+  assert.match(envBody, /UNIGOX_TON_MNEMONIC=abandon ability able about above absent absorb abstract absurd abuse access accident/);
+  assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
+  assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
 });

@@ -15,6 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SKILL_DIR = path.join(__dirname, "..");
 const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
+const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
 
 export interface TransferRunnerOptions {
   text: string;
@@ -101,6 +102,66 @@ function ensureStateDir(stateDir: string): void {
   fs.mkdirSync(stateDir, { recursive: true });
 }
 
+function resolveEnvFilePath(): string {
+  return process.env.SEND_MONEY_ENV_PATH || DEFAULT_ENV_PATH;
+}
+
+function upsertEnvAssignments(filePath: string, assignments: Record<string, string>): void {
+  const nextKeys = new Set(Object.keys(assignments));
+  const existingLines = fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, "utf-8").split(/\r?\n/)
+    : [];
+  const nextLines = existingLines.map((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=/);
+    const key = match?.[1];
+    if (!key || !nextKeys.has(key)) return line;
+    nextKeys.delete(key);
+    return `${key}=${assignments[key]}`;
+  });
+
+  for (const key of nextKeys) {
+    nextLines.push(`${key}=${assignments[key]}`);
+  }
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const body = nextLines.filter((line, index, all) => line.length > 0 || index < all.length - 1).join("\n").replace(/\n*$/, "\n");
+  fs.writeFileSync(filePath, body);
+
+  for (const [key, value] of Object.entries(assignments)) {
+    process.env[key] = value;
+  }
+}
+
+function buildDefaultRunnerDeps(): TransferFlowDeps {
+  const envPath = resolveEnvFilePath();
+  return {
+    persistEvmLoginKey: async (loginKey) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_EVM_LOGIN_PRIVATE_KEY: loginKey,
+      });
+    },
+    persistEvmSigningKey: async (signingKey) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_EVM_SIGNING_PRIVATE_KEY: signingKey,
+      });
+    },
+    persistTonMnemonic: async (mnemonic) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_AUTH_MODE: "ton",
+        UNIGOX_TON_MNEMONIC: mnemonic,
+        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
+      });
+    },
+    persistTonAddress: async (tonAddress) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_AUTH_MODE: "ton",
+        UNIGOX_TON_ADDRESS: tonAddress,
+        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
+      });
+    },
+  };
+}
+
 export function resolveSessionStatePath(sessionKey: string, stateDir = DEFAULT_STATE_DIR): string {
   return path.join(stateDir, `${slugify(sessionKey)}.json`);
 }
@@ -165,9 +226,13 @@ export async function runTransferTurn(options: TransferRunnerOptions): Promise<T
   const existingSession = options.reset ? undefined : loadSessionState(statePath);
   const startFresh = shouldStartFreshSession(existingSession, options.text, options.reset);
 
+  const deps: TransferFlowDeps = {
+    ...buildDefaultRunnerDeps(),
+    ...(options.deps || {}),
+  };
   const result = startFresh
-    ? await startTransferFlow(options.text, options.deps)
-    : await advanceTransferFlow(existingSession!, options.text, options.deps);
+    ? await startTransferFlow(options.text, deps)
+    : await advanceTransferFlow(existingSession!, options.text, deps);
 
   if (shouldDeleteSessionState(result.session)) {
     fs.rmSync(statePath, { force: true });
