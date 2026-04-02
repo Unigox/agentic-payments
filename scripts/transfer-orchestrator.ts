@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Address } from "@ton/ton";
+import { mnemonicValidate } from "@ton/crypto";
 import { Wallet } from "ethers";
 
 import UnigoxClient, {
@@ -1732,6 +1733,14 @@ function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", use
   ].join(" ");
 }
 
+function buildInvalidTonMnemonicPrompt(tonAddress: string | undefined): string {
+  const followUp = tonAddress ? buildTonMnemonicPrompt(tonAddress) : buildTonAddressPrompt();
+  return [
+    "That doesn’t look like a valid TON mnemonic for a wallet I can verify.",
+    followUp,
+  ].join(" ");
+}
+
 function buildEvmSigningKeyPrompt(username: string | undefined): string {
   return [
     buildUsernameReminder(username),
@@ -1935,11 +1944,20 @@ async function maybeHandleSensitiveInput(
   };
 }
 
-function normalizeSecretInput(
+async function normalizeSecretInput(
   kind: SecretKind,
   secret: string,
-): string | undefined {
-  if (kind === "ton_mnemonic") return parseTonMnemonic(secret);
+): Promise<string | undefined> {
+  if (kind === "ton_mnemonic") {
+    const mnemonic = parseTonMnemonic(secret);
+    if (!mnemonic) return undefined;
+    try {
+      const valid = await mnemonicValidate(mnemonic.split(/\s+/));
+      return valid ? mnemonic : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   return parseEvmPrivateKey(secret);
 }
 
@@ -2195,7 +2213,7 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
-    const normalizedSecret = normalizeSecretInput(pendingSecret.kind, pendingSecret.value);
+    const normalizedSecret = await normalizeSecretInput(pendingSecret.kind, pendingSecret.value);
     if (!normalizedSecret) {
       session.auth.pendingSecret = undefined;
       restoreStageForSecretKind(session, pendingSecret.kind);
@@ -2203,7 +2221,7 @@ async function maybeHandleAuthOnboardingTurn(
         ? buildInvalidEvmKeyPrompt("evm_login_key")
         : pendingSecret.kind === "evm_signing_key"
           ? buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username)
-          : buildTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
+          : buildInvalidTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2378,9 +2396,9 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
-    const mnemonic = parseTonMnemonic(responseText);
+    const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
     if (!mnemonic) {
-      const prompt = buildTonMnemonicPrompt(tonAddress);
+      const prompt = buildInvalidTonMnemonicPrompt(tonAddress);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,

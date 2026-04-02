@@ -28,6 +28,7 @@ import type { TransferExecutionClient, TransferFlowDeps } from "./transfer-orche
 const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const VALID_SIGNING_KEY = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const ANOTHER_VALID_KEY = "0x3333333333333333333333333333333333333333333333333333333333333333";
+const VALID_TON_MNEMONIC = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
 
 function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { lastUpdated: "" } }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-flow-"));
@@ -3417,7 +3418,7 @@ test("successful TON login verification persists TON auth and then asks for the 
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
-      success: mnemonic.includes("abandon") && tonAddress?.includes("0:"),
+      success: mnemonic === VALID_TON_MNEMONIC && tonAddress?.includes("0:"),
       username: "tonuser",
     }),
     persistTonAddress: async (tonAddress) => {
@@ -3432,7 +3433,7 @@ test("successful TON login verification persists TON auth and then asks for the 
   });
 
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-  const tonMnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+  const tonMnemonic = VALID_TON_MNEMONIC;
 
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "ton", deps);
@@ -3462,6 +3463,53 @@ test("successful TON login verification persists TON auth and then asks for the 
   res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.deepEqual(persisted.signing, [ANOTHER_VALID_KEY]);
   assert.equal(res.session.stage, "awaiting_payment_method");
+});
+
+test("invalid TON mnemonic text is rejected before secret-cleanup handling", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "ton", deps);
+  res = await advanceTransferFlow(res.session, tonAddress, deps);
+  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
+  assert.match(res.reply, /doesn’t look like a valid TON mnemonic/i);
+  assert.doesNotMatch(res.reply, /delete the message/i);
+  assert.equal(res.session.auth.pendingSecret, undefined);
+});
+
+test("invalid pending TON mnemonic is rejected at cleanup confirmation instead of being persisted", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { tonMnemonic: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    persistTonMnemonic: async (mnemonic) => {
+      persisted.tonMnemonic.push(mnemonic);
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res.session.stage = "awaiting_secret_cleanup_confirmation";
+  res.session.auth.tonAddress = "0:1234";
+  res.session.auth.pendingSecret = {
+    kind: "ton_mnemonic",
+    value: "deleted",
+  };
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
+  assert.match(res.reply, /doesn’t look like a valid TON mnemonic/i);
+  assert.deepEqual(persisted.tonMnemonic, []);
+  assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
 test("stored TON auth without a signing key prompts for the UNIGOX signing key instead of failing later", async () => {

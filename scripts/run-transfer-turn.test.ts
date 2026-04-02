@@ -19,6 +19,8 @@ import type {
   WalletBalance,
 } from "./unigox-client.ts";
 
+const VALID_TON_MNEMONIC = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
+
 function makeWalletBalance(usdt = 71, usdc = 1): WalletBalance {
   return {
     usdc,
@@ -276,7 +278,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-ton-"));
   const envPath = path.join(stateDir, ".env");
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-  const tonMnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
+  const tonMnemonic = VALID_TON_MNEMONIC;
 
   await withEnv(
     {
@@ -331,7 +333,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
 
   const envBody = fs.readFileSync(envPath, "utf-8");
   assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
-  assert.match(envBody, /UNIGOX_TON_MNEMONIC=abandon ability able about above absent absorb abstract absurd abuse access accident/);
+  assert.match(envBody, /UNIGOX_TON_MNEMONIC=hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution/);
   assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
 });
