@@ -5,6 +5,7 @@
 - Core business logic: `scripts/transfer-orchestrator.ts`
 - Canonical session-aware runner: `scripts/run-transfer-turn.ts`
 - Canonical portable tool contract: `scripts/send-money-tool.ts`
+- Codex local skill adapter: root `SKILL.md`
 - OpenClaw adapter: root `SKILL.md`
 - OpenAI tool definition: `adapters/openai/send-money-tool.json`
 - Anthropic tool definition: `adapters/anthropic/send-money-tool.json`
@@ -37,6 +38,7 @@ Each adapter decides how to render them:
 
 ## Supported platforms
 
+- Codex desktop / CLI: supported today through a local skill install that points `~/.codex/skills/agentic-payments` at the repo root
 - OpenClaw: supported today through the packaged root [`SKILL.md`](../SKILL.md)
 - OpenAI host apps or SDK integrations: supported today through the local [`send-money-tool.json`](./openai/send-money-tool.json) definition
 - Anthropic Claude Desktop: supported today through a local MCP server launched by [`send-money-mcp-server.sh`](../scripts/send-money-mcp-server.sh)
@@ -47,7 +49,7 @@ Everything above is intended to stay local to each tester's machine. This repo d
 ## Host integration rule
 
 Do not fork transfer logic per provider runtime.
-If OpenAI, Anthropic, and OpenClaw need different prompting or transport behavior, keep those differences in the adapter layer and continue calling the same `send_money_turn` contract.
+If Codex, OpenAI, Anthropic, and OpenClaw need different prompting or transport behavior, keep those differences in the adapter layer and continue calling the same `send_money_turn` contract.
 
 ## Release rule
 
@@ -74,3 +76,8 @@ Current Anthropic bundle path:
 
 Rebuild command:
 - `npm run build:anthropic-bundle --prefix scripts`
+
+Codex distribution rule:
+- keep Codex local-first too
+- prefer the repo-root skill install through `scripts/install-codex-skill.sh`
+- do not copy the skill into a second maintained folder when the repo root already contains the canonical `SKILL.md`

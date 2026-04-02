@@ -81,6 +81,7 @@ Current layout:
 - shared transfer engine: `scripts/transfer-orchestrator.ts`
 - canonical session-aware runner: `scripts/run-transfer-turn.ts`
 - canonical portable tool contract: `scripts/send-money-tool.ts`
+- Codex local skill adapter: root `SKILL.md`
 - OpenClaw adapter: `SKILL.md`
 - OpenAI tool definition: `adapters/openai/send-money-tool.json`
 - Anthropic tool definition: `adapters/anthropic/send-money-tool.json`
@@ -109,12 +110,13 @@ The adapter remains responsible for:
 
 GitHub must stay the source of truth for every supported runtime.
 
-Do not ship OpenClaw-only, OpenAI-only, or Anthropic-only payment logic forks. The same transfer engine and runner contract must remain the authority for all three.
+Do not ship Codex-only, OpenClaw-only, OpenAI-only, or Anthropic-only payment logic forks. The same transfer engine and runner contract must remain the authority for all four.
 
 Canonical files:
 - shared flow engine: `scripts/transfer-orchestrator.ts`
 - canonical runner: `scripts/run-transfer-turn.ts`
 - canonical tool contract: `scripts/send-money-tool.ts`
+- Codex local skill adapter: root `SKILL.md`
 - OpenClaw adapter: `SKILL.md`
 - OpenAI adapter contract: `adapters/openai/send-money-tool.json`
 - Anthropic local MCP server: `scripts/send-money-mcp.ts`, `scripts/send-money-mcp-server.ts`
@@ -129,14 +131,16 @@ Every compatibility change should follow this release rule:
 6. Commit and push the change to GitHub before syncing any VM/runtime copy.
 
 Durable packaging rule:
+- Codex distribution should stay local-first. The preferred end-user install path is a local skill symlink into `~/.codex/skills/agentic-payments` created by `scripts/install-codex-skill.sh`, so Codex reads the same root `SKILL.md` and scripts from the repo instead of a copied fork.
 - OpenClaw distribution should keep using the root `SKILL.md` plus the same runner contract.
 - OpenAI distribution should keep using the tool schema in `adapters/openai/send-money-tool.json`.
 - Anthropic distribution should stay local-first. The preferred user install path is a drag-and-drop Claude Desktop extension (`.mcpb`) generated from this same repo and commit, not a separate logic fork.
-- When Anthropic desktop packaging is added, the `.mcpb` bundle must be built from the same GitHub commit as the source and documented in the release notes so Claude, OpenAI, and OpenClaw stay aligned.
+- When Anthropic desktop packaging is added, the `.mcpb` bundle must be built from the same GitHub commit as the source and documented in the release notes so Claude, OpenAI, OpenClaw, and Codex stay aligned.
 
 ### Supported Platforms
 
 Supported today:
+- Codex desktop / CLI as a local installed skill that points at this repo
 - OpenClaw as a packaged local skill
 - OpenAI-based host apps or SDK integrations using the local `send_money_turn` tool definition
 - Anthropic Claude Desktop using a local MCP server on the same machine
@@ -146,6 +150,34 @@ Not the target model for this repo:
 - shared hosted MCP servers
 - centralized wallet secrets
 - shared runtime session state across users
+
+### Codex local install
+
+Codex should use this repo as a local skill, not a copied fork.
+
+If the repo is already cloned locally, install it into Codex with:
+
+```bash
+bash scripts/install-codex-skill.sh
+```
+
+That creates:
+
+- `~/.codex/skills/agentic-payments -> <repo-root>`
+
+So Codex reads the same root `SKILL.md`, `scripts/`, and `references/` directly from the Git checkout.
+
+If the repo is not cloned yet, the simplest path is:
+
+```bash
+git clone https://github.com/grape404/agentic-payments.git
+cd agentic-payments
+bash scripts/install-codex-skill.sh
+```
+
+If the Codex install should follow a non-default branch first, clone that branch explicitly before running the installer.
+
+After install, restart Codex to pick up the new skill.
 
 ### Claude Local MCP Setup
 
