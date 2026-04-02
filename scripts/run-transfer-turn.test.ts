@@ -281,6 +281,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   await withEnv(
     {
       SEND_MONEY_ENV_PATH: envPath,
+      SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: "1",
       UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
       UNIGOX_PRIVATE_KEY: undefined,
     },
