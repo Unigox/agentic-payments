@@ -1761,9 +1761,11 @@ function buildEvmSigningKeyPrompt(username: string | undefined): string {
   return [
     buildUsernameReminder(username),
     buildEvmKeySecurityWarning("evm_signing_key"),
-    "Login works. One more step: please export the separate UNIGOX EVM signing key from your account settings on unigox.com and paste it here.",
-    "I’ll store it locally on this machine so I can handle signed actions like receipt confirmation / escrow release.",
-    "If the export option is not enabled on your account yet, contact UNIGOX support / hello@unigox.com first.",
+    "Login works. One more step: I still need the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
+    "Why: wallet login, TON login, or email OTP only gets me signed in. Secure in-app actions like funding trade escrow, confirming fiat received, or releasing escrow require that separate exported signing key.",
+    "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
+    "If you do not see the export option yet, your account probably still needs early beta access for agentic payments. Ask UNIGOX support / hello@unigox.com to enable it first, then come back and paste the exported key here.",
+    "I’ll store it locally on this machine so I can reuse it safely for those signed actions.",
   ].filter(Boolean).join(" ");
 }
 
@@ -1771,8 +1773,11 @@ function buildMissingSigningKeyPrompt(username: string | undefined): string {
   return [
     buildUsernameReminder(username),
     buildEvmKeySecurityWarning("evm_signing_key"),
-    "Login is set up, but I still need the separate UNIGOX-exported EVM signing key from unigox.com settings before I can finish signed actions like receipt confirmation / escrow release.",
-    "Paste it here and I’ll store it locally on this machine so I can reuse it safely across turns.",
+    "Login is already set up, but this next step needs the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
+    "Why: sign-in alone is enough for quotes and some setup, but secure actions like funding trade escrow, confirming fiat received, or releasing escrow still require the exported signing key.",
+    "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
+    "If you do not see the export option yet, your account probably still needs early beta access for agentic payments. Ask UNIGOX support / hello@unigox.com to enable it first, then come back and paste the exported key here.",
+    "I’ll store it locally on this machine so I can reuse it safely across turns.",
   ].filter(Boolean).join(" ");
 }
 

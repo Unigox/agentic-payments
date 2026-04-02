@@ -3052,6 +3052,8 @@ test("stored EVM login without signing key skips auth-choice questions and asks 
   assert.match(res.reply, /USDC: 200\.00 USD/i);
   assert.match(res.reply, /USDT: 50\.00 USD/i);
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
+  assert.match(res.reply, /early beta access for agentic payments/i);
   assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
   assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
 });
@@ -3301,6 +3303,8 @@ test("successful EVM login verification asks for the separate signing key and th
   assert.match(res.reply, /Login works/i);
   assert.match(res.reply, /@grape404/i);
   assert.match(res.reply, /separate UNIGOX EVM signing key/i);
+  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
+  assert.match(res.reply, /early beta access for agentic payments/i);
   assert.match(res.reply, /must NOT be your main wallet/i);
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 
@@ -3469,6 +3473,8 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /TON login works/i);
   assert.match(res.reply, /UNIGOX EVM signing key/i);
+  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
+  assert.match(res.reply, /early beta access for agentic payments/i);
   assert.match(res.reply, /@tonuser/i);
   assert.equal(persisted.tonAddress.length, 1);
   assert.ok(persisted.tonAddress[0]?.startsWith("0:"));

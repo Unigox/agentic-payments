@@ -53,13 +53,14 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 - **After a user pastes either EVM key, the safest flow is required**: try to delete the key-containing message if the runtime/channel supports it; otherwise stop and tell the user to delete that message themselves before continuing.
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
+- If the user does not see the signing-key export option yet, explain that the account likely still needs early beta access for agentic payments. The next step is to ask UNIGOX support / `hello@unigox.com` to enable it, then retry the export.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.
 - Use a newly created / isolated wallet for UNIGOX agent setup and key sharing. Do **not** use your main wallet.
 - Secure your login key, signing key, or TON mnemonic. If someone gains access to them, they can authenticate or sign as the agent.
 - TON auth only covers login / JWT acquisition. Advanced EVM-signed actions still require the exported EVM signing key.
-- The skill can verify login with the first EVM key, but it does not currently auto-export the second key from UNIGOX. That export still has to happen manually on unigox.com.
+- The skill can verify login with the first EVM key, but it does not currently auto-export the second key from UNIGOX. That export still has to happen manually on unigox.com, and some accounts will not see the export option until early beta access is enabled.
 - We are building more secure key management options for agents. For now, standard precautions apply.
 
 ### 4. Install the skill
