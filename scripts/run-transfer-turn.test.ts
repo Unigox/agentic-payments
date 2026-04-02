@@ -278,7 +278,13 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
   const tonMnemonic = "abandon ability able about above absent absorb abstract absurd abuse access accident";
 
-  await withEnv({ SEND_MONEY_ENV_PATH: envPath }, async () => {
+  await withEnv(
+    {
+      SEND_MONEY_ENV_PATH: envPath,
+      UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+      UNIGOX_PRIVATE_KEY: undefined,
+    },
+    async () => {
     const deps = {
       authState: { hasReplayableAuth: false, authMode: undefined, emailFallbackAvailable: false, evmSigningKeyAvailable: false },
       verifyTonLogin: async ({ mnemonic, tonAddress: normalizedAddress }: { mnemonic: string; tonAddress?: string }) => ({
@@ -317,7 +323,8 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
     });
 
     assert.equal(result.session.stage, "awaiting_evm_signing_key");
-  });
+    }
+  );
 
   const envBody = fs.readFileSync(envPath, "utf-8");
   assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
