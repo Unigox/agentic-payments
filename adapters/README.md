@@ -38,7 +38,7 @@ Each adapter decides how to render them:
 
 ## Supported platforms
 
-- Codex desktop / CLI: supported today through a local plugin install that points `~/.codex/plugins/agentic-payments` at the repo root
+- Codex desktop / CLI: supported today through a local plugin install that points `~/plugins/agentic-payments` at the repo root and registers it in `~/.agents/plugins/marketplace.json`
 - OpenClaw: supported today through the packaged root [`SKILL.md`](../SKILL.md)
 - OpenAI host apps or SDK integrations: supported today through the local [`send-money-tool.json`](./openai/send-money-tool.json) definition
 - Anthropic Claude Desktop: supported today through a local MCP server launched by [`send-money-mcp-server.sh`](../scripts/send-money-mcp-server.sh)

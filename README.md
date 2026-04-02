@@ -131,7 +131,7 @@ Every compatibility change should follow this release rule:
 6. Commit and push the change to GitHub before syncing any VM/runtime copy.
 
 Durable packaging rule:
-- Codex distribution should stay local-first. The preferred end-user install path is a local skill symlink into `~/.codex/skills/agentic-payments` created by `scripts/install-codex-skill.sh`, so Codex reads the same root `SKILL.md` and scripts from the repo instead of a copied fork.
+- Codex distribution should stay local-first. The preferred end-user install path is a local plugin wrapper installed by `scripts/install-codex-plugin.sh`, which writes the documented home-local marketplace entry in `~/.agents/plugins/marketplace.json` and points `~/plugins/agentic-payments` back at this repo instead of a copied fork.
 - OpenClaw distribution should keep using the root `SKILL.md` plus the same runner contract.
 - OpenAI distribution should keep using the tool schema in `adapters/openai/send-money-tool.json`.
 - Anthropic distribution should stay local-first. The preferred user install path is a drag-and-drop Claude Desktop extension (`.mcpb`) generated from this same repo and commit, not a separate logic fork.
@@ -140,7 +140,7 @@ Durable packaging rule:
 ### Supported Platforms
 
 Supported today:
-- Codex desktop / CLI as a local installed skill that points at this repo
+- Codex desktop / CLI as a local installed plugin that points at this repo
 - OpenClaw as a packaged local skill
 - OpenAI-based host apps or SDK integrations using the local `send_money_turn` tool definition
 - Anthropic Claude Desktop using a local MCP server on the same machine
@@ -163,7 +163,8 @@ bash scripts/install-codex-plugin.sh
 
 That creates:
 
-- `~/.codex/plugins/agentic-payments -> <repo-root>`
+- `~/plugins/agentic-payments -> <repo-root>`
+- `~/.agents/plugins/marketplace.json` entry for `agentic-payments`
 
 and enables:
 
