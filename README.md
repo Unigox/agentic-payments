@@ -105,6 +105,35 @@ The adapter remains responsible for:
 - button / quick-reply rendering
 - host-specific tool plumbing
 
+## Cross-Platform Compatibility Contract
+
+GitHub must stay the source of truth for every supported runtime.
+
+Do not ship OpenClaw-only, OpenAI-only, or Anthropic-only payment logic forks. The same transfer engine and runner contract must remain the authority for all three.
+
+Canonical files:
+- shared flow engine: `scripts/transfer-orchestrator.ts`
+- canonical runner: `scripts/run-transfer-turn.ts`
+- canonical tool contract: `scripts/send-money-tool.ts`
+- OpenClaw adapter: `SKILL.md`
+- OpenAI adapter contract: `adapters/openai/send-money-tool.json`
+- Anthropic local MCP server: `scripts/send-money-mcp.ts`, `scripts/send-money-mcp-server.ts`
+
+Every compatibility change should follow this release rule:
+1. Implement the behavior in the shared engine or canonical runner first.
+2. Update adapter files only for transport / invocation differences.
+3. Run the shared script test suite:
+   - `npm test --prefix scripts`
+4. Recheck that every adapter still points to the same `send_money_turn` contract.
+5. Update this README and `adapters/README.md` if the install path, supported platforms, or adapter contract changed.
+6. Commit and push the change to GitHub before syncing any VM/runtime copy.
+
+Durable packaging rule:
+- OpenClaw distribution should keep using the root `SKILL.md` plus the same runner contract.
+- OpenAI distribution should keep using the tool schema in `adapters/openai/send-money-tool.json`.
+- Anthropic distribution should stay local-first. The preferred user install path is a drag-and-drop Claude Desktop extension (`.mcpb`) generated from this same repo and commit, not a separate logic fork.
+- When Anthropic desktop packaging is added, the `.mcpb` bundle must be built from the same GitHub commit as the source and documented in the release notes so Claude, OpenAI, and OpenClaw stay aligned.
+
 ### Supported Platforms
 
 Supported today:

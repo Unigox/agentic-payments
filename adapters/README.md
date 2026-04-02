@@ -48,3 +48,23 @@ Everything above is intended to stay local to each tester's machine. This repo d
 
 Do not fork transfer logic per provider runtime.
 If OpenAI, Anthropic, and OpenClaw need different prompting or transport behavior, keep those differences in the adapter layer and continue calling the same `send_money_turn` contract.
+
+## Release rule
+
+GitHub is the canonical source for all supported adapter surfaces.
+
+Before pushing adapter-related work:
+- implement business logic in the shared engine or canonical runner first
+- keep adapter changes limited to transport, invocation, or rendering behavior
+- run `npm test --prefix scripts`
+- verify these files still agree on the same contract:
+  - `scripts/send-money-tool.ts`
+  - `adapters/openai/send-money-tool.json`
+  - `scripts/send-money-mcp.ts`
+  - `scripts/send-money-mcp-server.ts`
+  - root `SKILL.md`
+
+Anthropic distribution rule:
+- keep Anthropic local-first
+- prefer a drag-and-drop Claude Desktop `.mcpb` bundle built from this repo over asking end users to wire MCP manually
+- do not introduce a separate Anthropic-only flow engine
