@@ -1289,6 +1289,16 @@ function clearExecutionPreflight(session: TransferSession): void {
   session.execution.preflight = undefined;
 }
 
+function clearBalanceSnapshot(session: TransferSession): void {
+  session.auth.balanceUsd = undefined;
+  session.auth.walletBalance = undefined;
+}
+
+function invalidateBalanceState(session: TransferSession): void {
+  clearBalanceSnapshot(session);
+  clearExecutionPreflight(session);
+}
+
 function formatUsername(username: string | undefined): string | undefined {
   if (!username) return undefined;
   return username.startsWith("@") ? username : `@${username}`;
@@ -2364,6 +2374,10 @@ function resetPaymentSelection(session: TransferSession): void {
 function setCurrency(session: TransferSession, currency: string): void {
   session.currency = currency.toUpperCase();
   resetPaymentSelection(session);
+}
+
+function looksLikeTopUpCompletion(text: string): boolean {
+  return /\b(i added more|added more|top(?: |-)?up(?:ped)?|funded|sent funds|balance updated|check again|try again|try now|wallet funded|i deposited|deposited)\b/i.test(cleanText(text));
 }
 
 function summarizePayment(session: TransferSession): string {
@@ -3610,9 +3624,19 @@ async function maybeHandleTopUpTurn(
   const selectionText = turn.option || turn.text;
 
   if (session.stage === "awaiting_balance_resolution") {
-    if (wantsBalanceRecheck(selectionText)) {
+    const parsed = parseAmountAndCurrency(selectionText);
+    const wantsRefresh = wantsBalanceRecheck(selectionText) || looksLikeTopUpCompletion(selectionText) || Boolean(parsed.amount);
+    if (wantsRefresh) {
+      if (parsed.amount) {
+        session.amount = parsed.amount;
+        session.execution.confirmed = false;
+      }
+      if (parsed.currency && parsed.currency !== session.currency) {
+        setCurrency(session, parsed.currency);
+      } else {
+        invalidateBalanceState(session);
+      }
       const client = await getExecutionClient(deps, session);
-      clearExecutionPreflight(session);
       const preflight = await ensureExecutionPreflight(session, deps, client);
       if (preflight.blockedResult) {
         return preflight.blockedResult;
@@ -3635,14 +3659,6 @@ async function maybeHandleTopUpTurn(
   const methodChoice = chooseTopUpMethod(selectionText);
 
   if (session.stage === "awaiting_topup_method") {
-    if (!methodChoice) {
-      return reply(
-        withUpdate(session, deps),
-        buildTopUpMethodPrompt(session.auth.username),
-        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"]
-      );
-    }
-
     if (methodChoice === "internal_username") {
       const client = await getExecutionClient(deps, session);
       await maybeHydrateAuthIdentity(session, deps, client);
@@ -3656,15 +3672,48 @@ async function maybeHandleTopUpTurn(
       );
     }
 
-    const client = await getExecutionClient(deps, session);
-    if (!client.getSupportedDepositOptions) {
-      throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
+    if (methodChoice === "external_deposit") {
+      const client = await getExecutionClient(deps, session);
+      if (!client.getSupportedDepositOptions) {
+        throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
+      }
+      const options = await client.getSupportedDepositOptions();
+      session.status = "blocked";
+      session.topUp = { method: methodChoice };
+      session.stage = "awaiting_external_deposit_asset";
+      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
     }
-    const options = await client.getSupportedDepositOptions();
-    session.status = "blocked";
-    session.topUp = { method: methodChoice };
-    session.stage = "awaiting_external_deposit_asset";
-    return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
+
+    const parsed = parseAmountAndCurrency(selectionText);
+    const wantsRefresh = wantsBalanceRecheck(selectionText) || looksLikeTopUpCompletion(selectionText) || Boolean(parsed.amount);
+    if (wantsRefresh) {
+      if (parsed.amount) {
+        session.amount = parsed.amount;
+        session.execution.confirmed = false;
+      }
+      if (parsed.currency && parsed.currency !== session.currency) {
+        setCurrency(session, parsed.currency);
+      } else {
+        invalidateBalanceState(session);
+      }
+      const client = await getExecutionClient(deps, session);
+      const preflight = await ensureExecutionPreflight(session, deps, client);
+      if (preflight.blockedResult) {
+        return preflight.blockedResult;
+      }
+      session.status = "active";
+      session.topUp = undefined;
+      session.stage = "awaiting_confirmation";
+      return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, preflight.events);
+    }
+
+    if (!methodChoice) {
+      return reply(
+        withUpdate(session, deps),
+        buildTopUpMethodPrompt(session.auth.username),
+        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"]
+      );
+    }
   }
 
   const client = await getExecutionClient(deps, session);
@@ -4348,7 +4397,7 @@ function applyMidFlowChanges(session: TransferSession, hints: ParsedHints): bool
   if (typeof hints.changeAmount === "number") {
     session.amount = hints.changeAmount;
     session.execution.confirmed = false;
-    clearExecutionPreflight(session);
+    invalidateBalanceState(session);
     changed = true;
   }
   return changed;

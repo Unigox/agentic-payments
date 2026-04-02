@@ -2514,6 +2514,63 @@ test("internal UNIGOX top-up shows username and skips token-chain questions", as
   ]);
 });
 
+test("top-up flow accepts a natural topped-up reply, refreshes balance, and resumes with a fresh quote", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ balance: 10, username: "alexwallet" });
+  let currentUsdc = 10;
+  let currentUsdt = 0;
+  client.getWalletBalance = async (): Promise<WalletBalance> => {
+    client.calls.push("getWalletBalance");
+    return {
+      usdc: currentUsdc,
+      usdt: currentUsdt,
+      totalUsd: currentUsdc + currentUsdt,
+      assets: [
+        { assetCode: "USDC", amount: currentUsdc },
+        { assetCode: "USDT", amount: currentUsdt },
+      ],
+    };
+  };
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_topup_method");
+  assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
+
+  currentUsdc = 1;
+  currentUsdt = 71;
+
+  res = await advanceTransferFlow(res.session, "I added more, I wanna send 50 euro", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.amount, 50);
+  assert.equal(res.session.status, "active");
+  assert.match(res.reply, /Current wallet balance: 72\.00 USD total/i);
+  assert.match(res.reply, /USDT: 71\.00 USD/i);
+  assert.match(res.reply, /Current best-offer estimate:/i);
+  assert.match(res.reply, /to deliver 50 EUR/i);
+  assert.match(res.reply, /This transfer is currently coverable with USDT/i);
+  assert.ok(client.calls.filter((entry) => entry === "getWalletBalance").length >= 3);
+});
+
 test("external top-up keeps token then chain then single-address flow", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
