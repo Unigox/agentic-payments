@@ -1136,7 +1136,7 @@ export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
 
   if (tonPrivateKey || tonMnemonic) {
     return {
-      authMode: loadEnvValue("UNIGOX_AUTH_MODE") === "ton" ? "ton" : "auto",
+      authMode: "ton",
       ...(tonPrivateKey && { tonPrivateKey }),
       ...(tonMnemonic && { tonMnemonic }),
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
