@@ -103,6 +103,30 @@ The adapter remains responsible for:
 - button / quick-reply rendering
 - host-specific tool plumbing
 
+### Supported Platforms
+
+Supported today:
+- OpenClaw as a packaged local skill
+- OpenAI-based host apps or SDK integrations using the local `send_money_turn` tool definition
+- Anthropic Claude Desktop using a local MCP server on the same machine
+- Anthropic Claude Code using the same local MCP server
+
+Not the target model for this repo:
+- shared hosted MCP servers
+- centralized wallet secrets
+- shared runtime session state across users
+
+### Claude Local MCP Setup
+
+For Claude, this repo is designed for a local MCP server per tester device.
+
+Key files:
+- local MCP server wrapper: `scripts/send-money-mcp-server.sh`
+- MCP server entrypoint: `scripts/send-money-mcp-server.ts`
+- Claude Desktop example config: `adapters/anthropic/claude-desktop.mcp.example.json`
+
+The wrapper keeps dependency bootstrap local to the machine running the skill. Wallet secrets, `.env`, and transfer session state stay on that same device.
+
 ### 5. Initialize the agent
 On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then show the isolated-wallet warning, then ask which login wallet key you used and verify login with it, surface your current UNIGOX username, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. After the user pastes either EVM key, the flow tries to delete that message if the runtime supports it; otherwise it pauses and asks the user to delete the message themselves before continuing. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. For real transfer runs, the skill now blocks early on a missing exported signing key even after email OTP or TON login, so the user gets the export / beta-access explanation before recipient, quote, or trade execution instead of at the last secure step. After that it helps with payment methods and your first contacts. On later runs, the flow now checks stored auth first; if the saved login/signing credentials are already usable, it skips the auth-path questions, surfaces the current UNIGOX username and wallet balance immediately, and continues with the transfer. More details in the setup guide.
 

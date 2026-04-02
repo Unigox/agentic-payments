@@ -35,6 +35,15 @@ Each adapter decides how to render them:
 - OpenClaw / Telegram: buttons or quick replies when possible
 - OpenAI / Anthropic: tool result plus host-side UI, buttons, or follow-up prompt formatting
 
+## Supported platforms
+
+- OpenClaw: supported today through the packaged root [`SKILL.md`](../SKILL.md)
+- OpenAI host apps or SDK integrations: supported today through the local [`send-money-tool.json`](./openai/send-money-tool.json) definition
+- Anthropic Claude Desktop: supported today through a local MCP server launched by [`send-money-mcp-server.sh`](../scripts/send-money-mcp-server.sh)
+- Anthropic Claude Code: supported today through the same local MCP server and tool contract
+
+Everything above is intended to stay local to each tester's machine. This repo does not assume a shared hosted MCP layer.
+
 ## Host integration rule
 
 Do not fork transfer logic per provider runtime.

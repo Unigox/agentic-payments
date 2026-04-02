@@ -1,18 +1,22 @@
 {
   "name": "scripts",
   "version": "1.0.0",
+  "type": "module",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --experimental-strip-types *.test.ts"
+    "test": "node --test --experimental-strip-types *.test.ts",
+    "mcp": "node --experimental-strip-types send-money-mcp-server.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^16.2.2",
     "ethers": "^6.16.0",
-    "tweetnacl": "^1.0.3"
+    "tweetnacl": "^1.0.3",
+    "zod": "^4.3.6"
   }
 }

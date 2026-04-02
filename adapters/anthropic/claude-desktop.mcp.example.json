@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "agentic-payments": {
+      "command": "/ABSOLUTE/PATH/TO/agentic-payments/scripts/send-money-mcp-server.sh"
+    }
+  }
+}
