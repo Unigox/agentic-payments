@@ -53,7 +53,7 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 - **After a user pastes either EVM key, the safest flow is required**: try to delete the key-containing message if the runtime/channel supports it; otherwise stop and tell the user to delete that message themselves before continuing.
 - **TON wallet auth** — uses your TON wallet to get the UNIGOX JWT via the frontend TON routes. Good if you want TON-based login.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
-- If the user does not see the signing-key export option yet, explain that the account likely still needs early beta access for agentic payments. The next step is to ask UNIGOX support / `hello@unigox.com` to enable it, then retry the export.
+- If the user does not see the signing-key export option yet, explain that this is a beta feature and the account likely still needs agentic-payments access enabled. The next step is to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it, then retry the export.
 
 ⚠️ **Security:**
 - Do not hold large amounts in this wallet. Treat it as a spending wallet, not a vault. Load only what you need for upcoming transfers.

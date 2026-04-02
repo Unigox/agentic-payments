@@ -106,7 +106,7 @@ The onboarding flow:
 8. After successful EVM login, tell the user their current UNIGOX username and remind them they can change it in the agent flow or on the web
 9. Only after successful EVM login, collect and save the separate **UNIGOX-exported signing** key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY`, legacy alias `UNIGOX_PRIVATE_KEY` still supported), with the same isolated-wallet warning and secret-cleanup rule
 10. Explain clearly why it is needed: login auth only gets a UNIGOX session; secure in-app actions like funding trade escrow, confirming receipt, and releasing escrow still require the separate exported signing key
-11. If the user cannot find the export option in UNIGOX settings, explain that their account likely still needs early beta access for agentic payments and tell them to contact UNIGOX support / `hello@unigox.com` to enable it
+11. If the user cannot find the export option in UNIGOX settings, explain that this is a beta feature, their account likely still needs agentic-payments access enabled, and tell them to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it
 12. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — EVM, TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
 13. For TON, collect the raw TON address first, then the TON mnemonic, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
 14. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure

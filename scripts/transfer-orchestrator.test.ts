@@ -3240,6 +3240,8 @@ test("stored EVM login without signing key skips auth-choice questions and asks 
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
   assert.match(res.reply, /early beta access for agentic payments/i);
+  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
+  assert.match(res.reply, /beta feature/i);
   assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
   assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
 });
@@ -3369,6 +3371,7 @@ test("email OTP choice asks for an email address when none is configured, then b
     assert.equal(result.session.auth.emailAuthToken, "email-login-token");
     assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
     assert.match(result.reply, /early beta access for agentic payments/i);
+    assert.match(result.reply, /hello@unigox\.com|Intercom chat/i);
     return result;
   });
 
@@ -3420,6 +3423,7 @@ test("configured recovery email skips the email-address step and still blocks ea
     assert.equal(result.session.stage, "awaiting_evm_signing_key");
     assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
     assert.match(result.reply, /early beta access for agentic payments/i);
+    assert.match(result.reply, /hello@unigox\.com|Intercom chat/i);
   });
 
   assert.ok(client.calls.includes("requestEmailOTP"));
@@ -3498,6 +3502,7 @@ test("successful EVM login verification asks for the separate signing key and th
   assert.match(res.reply, /separate UNIGOX EVM signing key/i);
   assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
   assert.match(res.reply, /early beta access for agentic payments/i);
+  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
   assert.match(res.reply, /must NOT be your main wallet/i);
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 
@@ -3668,6 +3673,7 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.match(res.reply, /UNIGOX EVM signing key/i);
   assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
   assert.match(res.reply, /early beta access for agentic payments/i);
+  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
   assert.match(res.reply, /@tonuser/i);
   assert.equal(persisted.tonAddress.length, 1);
   assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
