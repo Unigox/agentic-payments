@@ -1,0 +1,40 @@
+{
+  "name": "agentic-payments",
+  "version": "0.1.0",
+  "description": "Local UNIGOX send-money workflow for Codex.",
+  "author": {
+    "name": "UNIGOX",
+    "email": "hello@unigox.com",
+    "url": "https://www.unigox.com"
+  },
+  "homepage": "https://github.com/grape404/agentic-payments",
+  "repository": "https://github.com/grape404/agentic-payments",
+  "license": "MIT",
+  "keywords": [
+    "payments",
+    "unigox",
+    "codex",
+    "skill",
+    "plugin",
+    "local"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agentic Payments",
+    "shortDescription": "Local UNIGOX payment workflow for Codex",
+    "longDescription": "Install Agentic Payments as a local Codex plugin so Codex can use the same repo-backed UNIGOX send-money skill and scripts without maintaining a copied fork.",
+    "developerName": "UNIGOX",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/grape404/agentic-payments",
+    "privacyPolicyURL": "https://www.unigox.com",
+    "termsOfServiceURL": "https://www.unigox.com",
+    "defaultPrompt": [
+      "Use Agentic Payments to help me send money through UNIGOX"
+    ],
+    "brandColor": "#0F766E"
+  }
+}

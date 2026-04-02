@@ -153,31 +153,43 @@ Not the target model for this repo:
 
 ### Codex local install
 
-Codex should use this repo as a local skill, not a copied fork.
+Codex should use this repo as a local plugin wrapper, not a copied fork.
 
-If the repo is already cloned locally, install it into Codex with:
+Preferred install:
 
 ```bash
-bash scripts/install-codex-skill.sh
+bash scripts/install-codex-plugin.sh
 ```
 
 That creates:
 
-- `~/.codex/skills/agentic-payments -> <repo-root>`
+- `~/.codex/plugins/agentic-payments -> <repo-root>`
 
-So Codex reads the same root `SKILL.md`, `scripts/`, and `references/` directly from the Git checkout.
+and enables:
+
+- `[plugins."agentic-payments@local"]`
+
+The plugin wrapper then points Codex back at the same repo-backed skill and scripts:
+
+- root plugin manifest: `.codex-plugin/plugin.json`
+- Codex plugin skill wrapper: `skills/send-money/SKILL.md`
+- canonical skill instructions: `SKILL.md`
 
 If the repo is not cloned yet, the simplest path is:
 
 ```bash
 git clone https://github.com/grape404/agentic-payments.git
 cd agentic-payments
+bash scripts/install-codex-plugin.sh
+```
+
+If you only want the raw Codex skill without the plugin wrapper, the legacy fallback still exists:
+
+```bash
 bash scripts/install-codex-skill.sh
 ```
 
-If the Codex install should follow a non-default branch first, clone that branch explicitly before running the installer.
-
-After install, restart Codex to pick up the new skill.
+After install, restart Codex to pick up the new plugin.
 
 ### Claude Local MCP Setup
 
