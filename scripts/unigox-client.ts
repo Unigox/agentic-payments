@@ -12,7 +12,6 @@
  *   - Wallet balance (USDC, USDT on XAI chain)
  *   - Deposit addresses (EVM, Solana, Tron, TON)
  *   - Bridge out (withdraw to any supported chain)
- *   - Escrow withdraw (from automated escrow to wallet)
  *   - Supported chains + tokens listing
  * 
  * Usage:
@@ -34,6 +33,13 @@ import { Wallet, ethers } from "ethers";
 // ── Constants ───────────────────────────────────────────────────────
 
 const DEFAULT_FRONTEND_URL = "https://www.unigox.com";
+const DEFAULT_VERIFICATION_API = "https://prod-verification-aay37.ondigitalocean.app/api/v1";
+
+function resolveVerificationApi(): string {
+  return process.env.UNIGOX_VERIFICATION_API
+    || process.env.NEXT_PUBLIC_VERIFICATION_API
+    || DEFAULT_VERIFICATION_API;
+}
 
 const APIS = {
   trades:     "https://prod-trades-inrvj.ondigitalocean.app/api/v1",
@@ -41,6 +47,7 @@ const APIS = {
   offers:     "https://prod-offers-jwek6.ondigitalocean.app/api/v1",
   escrow:     "https://prod-escrow-l2eom.ondigitalocean.app/api/v1",
   transactor: "https://transactorpoc-mi666.ondigitalocean.app/api/v1",
+  verification: resolveVerificationApi(),
   currency:   "https://prod-currencies-trz2y.ondigitalocean.app/api/v1",
   quote:      "https://prod-relay-quote-bwl48.ondigitalocean.app",
 };
@@ -57,7 +64,6 @@ const TOKENS: Record<string, { address: string; decimals: number }> = {
 const FUNDING_BALANCE_ABI = [
   "function getBalance(address token) view returns (uint256)",
   "function getReserved(address token) view returns (uint256)",
-  "function deposit(address token, uint256 amount)",
   "function withdraw(address token, uint256 amount) returns (bool)",
 ] as const;
 
@@ -119,10 +125,38 @@ export interface TradeRequest {
   id: number;
   status: string;
   trade_type: string;
+  crypto_currency_code?: string;
+  fiat_currency_code?: string;
   fiat_amount?: number;
+  total_crypto_amount?: number;
+  best_deal_fiat_amount?: number;
+  best_deal_crypto_amount?: number;
   crypto_amount_to_buyer?: number;
   vendor_offer_rate?: number;
+  payment_method_name?: string;
+  payment_network_name?: string;
+  price_confirmation_seconds_left?: number | null;
   trade?: { id: number; status: string };
+}
+
+export interface InitiatorTradeSummary {
+  id: number;
+  status: string;
+  fiat_amount?: number;
+  fiat_currency_code?: string;
+  payment_method_name?: string;
+  payment_network_name?: string;
+  status_changed_at?: string;
+  partner_short_name?: string | null;
+  partner_details_checked_at?: string | null;
+  payment_request?: boolean;
+  possible_actions?: string[];
+  initiator_payment_details?: {
+    id?: number;
+    details?: Record<string, unknown>;
+    payment_method_name?: string;
+    payment_network_name?: string;
+  } | null;
 }
 
 export interface PreflightQuote {
@@ -136,6 +170,39 @@ export interface PreflightQuote {
   vendorOfferRate: number;
   paymentMethodName?: string;
   paymentNetworkName?: string;
+}
+
+export interface PartnerPaymentFieldOption {
+  value: string;
+  label: string;
+}
+
+export interface PartnerPaymentFieldDiff {
+  partner_field_name: string;
+  internal_field_name?: string;
+  required: boolean;
+  current_value?: string;
+  expected_pattern?: string;
+  example?: string;
+  hint?: string;
+  options?: PartnerPaymentFieldOption[];
+}
+
+export interface PartnerPaymentDetailsDiffData {
+  payment_details_id: number;
+  differences: {
+    missing_fields?: PartnerPaymentFieldDiff[];
+    invalid_fields?: PartnerPaymentFieldDiff[];
+  };
+}
+
+export interface PartnerPaymentDetailsRecord {
+  id?: number;
+  internal_details_id?: number;
+  partner?: string;
+  details: Record<string, string>;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface TradeSignaturePayload {
@@ -242,6 +309,20 @@ export interface UserProfile {
   linked_ton_address?: string;
   automated_escrow_address?: string;
   username?: string;
+  first_name?: string;
+  last_name?: string;
+  kyc_country_code?: string;
+  id_verification_status?: string;
+  total_traded_volume_usd?: number;
+}
+
+export interface KycVerificationData {
+  status?: string;
+  verification_url?: string | null;
+  verification_seconds_left?: number;
+  max_attempts_reached?: boolean;
+  error_key?: string;
+  provider_messages?: string[];
 }
 
 const DEPOSIT_ADDRESS_KEY_BY_CHAIN_TYPE: Record<string, DepositAddressKey> = {
@@ -865,6 +946,11 @@ export class UnigoxClient {
       linked_ton_address: user.linked_ton_address,
       automated_escrow_address: user.automated_escrow_address,
       username: user.username,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      kyc_country_code: user.kyc_country_code,
+      id_verification_status: user.id_verification_status,
+      total_traded_volume_usd: Number(user.total_traded_volume_usd || 0),
     };
     return this.userProfile;
   }
@@ -879,6 +965,22 @@ export class UnigoxClient {
   async listPaymentDetails(): Promise<PaymentDetail[]> {
     const res = await this.authedGet(APIS.account, "/account/payments/details");
     return Array.isArray(res?.data) ? res.data : [];
+  }
+
+  async getKycVerificationStatus(): Promise<KycVerificationData> {
+    const res = await this.authedGet(APIS.verification, "/kyc");
+    return unwrap<KycVerificationData>(res) || {};
+  }
+
+  async initializeKycVerification(params: {
+    fullName: string;
+    country: string;
+  }): Promise<KycVerificationData> {
+    const res = await this.authedPost(APIS.verification, "/kyc", {
+      fullName: params.fullName,
+      country: params.country,
+    });
+    return unwrap<KycVerificationData>(res) || {};
   }
 
   async createPaymentDetail(params: {
@@ -1019,7 +1121,7 @@ export class UnigoxClient {
       crypto_currency_code: params.cryptoCurrencyCode || "USDC",
       fiat_currency_code: params.fiatCurrencyCode,
       trade_type: params.tradeType,
-      amount: params.fiatAmount,
+      amount: params.tradeType === "SELL" ? params.cryptoAmount : params.fiatAmount,
       payment_details_id: params.paymentDetailsId,
       best_deal_fiat_amount: params.fiatAmount,
       best_deal_crypto_amount: params.cryptoAmount,
@@ -1040,11 +1142,18 @@ export class UnigoxClient {
     return unwrap<TradeRequest>(res);
   }
 
+  async listInitiatorTrades(filter: "action_required" | "waiting_other_party" | "history" = "action_required"): Promise<InitiatorTradeSummary[]> {
+    const res = await this.authedGet(APIS.trades, `/trades?mode=bulk&filter=${filter}&roles=initiator:SELL,initiator:BUY`);
+    const data = unwrap<{ trades?: InitiatorTradeSummary[] }>(res);
+    return Array.isArray(data?.trades) ? data.trades : [];
+  }
+
   async waitForTradeMatch(tradeRequestId: number, timeoutMs = 120_000): Promise<TradeRequest> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const tr = await this.getTradeRequest(tradeRequestId);
       if (tr.status === "accepted_by_vendor" && tr.trade?.id) return tr;
+      if (tr.status === "new_price_confirming_by_initiator") return tr;
       if (["canceled_by_initiator", "not_accepted_by_any_vendor", "matching_timeout_reached", "escrow_deployment_failed"].includes(tr.status)) {
         throw new Error(`Trade request ${tradeRequestId} ended: ${tr.status}`);
       }
@@ -1053,9 +1162,42 @@ export class UnigoxClient {
     throw new Error(`Trade request ${tradeRequestId} timed out after ${timeoutMs / 1000}s`);
   }
 
+  async confirmTradeRequestPrice(tradeRequestId: number): Promise<TradeRequest> {
+    const res = await this.authedPost(APIS.trades, `/trade_request/${tradeRequestId}/confirm-price`, {});
+    return unwrap<TradeRequest>(res);
+  }
+
+  async refuseTradeRequestPrice(tradeRequestId: number): Promise<TradeRequest> {
+    const res = await this.authedPost(APIS.trades, `/trade_request/${tradeRequestId}/refuse-price`, {});
+    return unwrap<TradeRequest>(res);
+  }
+
   async getTrade(tradeId: number): Promise<any> {
     const res = await this.authedGet(APIS.trades, `/trade/${tradeId}`);
     return unwrap<any>(res);
+  }
+
+  async getPartnerPaymentDetailsDiff(tradeId: number): Promise<PartnerPaymentDetailsDiffData> {
+    const res = await this.authedGet(APIS.offers, `/payment-network-config/missing-partner-fields?trade_id=${tradeId}`);
+    return unwrap<PartnerPaymentDetailsDiffData>(res);
+  }
+
+  async createOrUpdatePartnerPaymentDetails(params: {
+    internalDetailsId: number;
+    partner: string;
+    details: Record<string, string>;
+  }): Promise<PartnerPaymentDetailsRecord> {
+    const res = await this.authedPost(APIS.account, "/account/payments/partner-payment-details", {
+      internal_details_id: params.internalDetailsId,
+      partner: params.partner,
+      details: params.details,
+    });
+    return unwrap<PartnerPaymentDetailsRecord>(res);
+  }
+
+  async revalidateTradePaymentDetails(tradeId: number): Promise<{ trade?: any }> {
+    const res = await this.authedPost(APIS.trades, `/trade/${tradeId}/revalidate-payment-details`, {});
+    return unwrap<{ trade?: any }>(res);
   }
 
   private normalizeTypedDataTypes(types: Record<string, Array<{ name: string; type: string }>>): Record<string, Array<{ name: string; type: string }>> {
@@ -1121,7 +1263,9 @@ export class UnigoxClient {
     };
   }
 
-  // ── Escrow Balances ─────────────────────────────────────────────
+  // ── Automated Escrow (diagnostic / legacy only) ────────────────
+  // send-money must not use automated escrow for transfers.
+  // Live sends fund only the matched trade escrow address.
 
   async getEscrowBalance(tokenCode: "USDC" | "USDT" = "USDC"): Promise<EscrowBalance> {
     const profile = await this.ensureProfile();
@@ -1147,45 +1291,46 @@ export class UnigoxClient {
     return { token: tokenCode, balance, reserved, available: balance - reserved };
   }
 
-  // ── Escrow Withdraw (to wallet) ─────────────────────────────────
-
-  async withdrawFromEscrow(tokenCode: "USDC" | "USDT", amount: string): Promise<{ txId: number; txHash: string }> {
-    const wallet = this.requireWallet();
+  private async ensureAutomatedEscrowAddress(): Promise<string> {
     const profile = await this.ensureProfile();
-    if (!profile.automated_escrow_address) throw new Error("No escrow address");
+    if (profile.automated_escrow_address) return profile.automated_escrow_address;
 
-    const token = TOKENS[tokenCode];
-    const amountWei = ethers.parseUnits(amount, token.decimals);
+    const res = await this.authedPost(APIS.escrow, "/automated-escrow/create", {});
+    const createdAddress = unwrap<any>(res)?.address || res?.address;
+    if (createdAddress) {
+      this.userProfile = { ...profile, automated_escrow_address: createdAddress };
+      return createdAddress;
+    }
 
-    // Build withdraw calldata
-    const iface = new ethers.Interface(["function withdraw(address token, uint256 amount) returns (bool)"]);
-    const callData = iface.encodeFunctionData("withdraw", [token.address, amountWei]);
+    this.userProfile = null;
+    const refreshed = await this.getProfile();
+    if (refreshed.automated_escrow_address) return refreshed.automated_escrow_address;
 
-    // Get nonce
+    throw new Error(`Failed to create automated escrow address: ${JSON.stringify(res)}`);
+  }
+
+  private async executeForwardedCall(wallet: Wallet, to: string, data: string, value = "0", gas = "500000"): Promise<{ txId: number; txHash: string }> {
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
-    const forwarder = new ethers.Contract(FORWARDER_ADDRESS, ["function nonces(address) view returns (uint256)"], provider);
+    const forwarder = new ethers.Contract(FORWARDER_ADDRESS, FORWARDER_ABI, provider);
     const nonce = await forwarder.nonces(wallet.address);
-
     const deadline = Math.floor(Date.now() / 1000) + 3600;
 
     const forwardRequest = {
       from: wallet.address,
-      to: profile.automated_escrow_address,
-      value: "0",
-      gas: "500000",
+      to,
+      value,
+      gas,
       nonce: nonce.toString(),
       deadline: deadline.toString(),
-      data: callData,
+      data,
     };
 
-    // Sign EIP-712
     const signature = await wallet.signTypedData(
       FORWARDER_DOMAIN,
       FORWARD_REQUEST_TYPES,
       forwardRequest,
     );
 
-    // Submit to transactor
     const txRes = await jsonFetch(`${APIS.transactor}/transactions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Transaction-Signature": signature },
@@ -1203,10 +1348,37 @@ export class UnigoxClient {
     });
 
     const txId = txRes.id;
-
-    // Poll for confirmation
     const txHash = await this.pollTransaction(txId);
     return { txId, txHash };
+  }
+
+  async fundTradeEscrow(
+    tokenCode: "USDC" | "USDT",
+    amount: string,
+    escrowAddress: string
+  ): Promise<{ txId: number; txHash: string }> {
+    const wallet = this.requireWallet();
+    const token = TOKENS[tokenCode];
+    const amountWei = ethers.parseUnits(amount, token.decimals);
+
+    const transferIface = new ethers.Interface(["function transfer(address recipient, uint256 amount) returns (bool)"]);
+    const transferCallData = transferIface.encodeFunctionData("transfer", [escrowAddress, amountWei]);
+    return this.executeForwardedCall(wallet, token.address, transferCallData);
+  }
+
+  // ── Automated Escrow Withdraw (diagnostic / legacy only) ───────
+
+  async withdrawFromEscrow(tokenCode: "USDC" | "USDT", amount: string): Promise<{ txId: number; txHash: string }> {
+    const wallet = this.requireWallet();
+    const automatedEscrowAddress = await this.ensureAutomatedEscrowAddress();
+
+    const token = TOKENS[tokenCode];
+    const amountWei = ethers.parseUnits(amount, token.decimals);
+
+    // Build withdraw calldata
+    const iface = new ethers.Interface(["function withdraw(address token, uint256 amount) returns (bool)"]);
+    const callData = iface.encodeFunctionData("withdraw", [token.address, amountWei]);
+    return this.executeForwardedCall(wallet, automatedEscrowAddress, callData);
   }
 
   private async pollTransaction(txId: number, timeoutMs = 120_000): Promise<string> {

@@ -1,0 +1,214 @@
+#!/usr/bin/env -S node --experimental-strip-types
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  advanceTransferFlow,
+  startTransferFlow,
+  type TransferFlowDeps,
+  type TransferFlowResult,
+  type TransferSession,
+} from "./transfer-orchestrator.ts";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const SKILL_DIR = path.join(__dirname, "..");
+const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
+
+export interface TransferRunnerOptions {
+  text: string;
+  sessionKey?: string;
+  stateDir?: string;
+  deps?: TransferFlowDeps;
+  reset?: boolean;
+}
+
+interface ParsedCliArgs {
+  text?: string;
+  textFile?: string;
+  sessionKey?: string;
+  stateDir?: string;
+  json?: boolean;
+  reset?: boolean;
+}
+
+function parseArgs(argv: string[]): ParsedCliArgs {
+  const parsed: ParsedCliArgs = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    switch (arg) {
+      case "--text":
+        parsed.text = argv[i + 1] || "";
+        i += 1;
+        break;
+      case "--text-file":
+        parsed.textFile = argv[i + 1] || "";
+        i += 1;
+        break;
+      case "--session-key":
+        parsed.sessionKey = argv[i + 1] || "";
+        i += 1;
+        break;
+      case "--state-dir":
+        parsed.stateDir = argv[i + 1] || "";
+        i += 1;
+        break;
+      case "--json":
+        parsed.json = true;
+        break;
+      case "--reset":
+        parsed.reset = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return parsed;
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf-8").trim();
+}
+
+function slugify(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "default";
+}
+
+export function resolveRunnerSessionKey(env: NodeJS.ProcessEnv = process.env, explicit?: string): string {
+  const raw = explicit
+    || env.SEND_MONEY_SESSION_ID
+    || env.OPENCLAW_SESSION_ID
+    || env.OPENCLAW_AGENT_ID
+    || env.AGENT_ID
+    || env.USER
+    || "default";
+  return slugify(raw);
+}
+
+function ensureStateDir(stateDir: string): void {
+  fs.mkdirSync(stateDir, { recursive: true });
+}
+
+export function resolveSessionStatePath(sessionKey: string, stateDir = DEFAULT_STATE_DIR): string {
+  return path.join(stateDir, `${slugify(sessionKey)}.json`);
+}
+
+export function loadSessionState(filePath: string): TransferSession | undefined {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as TransferSession;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveSessionState(filePath: string, session: TransferSession): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2) + "\n");
+}
+
+function looksLikeNewTransferTurn(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    /\bi wanna send money\b/,
+    /\bsend money to\b/,
+    /\btransfer to\b/,
+    /\bpay\b/,
+    /\bsend\s+[\d€$]/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function shouldStartFreshSession(session: TransferSession | undefined, text: string, reset = false): boolean {
+  if (reset || !session) return true;
+  if (session.status === "completed" || session.status === "cancelled") return true;
+  if (!looksLikeNewTransferTurn(text)) return false;
+
+  const stickyStages = new Set<TransferSession["stage"]>([
+    "awaiting_confirmation",
+    "awaiting_new_price_confirmation",
+    "awaiting_receipt_confirmation",
+    "awaiting_release_completion",
+  ]);
+
+  return !stickyStages.has(session.stage);
+}
+
+function shouldDeleteSessionState(session: TransferSession): boolean {
+  return session.status === "completed" || session.status === "cancelled";
+}
+
+export function formatTransferRunnerOutput(result: TransferFlowResult): string {
+  let output = result.reply.trim();
+  if (result.options?.length) {
+    output += `\n\n${result.options.map((option) => `• ${option}`).join("\n")}`;
+  }
+  return output;
+}
+
+export async function runTransferTurn(options: TransferRunnerOptions): Promise<TransferFlowResult> {
+  const sessionKey = resolveRunnerSessionKey(process.env, options.sessionKey);
+  const stateDir = options.stateDir || DEFAULT_STATE_DIR;
+  ensureStateDir(stateDir);
+  const statePath = resolveSessionStatePath(sessionKey, stateDir);
+  const existingSession = options.reset ? undefined : loadSessionState(statePath);
+  const startFresh = shouldStartFreshSession(existingSession, options.text, options.reset);
+
+  const result = startFresh
+    ? await startTransferFlow(options.text, options.deps)
+    : await advanceTransferFlow(existingSession!, options.text, options.deps);
+
+  if (shouldDeleteSessionState(result.session)) {
+    fs.rmSync(statePath, { force: true });
+  } else {
+    saveSessionState(statePath, result.session);
+  }
+
+  return result;
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const stdinText = await readStdin();
+  const text = (args.textFile
+    ? fs.readFileSync(args.textFile, "utf-8")
+    : args.text) || stdinText;
+
+  if (!text?.trim()) {
+    console.error("send-money runner requires turn text via --text, --text-file, or stdin.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = await runTransferTurn({
+    text: text.trim(),
+    sessionKey: args.sessionKey,
+    stateDir: args.stateDir,
+    reset: args.reset,
+  });
+
+  if (args.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log(formatTransferRunnerOutput(result));
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

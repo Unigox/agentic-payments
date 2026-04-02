@@ -11,12 +11,16 @@ import { validatePaymentDetailInput } from "./unigox-client.ts";
 import type {
   CurrencyPaymentData,
   DepositFlowSelection,
+  InitiatorTradeSummary,
+  KycVerificationData,
   NetworkFieldConfig,
+  PartnerPaymentDetailsDiffData,
   PaymentDetail,
   PreflightQuote,
   ResolvedPaymentMethodFieldConfig,
   SupportedDepositAssetOption,
   TradeRequest,
+  UserProfile,
   WalletBalance,
 } from "./unigox-client.ts";
 import type { TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
@@ -519,15 +523,27 @@ async function stubGetPaymentMethodFieldConfig(params: {
 function makeClient(options: {
   balance?: number;
   balances?: Partial<Record<"USDC" | "USDT", number>>;
-  waitMode?: "matched" | "no_match" | "timeout";
+  paymentDetails?: PaymentDetail[];
+  initiatorTrades?: InitiatorTradeSummary[];
+  waitMode?: "matched" | "no_match" | "timeout" | "new_price";
   matchedTradeStatus?: string;
   getTradeStatuses?: string[];
+  tradeOverrides?: Record<string, unknown>;
+  tradeRequestOverrides?: Partial<TradeRequest>;
+  fundTradeEscrowStatusAfter?: string;
+  fundTradeEscrowError?: string;
+  revalidateTradeStatusAfter?: string;
+  partnerPaymentDetailsDiff?: PartnerPaymentDetailsDiffData;
   confirmFiatReceivedStatus?: string;
   confirmFiatReceivedError?: string;
   username?: string;
   depositOptions?: SupportedDepositAssetOption[];
   preflightQuote?: Partial<PreflightQuote>;
   preflightQuotesByAsset?: Partial<Record<"USDC" | "USDT", Partial<PreflightQuote> | null>>;
+  profile?: Partial<UserProfile>;
+  kycStatus?: KycVerificationData;
+  initializeKycResponse?: KycVerificationData;
+  createTradeRequestError?: string;
 } = {}): TransferExecutionClient & {
   calls: string[];
   lastCreateTradeRequestParams?: {
@@ -547,18 +563,35 @@ function makeClient(options: {
   const usdcBalance = options.balances?.USDC ?? options.balance ?? 1000;
   const usdtBalance = options.balances?.USDT ?? 0;
   const totalBalance = usdcBalance + usdtBalance;
+  const paymentDetails = options.paymentDetails ?? [];
+  const initiatorTrades = options.initiatorTrades ?? [];
   const waitMode = options.waitMode ?? "matched";
   const username = options.username ?? "grape404";
   const depositOptions = options.depositOptions ?? DEPOSIT_OPTIONS;
+  const profile: UserProfile = {
+    user_id: 42,
+    evm_address: "0xprofile",
+    username,
+    first_name: undefined,
+    last_name: undefined,
+    kyc_country_code: undefined,
+    id_verification_status: "NOT_VERIFIED",
+    total_traded_volume_usd: 0,
+    ...options.profile,
+    username,
+  };
   let currentTradeStatus = options.matchedTradeStatus ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
   const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
+  const fundTradeEscrowStatusAfter = options.fundTradeEscrowStatusAfter ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
+  const revalidateTradeStatusAfter = options.revalidateTradeStatusAfter ?? "awaiting_escrow_funding_by_seller";
+  const partnerPaymentDetailsDiff = options.partnerPaymentDetailsDiff;
   let tradeStatusIndex = 0;
 
   const client: TransferExecutionClient & { calls: string[]; lastCreateTradeRequestParams?: any } = {
     calls,
     async getProfile() {
       calls.push("getProfile");
-      return { username };
+      return { ...profile };
     },
     async getWalletBalance(): Promise<WalletBalance> {
       calls.push("getWalletBalance");
@@ -572,9 +605,29 @@ function makeClient(options: {
         ],
       };
     },
+    async listPaymentDetails(): Promise<PaymentDetail[]> {
+      calls.push("listPaymentDetails");
+      return paymentDetails;
+    },
+    async listInitiatorTrades() {
+      calls.push("listInitiatorTrades");
+      return initiatorTrades;
+    },
     async ensurePaymentDetail(): Promise<PaymentDetail> {
       calls.push("ensurePaymentDetail");
       return { id: 9001, fiat_currency_code: "EUR", details: {} } as PaymentDetail;
+    },
+    async getKycVerificationStatus(): Promise<KycVerificationData> {
+      calls.push("getKycVerificationStatus");
+      return options.kycStatus ?? { status: "not_started" };
+    },
+    async initializeKycVerification(params: { fullName: string; country: string }): Promise<KycVerificationData> {
+      calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+      return options.initializeKycResponse ?? {
+        status: "initial",
+        verification_url: "https://verify.example/kyc-session",
+        verification_seconds_left: 900,
+      };
     },
     async getPreflightQuote(params): Promise<PreflightQuote | undefined> {
       const assetCode = (params.cryptoCurrencyCode || "USDC") as "USDC" | "USDT";
@@ -599,8 +652,11 @@ function makeClient(options: {
     },
     async createTradeRequest(params): Promise<TradeRequest> {
       calls.push("createTradeRequest");
+      if (options.createTradeRequestError) {
+        throw new Error(options.createTradeRequestError);
+      }
       client.lastCreateTradeRequestParams = params;
-      return { id: 7001, status: "created", trade_type: "SELL" } as TradeRequest;
+      return { id: 7001, status: "created", trade_type: "SELL", ...options.tradeRequestOverrides } as TradeRequest;
     },
     async waitForTradeMatch(): Promise<TradeRequest> {
       calls.push("waitForTradeMatch");
@@ -610,6 +666,24 @@ function makeClient(options: {
           status: "accepted_by_vendor",
           trade_type: "SELL",
           trade: { id: 8801, status: currentTradeStatus },
+          ...options.tradeRequestOverrides,
+        } as TradeRequest;
+      }
+      if (waitMode === "new_price") {
+        return {
+          id: 7001,
+          status: "new_price_confirming_by_initiator",
+          trade_type: "SELL",
+          fiat_currency_code: "EUR",
+          crypto_currency_code: "USDT",
+          fiat_amount: 40.82,
+          total_crypto_amount: 50,
+          best_deal_fiat_amount: 50,
+          best_deal_crypto_amount: 60.795681,
+          vendor_offer_rate: 0.8164,
+          payment_method_name: "Wise",
+          payment_network_name: "European Transfer (SEPA)",
+          ...options.tradeRequestOverrides,
         } as TradeRequest;
       }
       if (waitMode === "no_match") {
@@ -619,14 +693,100 @@ function makeClient(options: {
     },
     async getTradeRequest(): Promise<TradeRequest> {
       calls.push("getTradeRequest");
-      return { id: 7001, status: waitMode === "matched" ? "accepted_by_vendor" : "created", trade_type: "SELL", trade: { id: 8801, status: currentTradeStatus } } as TradeRequest;
+      return {
+        id: 7001,
+        status: waitMode === "matched"
+          ? "accepted_by_vendor"
+          : waitMode === "new_price"
+            ? "new_price_confirming_by_initiator"
+            : "created",
+        trade_type: "SELL",
+        trade: { id: 8801, status: currentTradeStatus },
+        fiat_currency_code: "EUR",
+        crypto_currency_code: "USDT",
+        fiat_amount: 40.82,
+        total_crypto_amount: 50,
+        best_deal_fiat_amount: 50,
+        best_deal_crypto_amount: 60.795681,
+        vendor_offer_rate: 0.8164,
+        payment_method_name: "Wise",
+        payment_network_name: "European Transfer (SEPA)",
+        ...options.tradeRequestOverrides,
+      } as TradeRequest;
+    },
+    async confirmTradeRequestPrice(): Promise<TradeRequest> {
+      calls.push("confirmTradeRequestPrice");
+      return {
+        id: 7001,
+        status: "accepted_by_vendor",
+        trade_type: "SELL",
+        trade: { id: 8801, status: currentTradeStatus },
+        ...options.tradeRequestOverrides,
+      } as TradeRequest;
+    },
+    async refuseTradeRequestPrice(): Promise<TradeRequest> {
+      calls.push("refuseTradeRequestPrice");
+      return {
+        id: 7001,
+        status: "new_price_refused_by_initiator",
+        trade_type: "SELL",
+        ...options.tradeRequestOverrides,
+      } as TradeRequest;
     },
     async getTrade() {
       calls.push("getTrade");
       const next = tradeStatuses[Math.min(tradeStatusIndex, tradeStatuses.length - 1)] || currentTradeStatus;
       tradeStatusIndex += 1;
       currentTradeStatus = next;
-      return { id: 8801, status: currentTradeStatus, payment_window_seconds_left: 900, claim_autorelease_seconds_left: 1800 };
+      return {
+        id: 8801,
+        status: currentTradeStatus,
+        escrow_address: "0xEscrowAddress0000000000000000000000000000001",
+        payment_window_seconds_left: 900,
+        claim_autorelease_seconds_left: 1800,
+        ...options.tradeOverrides,
+      };
+    },
+    async getPartnerPaymentDetailsDiff() {
+      calls.push("getPartnerPaymentDetailsDiff");
+      if (!partnerPaymentDetailsDiff) {
+        return {
+          payment_details_id: 9001,
+          differences: {
+            missing_fields: [],
+            invalid_fields: [],
+          },
+        };
+      }
+      return partnerPaymentDetailsDiff;
+    },
+    async createOrUpdatePartnerPaymentDetails(params: { internalDetailsId: number; partner: string; details: Record<string, string> }) {
+      calls.push(`createOrUpdatePartnerPaymentDetails:${params.internalDetailsId}:${params.partner}`);
+      return {
+        internal_details_id: params.internalDetailsId,
+        partner: params.partner,
+        details: params.details,
+      };
+    },
+    async revalidateTradePaymentDetails() {
+      calls.push("revalidateTradePaymentDetails");
+      currentTradeStatus = revalidateTradeStatusAfter;
+      tradeStatuses.push(currentTradeStatus);
+      return {
+        trade: {
+          id: 8801,
+          status: currentTradeStatus,
+        },
+      };
+    },
+    async fundTradeEscrow(tokenCode: "USDC" | "USDT", amount: string, escrowAddress: string) {
+      calls.push(`fundTradeEscrow:${tokenCode}:${amount}:${escrowAddress}`);
+      if (options.fundTradeEscrowError) {
+        throw new Error(options.fundTradeEscrowError);
+      }
+      currentTradeStatus = fundTradeEscrowStatusAfter;
+      tradeStatuses.push(currentTradeStatus);
+      return { txId: 5001, txHash: "0xescrowfunded" };
     },
     async confirmFiatReceived() {
       calls.push("confirmFiatReceived");
@@ -668,6 +828,7 @@ function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient
     authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: true },
     client,
     waitForSettlementTimeoutMs: 1,
+    receiptConfirmationHandoffTimeoutMs: 1,
     settlementPollIntervalMs: 1,
     getPaymentMethodsForCurrency: stubGetPaymentMethodsForCurrency,
     getPaymentMethodFieldConfig: stubGetPaymentMethodFieldConfig,
@@ -720,13 +881,375 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.ok(res.events.some((event) => event.type === "trade_request_created"));
   assert.ok(res.events.some((event) => event.type === "trade_matched"));
   assert.ok(res.events.some((event) => event.type === "settlement_monitor_started"));
-  assert.match(res.reply, /keep escrow locked/i);
-  assert.deepEqual(client.calls.slice(0, 10), ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:50", "getPreflightQuote:USDT:50", "createTradeRequest", "waitForTradeMatch", "getTradeRequest", "getTrade"]);
+  assert.match(res.reply, /The transfer is live and escrow is funded/i);
+  assert.doesNotMatch(res.reply, /Trade request #|trade #|Vendor:/i);
+  assert.deepEqual(client.calls.slice(0, 8), [
+    "getProfile",
+    "getWalletBalance",
+    "listInitiatorTrades",
+    "getProfile",
+    "getWalletBalance",
+    "ensurePaymentDetail",
+    "getPreflightQuote:USDC:50",
+    "getPreflightQuote:USDT:50",
+  ]);
+  assert.ok(client.calls.includes("createTradeRequest"));
+  assert.ok(client.calls.includes("waitForTradeMatch"));
+  assert.ok(client.calls.includes("getTrade"));
 
   const contacts = JSON.parse(fs.readFileSync(file, "utf-8"));
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.methodSlug, "revolut");
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.networkSlug, "revolut-username");
   assert.equal(contacts.contacts["john-doe"].paymentMethods.EUR.details.revtag, "john_doe");
+});
+
+test("matched trade with seller-side funding required auto-funds escrow before settlement monitoring", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    matchedTradeStatus: "trade_created",
+    tradeOverrides: {
+      possible_actions: ["action_fund_escrow"],
+    },
+    preflightQuotesByAsset: {
+      USDC: null,
+      USDT: {
+        cryptoCurrencyCode: "USDT",
+        totalCryptoAmount: 60.768185,
+        feeCryptoAmount: 0.302329,
+        vendorOfferRate: 0.822799,
+        paymentMethodName: "Wise",
+        paymentNetworkName: "SEPA / IBAN",
+      },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.ok(res.events.some((event) => event.type === "escrow_funding_submitted"));
+  assert.ok(client.calls.includes("createTradeRequest"));
+  assert.ok(client.calls.includes("waitForTradeMatch"));
+  assert.ok(client.calls.includes("fundTradeEscrow:USDT:60.768185:0xEscrowAddress0000000000000000000000000000001"));
+  assert.match(res.reply, /The transfer is live and escrow is funded/i);
+  assert.doesNotMatch(res.reply, /Trade request #|trade #|Vendor:/i);
+});
+
+test("matched partner trade collects partner address fields, revalidates, and then funds escrow", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    matchedTradeStatus: "trade_created",
+    tradeOverrides: {
+      partner_short_name: "switch",
+      partner_details_checked_at: null,
+      total_crypto_amount: 60.740716,
+    },
+    partnerPaymentDetailsDiff: {
+      payment_details_id: 9001,
+      differences: {
+        missing_fields: [
+          { partner_field_name: "holder_city" },
+          { partner_field_name: "holder_postal_code" },
+          { partner_field_name: "holder_street" },
+        ],
+        invalid_fields: [],
+      },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_partner_payment_details_input");
+  assert.ok(client.calls.includes("getPartnerPaymentDetailsDiff"));
+  assert.match(res.reply, /Holder city/i);
+  assert.match(res.reply, /Just send me the city name/i);
+  assert.doesNotMatch(res.reply, /field: value/i);
+  assert.ok(!client.calls.includes("createOrUpdatePartnerPaymentDetails:9001:switch"));
+
+  res = await advanceTransferFlow(res.session, "Brussels", deps);
+  assert.equal(res.session.stage, "awaiting_partner_payment_details_input");
+  assert.match(res.reply, /Holder postal code/i);
+  assert.match(res.reply, /Just send me the postal code/i);
+
+  res = await advanceTransferFlow(res.session, "1000", deps);
+  assert.equal(res.session.stage, "awaiting_partner_payment_details_input");
+  assert.match(res.reply, /Holder street/i);
+  assert.match(res.reply, /Just send me the street address/i);
+
+  res = await advanceTransferFlow(res.session, "Rue de la Loi 1", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.ok(client.calls.includes("createOrUpdatePartnerPaymentDetails:9001:switch"));
+  assert.ok(client.calls.includes("revalidateTradePaymentDetails"));
+  assert.ok(client.calls.includes("fundTradeEscrow:USDC:60.740716:0xEscrowAddress0000000000000000000000000000001"));
+  assert.match(res.reply, /The transfer is live and escrow is funded/i);
+  assert.doesNotMatch(res.reply, /Trade request #|trade #|Vendor:/i);
+});
+
+test("after escrow funding the skill keeps watching until it can ask for receipt confirmation", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    matchedTradeStatus: "trade_created",
+    getTradeStatuses: [
+      "trade_created",
+      "awaiting_escrow_funding_by_seller",
+      "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer",
+      "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer",
+      "fiat_payment_proof_submitted_by_buyer",
+    ],
+    tradeOverrides: {
+      partner_short_name: "switch",
+      partner_details_checked_at: null,
+      total_crypto_amount: 60.740716,
+    },
+    partnerPaymentDetailsDiff: {
+      payment_details_id: 9001,
+      differences: {
+        missing_fields: [
+          { partner_field_name: "holder_city" },
+          { partner_field_name: "holder_postal_code" },
+          { partner_field_name: "holder_street" },
+        ],
+        invalid_fields: [],
+      },
+    },
+  });
+  const deps = makeDeps(file, client, {
+    waitForSettlementTimeoutMs: 10,
+    receiptConfirmationHandoffTimeoutMs: 20,
+    settlementPollIntervalMs: 1,
+  });
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  res = await advanceTransferFlow(res.session, "Tallinn", deps);
+  res = await advanceTransferFlow(res.session, "13511", deps);
+  res = await advanceTransferFlow(res.session, "Oismae tee 140", deps);
+
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
+  assert.ok(client.calls.includes("fundTradeEscrow:USDC:60.740716:0xEscrowAddress0000000000000000000000000000001"));
+  assert.match(res.reply, /Please let me know once you receive the payment/i);
+  assert.match(res.reply, /on the way from the counterparty bank/i);
+});
+
+test("matched partner trade with required partner fields stays blocked before funding", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    matchedTradeStatus: "trade_created",
+    tradeOverrides: {
+      partner_short_name: "switch",
+      partner_details_checked_at: null,
+    },
+    partnerPaymentDetailsDiff: {
+      payment_details_id: 9001,
+      differences: {
+        missing_fields: [
+          { partner_field_name: "holder_city", required: true },
+        ],
+        invalid_fields: [],
+      },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_partner_payment_details_input");
+  assert.match(res.reply, /holder city/i);
+  assert.ok(!client.calls.includes("revalidateTradePaymentDetails"));
+  assert.ok(!client.calls.some((call) => call.startsWith("fundTradeEscrow:")));
+});
+
+test("new vendor price requires explicit confirmation before funding", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    waitMode: "new_price",
+    matchedTradeStatus: "trade_created",
+    tradeOverrides: {
+      possible_actions: ["action_fund_escrow"],
+    },
+    preflightQuotesByAsset: {
+      USDC: null,
+      USDT: {
+        cryptoCurrencyCode: "USDT",
+        totalCryptoAmount: 60.795681,
+        feeCryptoAmount: 0.3025,
+        vendorOfferRate: 0.822427,
+        paymentMethodName: "Wise",
+        paymentNetworkName: "European Transfer (SEPA)",
+      },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_new_price_confirmation");
+  assert.match(res.reply, /original quote is no longer available/i);
+  assert.match(res.reply, /40\.82 EUR/i);
+  assert.match(res.reply, /50 USDT/i);
+  assert.match(res.reply, /I have not funded escrow/i);
+  assert.ok(res.events.some((event) => event.type === "trade_price_changed"));
+  assert.ok(!client.calls.some((call) => call.startsWith("fundTradeEscrow:")));
+
+  res = await advanceTransferFlow(res.session, "confirm new price", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.ok(client.calls.includes("confirmTradeRequestPrice"));
+  assert.ok(client.calls.includes("fundTradeEscrow:USDT:60.795681:0xEscrowAddress0000000000000000000000000000001"));
+  assert.match(res.reply, /The transfer is live and escrow is funded/i);
+});
+
+test("new vendor price can be cancelled cleanly", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    waitMode: "new_price",
+    preflightQuotesByAsset: {
+      USDC: null,
+      USDT: {
+        cryptoCurrencyCode: "USDT",
+        totalCryptoAmount: 60.795681,
+        feeCryptoAmount: 0.3025,
+        vendorOfferRate: 0.822427,
+        paymentMethodName: "Wise",
+        paymentNetworkName: "European Transfer (SEPA)",
+      },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to aleksandr", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_new_price_confirmation");
+
+  res = await advanceTransferFlow(res.session, "cancel", deps);
+  assert.equal(res.session.stage, "awaiting_no_match_resolution");
+  assert.ok(client.calls.includes("refuseTradeRequestPrice"));
+  assert.match(res.reply, /cancelled that updated quote/i);
 });
 
 test("stale saved contact gets revalidated, updated, and then used", async () => {
@@ -771,7 +1294,7 @@ test("stale saved contact gets revalidated, updated, and then used", async () =>
   assert.equal(contacts.contacts.mom.paymentMethods.EUR.details.revtag, "mom_ok");
 });
 
-test("saved contact partial name resolves to the full contact and defaults the single saved route", async () => {
+test("saved contact partial name asks for confirmation before using the saved route", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       aleksandr: {
@@ -795,17 +1318,956 @@ test("saved contact partial name resolves to the full contact and defaults the s
   const client = makeClient();
   const deps = makeDeps(file, client);
 
-  const res = await startTransferFlow("saved contact Aleksandr", deps);
+  let res = await startTransferFlow("saved contact Aleksandr", deps);
 
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.equal(res.session.pendingSavedRecipientConfirmation?.match.contact.name, "Aleksandr Example");
+  assert.match(res.reply, /I think you mean saved contact for Aleksandr Example/i);
+  assert.match(res.reply, /Should I use that saved recipient\?/i);
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
   assert.equal(res.session.stage, "awaiting_amount");
   assert.equal(res.session.recipientName, "Aleksandr Example");
   assert.equal(res.session.currency, "EUR");
   assert.equal(res.session.payment?.methodSlug, "revolut");
   assert.equal(res.session.payment?.networkSlug, "revolut-username");
-  assert.match(res.reply, /I found saved contact Aleksandr Example/i);
+  assert.match(res.reply, /Okay — I’ll use the saved contact Aleksandr Example/i);
   assert.match(res.reply, /saved EUR via Revolut \/ Revolut Username payout route by default/i);
   assert.match(res.reply, /How much EUR should I send to Aleksandr Example\?/i);
   assert.doesNotMatch(res.reply, /What currency should the recipient receive/i);
+});
+
+test("remote saved UNIGOX payout details resolve directly when the send amount is already specified", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 51.5, feeCryptoAmount: 0.5, vendorOfferRate: 0.97 },
+      USDT: { totalCryptoAmount: 50.9, feeCryptoAmount: 0.4, vendorOfferRate: 0.98 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 50 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.recipientName, "Aleksandr Example");
+  assert.equal(res.session.currency, "EUR");
+  assert.equal(res.session.payment?.methodSlug, "wise");
+  assert.equal(res.session.payment?.networkSlug, "iban-sepa");
+  assert.match(res.reply, /signed in as @grape404/i);
+  assert.match(res.reply, /I found saved UNIGOX payout details for Aleksandr Example/i);
+  assert.match(res.reply, /saved EUR via Wise \/ European Transfer \(SEPA\) payout route by default/i);
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+  assert.ok(client.calls.includes("listPaymentDetails"));
+});
+
+test("fresh transfer flow gently reminds about an older action-required trade once", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    initiatorTrades: [
+      {
+        id: 7098,
+        status: "fiat_payment_proof_submitted_by_buyer",
+        fiat_amount: 50,
+        fiat_currency_code: "EUR",
+        status_changed_at: "2026-03-27T01:02:03.000Z",
+        initiator_payment_details: {
+          id: 3413,
+          details: { full_name: "Aleksandr Example" },
+          payment_method_name: "Wise",
+          payment_network_name: "European Transfer (SEPA)",
+        },
+      },
+    ],
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("Hey I want to make a transfer", deps);
+  assert.equal(res.session.stage, "awaiting_recipient_mode");
+  assert.match(res.reply, /By the way, your earlier 50 EUR transfer to Aleksandr Example may already have arrived or still be on the way from the counterparty bank\./i);
+  assert.match(res.reply, /Did Aleksandr Example receive it already\?/i);
+  assert.ok(client.calls.includes("listInitiatorTrades"));
+
+  res = await advanceTransferFlow(res.session, "saved contact Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.doesNotMatch(res.reply, /Did Aleksandr Example receive it already\?/i);
+  assert.match(res.reply, /Should I use that saved recipient\?/i);
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.match(res.reply, /How much EUR should I send to Aleksandr Example/i);
+});
+
+test("receipt confirmation on an older startup reminder executes confirm-payment and resumes the new transfer", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["aleksandr"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 1,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    initiatorTrades: [
+      {
+        id: 7098,
+        status: "fiat_payment_proof_submitted_by_buyer",
+        fiat_amount: 50,
+        fiat_currency_code: "EUR",
+        status_changed_at: "2026-03-27T01:02:03.000Z",
+        initiator_payment_details: {
+          id: 3413,
+          details: { full_name: "Aleksandr Example" },
+          payment_method_name: "Wise",
+          payment_network_name: "European Transfer (SEPA)",
+        },
+      },
+    ],
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("I wanna send money to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.match(res.reply, /Did Aleksandr Example receive it already\?/i);
+  assert.match(res.reply, /Should I use that saved recipient\?/i);
+
+  res = await advanceTransferFlow(res.session, "Yes money arrived", deps);
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.match(res.reply, /I confirmed receipt for 50 EUR to Aleksandr Example/i);
+  assert.match(res.reply, /Should I use that saved recipient\?/i);
+  assert.ok(client.calls.includes("confirmFiatReceived"));
+  assert.doesNotMatch(res.reply, /Did Aleksandr Example receive it already\?/i);
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.match(res.reply, /How much EUR should I send to Aleksandr Example\?/i);
+});
+
+test("follow-up transfer flow confirms a fuzzy saved-recipient match before continuing", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 51.5, feeCryptoAmount: 0.5, vendorOfferRate: 0.97 },
+      USDT: { totalCryptoAmount: 50.9, feeCryptoAmount: 0.4, vendorOfferRate: 0.98 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("I wanna send money to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.equal(res.session.pendingSavedRecipientConfirmation?.match.contact.name, "Aleksandr Example");
+  assert.match(res.reply, /I think you mean saved UNIGOX payout details for Aleksandr Example/i);
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.equal(res.session.recipientName, "Aleksandr Example");
+  assert.equal(res.session.contactExists, true);
+  assert.equal(res.session.currency, "EUR");
+  assert.equal(res.session.payment?.methodSlug, "wise");
+  assert.equal(res.session.payment?.networkSlug, "iban-sepa");
+  assert.match(res.reply, /Okay — I’ll use saved UNIGOX payout details for Aleksandr Example/i);
+  assert.match(res.reply, /How much EUR should I send to Aleksandr Example\?/i);
+
+  res = await advanceTransferFlow(res.session, "50 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.recipientName, "Aleksandr Example");
+  assert.equal(res.session.contactExists, true);
+  assert.equal(res.session.currency, "EUR");
+  assert.equal(res.session.payment?.methodSlug, "wise");
+  assert.equal(res.session.payment?.networkSlug, "iban-sepa");
+  assert.match(res.reply, /Send 50 EUR to Aleksandr Example via Wise via European Transfer \(SEPA\)\?/i);
+  assert.match(res.reply, /Recipient details:/i);
+  assert.match(res.reply, /Full name: Aleksandr Example/i);
+  assert.match(res.reply, /IBAN: EE382200221020145685/i);
+  assert.doesNotMatch(res.reply, /full_name=/i);
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+  assert.ok(client.calls.filter((call) => call === "listPaymentDetails").length >= 1);
+});
+
+test("fuzzy typo in a saved UNIGOX payout recipient asks for confirmation before continuing", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("I wanna send money to Aleksadr", deps);
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.equal(res.session.pendingSavedRecipientConfirmation?.matchedBy, "fuzzy");
+  assert.match(res.reply, /I think you mean saved UNIGOX payout details for Aleksandr Example/i);
+
+  res = await advanceTransferFlow(res.session, "yes", deps);
+  assert.equal(res.session.stage, "awaiting_amount");
+  assert.equal(res.session.recipientName, "Aleksandr Example");
+  assert.match(res.reply, /How much EUR should I send to Aleksandr Example\?/i);
+});
+
+test("preflight KYC gating blocks before confirmation and asks only for the full legal name first", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+  assert.equal(res.session.status, "blocked");
+  assert.match(res.reply, /UNIGOX needs KYC first/i);
+  assert.match(res.reply, /1\. You give me your full name and country\./i);
+  assert.match(res.reply, /2\. I give you a secure link for the third-party KYC service\./i);
+  assert.match(res.reply, /You can also complete the same KYC directly in the UNIGOX website or app if you prefer\./i);
+  assert.match(res.reply, /First, what full legal name should I use for the verification\?/i);
+  assert.ok(client.calls.includes("getProfile"));
+  assert.ok(client.calls.includes("getKycVerificationStatus"));
+  assert.ok(!client.calls.includes("createTradeRequest"));
+});
+
+test("preflight KYC gating asks only for country when the full name is already known", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_country");
+  assert.equal(res.session.auth.kycFullName, "Alex Grape");
+  assert.match(res.reply, /Which country should I use for KYC\?/i);
+  assert.match(res.reply, /Send the country name or the 2-letter country code/i);
+  assert.ok(!client.calls.includes("createTradeRequest"));
+});
+
+test("known KYC name and country start the verification link and resume after approval", async () => {
+  const { file } = makeTempContactsFile();
+  let verificationState: KycVerificationData = {
+    status: "not_started",
+  };
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    client.calls.push(`getKycVerificationStatus:${verificationState.status}`);
+    return verificationState;
+  };
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    verificationState = {
+      status: "in_progress",
+      verification_url: "https://verify.example/kyc-session",
+      verification_seconds_left: 900,
+    };
+    return verificationState;
+  };
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
+  assert.match(res.reply, /You can also complete the same KYC directly from the UNIGOX website or app/i);
+  assert.doesNotMatch(res.reply, /You give me your full name and country/i);
+  assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
+  assert.ok(!client.calls.includes("createTradeRequest"));
+
+  verificationState = {
+    status: "VERIFIED",
+    verification_url: "https://verify.example/kyc-session",
+  };
+
+  res = await advanceTransferFlow(res.session, "done", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.status, "active");
+  assert.match(res.reply, /KYC is approved now\./i);
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+  assert.ok(!client.calls.includes("createTradeRequest"));
+});
+
+test("verified profile is not downgraded by a stale active KYC session", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "VERIFIED",
+      total_traded_volume_usd: 58,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+    kycStatus: {
+      status: "initial",
+      verification_url: "https://verify.example/stale-session",
+      verification_seconds_left: 900,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 85.3, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+      USDT: { totalCryptoAmount: 84.7, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 70 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.status, "active");
+  assert.equal(res.session.auth.kycStatus, "VERIFIED");
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+  assert.doesNotMatch(res.reply, /KYC needs/i);
+});
+
+test("awaiting_kyc_completion trusts verified profile even if /kyc still looks active", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "VERIFIED",
+      total_traded_volume_usd: 58,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+    kycStatus: {
+      status: "initial",
+      verification_url: "https://verify.example/stale-session",
+      verification_seconds_left: 900,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 85.3, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+      USDT: { totalCryptoAmount: 84.7, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 70 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  res.session.stage = "awaiting_kyc_completion";
+
+  res = await advanceTransferFlow(res.session, "KYC is approved", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.status, "active");
+  assert.equal(res.session.auth.kycStatus, "VERIFIED");
+  assert.match(res.reply, /KYC is approved now\./i);
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+});
+
+test("existing active KYC verification link is reused instead of asking for KYC details again", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: null,
+      last_name: null,
+      kyc_country_code: null,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 85.3, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+      USDT: { totalCryptoAmount: 84.7, feeCryptoAmount: 0.42, vendorOfferRate: 0.828 },
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    client.calls.push("getKycVerificationStatus:existing_link");
+    return {
+      status: "initial",
+      verification_url: "https://verify.example/existing-session",
+      verification_seconds_left: 900,
+    };
+  };
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 70 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/existing-session/i);
+  assert.doesNotMatch(res.reply, /what full legal name should I use/i);
+  assert.doesNotMatch(res.reply, /Which country should I use for KYC\?/i);
+  assert.doesNotMatch(res.reply, /You give me your full name and country/i);
+  assert.ok(!client.calls.some((call) => call.startsWith("initializeKycVerification:")));
+});
+
+test("combined KYC full-name and country reply starts verification in one turn", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+
+  res = await advanceTransferFlow(
+    res.session,
+    "My full legal name is Alex Grape and my country is Estonia",
+    deps
+  );
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.equal(res.session.auth.kycFullName, "Alex Grape");
+  assert.equal(res.session.auth.kycCountryCode, "EE");
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
+  assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
+});
+
+test("comma-separated KYC full-name and country reply starts verification in one turn", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+
+  res = await advanceTransferFlow(
+    res.session,
+    "Aleksandr Example, Estonia",
+    deps
+  );
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.equal(res.session.auth.kycFullName, "Aleksandr Example");
+  assert.equal(res.session.auth.kycCountryCode, "EE");
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
+  assert.ok(client.calls.includes("initializeKycVerification:Aleksandr Example:EE"));
+});
+
+test("KYC start refetches verification status so the link is returned even if the initial response omits it", async () => {
+  const { file } = makeTempContactsFile();
+  let verificationState: KycVerificationData = {
+    status: "not_started",
+  };
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    client.calls.push(`getKycVerificationStatus:${verificationState.status}`);
+    return verificationState;
+  };
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    verificationState = {
+      status: "in_progress",
+      verification_url: "https://verify.example/from-refetch",
+      verification_seconds_left: 900,
+    };
+    return {
+      status: "in_progress",
+      verification_seconds_left: 900,
+    };
+  };
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /https:\/\/verify\.example\/from-refetch/i);
+  assert.equal(res.session.auth.kycVerificationUrl, "https://verify.example/from-refetch");
+  assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
+  assert.ok(client.calls.includes("getKycVerificationStatus:in_progress"));
+});
+
+test("KYC start keeps polling until the verification link appears", async () => {
+  const { file } = makeTempContactsFile();
+  let pollCount = 0;
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    return {
+      status: "in_progress",
+      verification_seconds_left: 900,
+    };
+  };
+  client.getKycVerificationStatus = async () => {
+    pollCount += 1;
+    const response = pollCount >= 3
+      ? {
+          status: "in_progress",
+          verification_url: "https://verify.example/from-polling",
+          verification_seconds_left: 897,
+        }
+      : {
+          status: "in_progress",
+          verification_seconds_left: 900 - pollCount,
+        };
+    client.calls.push(`getKycVerificationStatus:${pollCount}:${response.verification_url ? "with_link" : "without_link"}`);
+    return response;
+  };
+  const deps = makeDeps(file, client, {
+    kycVerificationPollIntervalMs: 0,
+    kycVerificationPollTimeoutMs: 10,
+    sleep: async () => {},
+  });
+
+  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /https:\/\/verify\.example\/from-polling/i);
+  assert.equal(res.session.auth.kycVerificationUrl, "https://verify.example/from-polling");
+  assert.ok(client.calls.includes("getKycVerificationStatus:1:without_link"));
+  assert.ok(client.calls.includes("getKycVerificationStatus:2:without_link"));
+  assert.ok(client.calls.includes("getKycVerificationStatus:3:with_link"));
+});
+
+test("KYC start surfaces auth failure instead of pretending the verification link is on the way", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+    initializeKycResponse: {
+      error_key: "invalid_auth_token",
+    },
+    kycStatus: {
+      error_key: "invalid_auth_token",
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /couldn't fetch the secure verification link from chat on this machine right now/i);
+  assert.match(res.reply, /open KYC directly in the UNIGOX website or app/i);
+  assert.doesNotMatch(res.reply, /verification link is ready/i);
+  assert.doesNotMatch(res.reply, /has started the verification/i);
+});
+
+test("awaiting KYC completion keeps polling until the verification link becomes available", async () => {
+  const { file } = makeTempContactsFile();
+  let pollCount = 0;
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    pollCount += 1;
+    const response = pollCount >= 3
+      ? {
+          status: "pending",
+          verification_url: "https://verify.example/from-awaiting-completion",
+          verification_seconds_left: 500,
+        }
+      : {
+          status: "pending",
+          verification_seconds_left: 500 - pollCount,
+        };
+    client.calls.push(`getKycVerificationStatus:${pollCount}:${response.verification_url ? "with_link" : "without_link"}`);
+    return response;
+  };
+  const deps = makeDeps(file, client, {
+    kycVerificationPollIntervalMs: 0,
+    kycVerificationPollTimeoutMs: 0,
+    sleep: async () => {},
+  });
+
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    return {
+      status: "pending",
+      verification_seconds_left: 500,
+    };
+  };
+
+  const initial = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(initial.session.stage, "awaiting_kyc_completion");
+  assert.doesNotMatch(initial.reply, /https:\/\/verify\.example\/from-awaiting-completion/i);
+
+  const res = await advanceTransferFlow(initial.session, "status", {
+    ...deps,
+    kycVerificationPollTimeoutMs: 10,
+  });
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /https:\/\/verify\.example\/from-awaiting-completion/i);
+  assert.equal(res.session.auth.kycVerificationUrl, "https://verify.example/from-awaiting-completion");
+  assert.ok(client.calls.includes("getKycVerificationStatus:1:without_link"));
+  assert.ok(client.calls.includes("getKycVerificationStatus:2:without_link"));
+  assert.ok(client.calls.includes("getKycVerificationStatus:3:with_link"));
+});
+
+test("trade placement KYC failure falls back into the guided KYC flow", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 0,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 51.1, feeCryptoAmount: 0.3, vendorOfferRate: 0.823 },
+      USDT: { totalCryptoAmount: 50.8, feeCryptoAmount: 0.3, vendorOfferRate: 0.823 },
+    },
+    createTradeRequestError: "kyc_verification_needed",
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+  assert.equal(res.session.status, "blocked");
+  assert.match(res.reply, /UNIGOX needs KYC first/i);
+  assert.match(res.reply, /First, what full legal name should I use for the verification\?/i);
+  assert.ok(client.calls.includes("createTradeRequest"));
+});
+
+test("awaiting confirmation accepts natural confirm phrases with the amount", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      aleksandr: {
+        name: "Aleksandr Example",
+        aliases: ["alex", "sasha"],
+        paymentMethods: {
+          EUR: {
+            method: "Wise",
+            methodId: 9,
+            methodSlug: "wise",
+            networkId: 48,
+            network: "European Transfer (SEPA)",
+            networkSlug: "iban-sepa",
+            details: { iban: "EE382200221020145685", full_name: "Aleksandr Example" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 71 },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 51.5, feeCryptoAmount: 0.5, vendorOfferRate: 0.97 },
+      USDT: { totalCryptoAmount: 50.9, feeCryptoAmount: 0.4, vendorOfferRate: 0.98 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 50 EUR to Aleksandr Example", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /Reply 'confirm' to place the trade/i);
+
+  res = await advanceTransferFlow(res.session, "Confirm send 50", deps);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.equal(res.session.status, "active");
+  assert.ok(res.events.some((event) => event.type === "trade_request_created"));
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoCurrencyCode, "USDT");
 });
 
 test("saved contact partial name asks for disambiguation when multiple contacts match", async () => {
@@ -974,7 +2436,16 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   assert.match(res.reply, /How would you like to top up the wallet/i);
   assert.match(res.reply, /Another UNIGOX user sends funds directly to your username/i);
   assert.match(res.reply, /External \/ on-chain deposit/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:25", "getPreflightQuote:USDT:25"]);
+  assert.deepEqual(client.calls, [
+    "getProfile",
+    "getWalletBalance",
+    "listInitiatorTrades",
+    "getProfile",
+    "getWalletBalance",
+    "ensurePaymentDetail",
+    "getPreflightQuote:USDC:25",
+    "getPreflightQuote:USDT:25",
+  ]);
 });
 
 test("internal UNIGOX top-up shows username and skips token-chain questions", async () => {
@@ -1014,7 +2485,17 @@ test("internal UNIGOX top-up shows username and skips token-chain questions", as
   assert.match(res.reply, /not a locked quote/i);
   assert.doesNotMatch(res.reply, /Which token do you want to deposit/i);
   assert.doesNotMatch(res.reply, /Which network should I use/i);
-  assert.deepEqual(client.calls, ["getProfile", "getWalletBalance", "getWalletBalance", "ensurePaymentDetail", "getPreflightQuote:USDC:25", "getPreflightQuote:USDT:25"]);
+  assert.deepEqual(client.calls, [
+    "getProfile",
+    "getWalletBalance",
+    "listInitiatorTrades",
+    "getProfile",
+    "getWalletBalance",
+    "ensurePaymentDetail",
+    "getPreflightQuote:USDC:25",
+    "getPreflightQuote:USDT:25",
+    "getProfile",
+  ]);
 });
 
 test("external top-up keeps token then chain then single-address flow", async () => {
@@ -1062,6 +2543,8 @@ test("external top-up keeps token then chain then single-address flow", async ()
   assert.deepEqual(client.calls, [
     "getProfile",
     "getWalletBalance",
+    "listInitiatorTrades",
+    "getProfile",
     "getWalletBalance",
     "ensurePaymentDetail",
     "getPreflightQuote:USDC:25",
@@ -1248,7 +2731,11 @@ test("received confirmation uses confirm-payment and moves to release monitoring
   });
   const client = makeClient({
     matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
-    getTradeStatuses: ["fiat_payment_proof_submitted_by_buyer", "fiat_payment_confirmed_by_seller_escrow_release_started"],
+    getTradeStatuses: [
+      "fiat_payment_proof_submitted_by_buyer",
+      "fiat_payment_proof_submitted_by_buyer",
+      "fiat_payment_confirmed_by_seller_escrow_release_started",
+    ],
   });
   const deps = makeDeps(file, client);
 
@@ -1285,18 +2772,20 @@ test("not received keeps escrow locked and enters manual follow-up placeholder",
     },
     _meta: { lastUpdated: "" },
   });
-  const client = makeClient();
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+  });
   const deps = makeDeps(file, client);
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "confirm", deps);
-  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
 
   res = await advanceTransferFlow(res.session, "not received", deps);
   assert.equal(res.session.stage, "awaiting_manual_settlement_followup");
   assert.equal(res.session.status, "active");
   assert.ok(res.events.some((event) => event.type === "receipt_not_received"));
-  assert.match(res.reply, /keeping escrow locked/i);
+  assert.match(res.reply, /keeping the transfer protected/i);
   assert.ok(!client.calls.includes("confirmFiatReceived"));
 });
 
@@ -1321,7 +2810,9 @@ test("unsupported post-match response goes to safe deferred placeholder", async 
     },
     _meta: { lastUpdated: "" },
   });
-  const client = makeClient();
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+  });
   const deps = makeDeps(file, client);
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
@@ -1355,7 +2846,9 @@ test("status check emits receipt timeout reminder when user does not respond", a
     _meta: { lastUpdated: "" },
   });
 
-  const client = makeClient();
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+  });
   const base = new Date("2026-03-25T14:00:00.000Z");
   let current = base.getTime();
   const deps = makeDeps(file, client, {
@@ -1366,12 +2859,12 @@ test("status check emits receipt timeout reminder when user does not respond", a
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "confirm", deps);
-  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
 
   current += 3 * 60_000;
   res = await advanceTransferFlow(res.session, "status", deps);
   assert.ok(res.events.some((event) => event.type === "receipt_confirmation_timeout"));
-  assert.match(res.reply, /keep escrow locked/i);
+  assert.match(res.reply, /keep the transfer protected/i);
 });
 
 test("no vendor match lands in explicit retry/change branch", async () => {
@@ -1483,6 +2976,58 @@ test("stored EVM login without signing key skips auth-choice questions and asks 
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
   assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
+});
+
+test("stored auth added after a session starts still skips onboarding on the next turn", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: undefined,
+  }, async () => startTransferFlow("send 20 EUR to mom", deps));
+
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+  assert.match(res.reply, /Which wallet connection path should I use/i);
+
+  res = await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, async () => advanceTransferFlow(res.session, "continue", deps));
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /@stateful/i);
+  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
+  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
+  assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
 });
 
 test("missing EVM auth asks the user to sign in on unigox.com before requesting the login key", async () => {

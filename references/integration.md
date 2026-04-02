@@ -213,20 +213,34 @@ const tr = await client.createTradeRequest({
 const matched = await client.waitForTradeMatch(tr.id, 120_000);
 console.log(`Trade request #${matched.id} matched`);
 
-// 5. Monitor the post-match lifecycle
+// 5. If the partner requires extra payout fields, submit them first
+//    and revalidate before attempting funding.
+
+// 6. Fund the live trade escrow only
 const trade = matched.trade?.id ? await client.getTrade(matched.trade.id) : undefined;
+if (trade?.id && trade.escrow_address) {
+  await client.fundTradeEscrow(
+    matched.crypto_currency_code === "USDC" ? "USDC" : "USDT",
+    String(matched.total_crypto_amount),
+    trade.escrow_address
+  );
+}
+
+// 7. Monitor the post-match lifecycle
 console.log(`Trade status: ${trade?.status}`);
 
-// 6. Only after explicit receipt confirmation
+// 8. Only after explicit receipt confirmation
 if (trade?.id) {
   await client.confirmFiatReceived(trade.id);
 }
 ```
 
+Important: for `send-money`, escrow funding means sending the matched amount to the live trade's `escrow_address`. Do not use automated escrow deposit / withdraw helpers as part of this flow.
+
 ## Important limitations
 
 TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`):
-- `withdrawFromEscrow()`
+- `fundTradeEscrow()`
 - `bridgeOut()`
 - `confirmFiatReceived()`
 
@@ -266,7 +280,7 @@ This is how the skill avoids showing unsupported options such as NEAR / intent-s
 | `linkTonWallet()` | Link TON wallet to the current authenticated account |
 | `getProfile()` | User ID, username, linked addresses, escrow address |
 | `getWalletBalance()` | USDC + USDT on XAI chain |
-| `getEscrowBalance(token)` | Escrow balance (available, reserved) |
+| `getEscrowBalance(token)` | Automated escrow balance for diagnostics only; not part of the send-money transfer path |
 | `getDepositAddresses()` | EVM, Solana, Tron, TON addresses |
 | `getBridgeTokens()` | Raw bridge token + chain metadata from the backend |
 | `getSupportedDepositOptions()` | Frontend-style deposit asset/network options after filtering unsupported routes |
@@ -279,7 +293,7 @@ This is how the skill avoids showing unsupported options such as NEAR / intent-s
 | `createTradeRequest(params)` | Initiate a trade |
 | `waitForTradeMatch(id, timeout)` | Poll until vendor accepts |
 | `getTrade(id)` | Get trade status |
+| `fundTradeEscrow(token, amount, escrowAddress)` | Send matched funds to the live trade escrow address |
 | `confirmFiatReceived(tradeId)` | Sign + call backend `confirm-payment` to release after explicit receipt confirmation |
 | `getBridgeQuote(params)` | Get bridge quote |
 | `bridgeOut(params)` | Withdraw to external chain (requires EVM key) |
-| `withdrawFromEscrow(token, amount)` | Escrow → wallet (requires EVM key) |

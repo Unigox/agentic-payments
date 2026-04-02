@@ -5,7 +5,14 @@ description: >
   Use when: (1) user says "send money to [person]", "pay [person]", "transfer to [person]",
   (2) user wants to manage payment contacts (add, list, update, remove),
   (3) user asks about supported payment methods or currencies,
-  (4) user wants to check UNIGOX wallet balance before sending.
+  (4) user wants to check UNIGOX wallet balance before sending,
+  (5) an active send-money session is already in progress and the user is replying with
+  follow-up details like "yes", "confirm", amount-only replies, legal name, country,
+  city, postal code, street, "KYC done", or receipt confirmation.
+  Trigger this skill even when the user only names the recipient and gives no amount yet,
+  for example "I wanna send money to Aleksandr". Do not answer those turns from general
+  chat context. If a send-money session is active, do not let generic profile, memory,
+  or note-taking flows steal follow-up turns that belong to the transfer.
   Supports EUR plus API-driven payout methods for INR, NGN, KES, GHS, and other currencies exposed by UNIGOX.
   Requires a UNIGOX account and at least one auth path: EVM login key, TON wallet auth, or email OTP during onboarding. Full EVM automation also needs the separate UNIGOX-exported EVM signing key.
 ---
@@ -13,6 +20,73 @@ description: >
 # Send Money
 
 Conversational money transfer via UNIGOX P2P exchange.
+
+## Trigger Gate
+
+If the user says anything equivalent to:
+- `I wanna send money to Aleksandr`
+- `send money to [person]`
+- `pay [person]`
+- `transfer to [person]`
+- `send [amount] to [person]`
+- or the user is already inside an active send-money flow and replies with continuation
+  details like:
+  - `yes`
+  - `confirm`
+  - `50 EUR`
+  - `My full legal name is Alex Grape and my country is Estonia`
+  - `Estonia`
+  - `Tallinn`
+  - `13511`
+  - `Oismae tee 140`
+  - `KYC done`
+  - `Yes money arrived`
+
+this skill must own the turn immediately.
+
+Do not answer those turns from general memory or generic chat reasoning.
+Before any user-facing text, run the session-aware transfer runner:
+
+```bash
+cat <<'EOF' | node --experimental-strip-types skills/send-money/scripts/run-transfer-turn.ts --json
+<verbatim user message>
+EOF
+```
+
+Use the runner JSON as the source of truth for the user-facing reply.
+
+- Send `reply` as the main message body.
+- If `options` is present, treat those as structured quick replies.
+- When the current channel supports buttons or quick replies, render each option as a button instead of spelling it out in prose. Telegram should get buttons when possible.
+- Only fall back to plain text choices when the channel cannot render buttons.
+- Do not paraphrase human field labels back into machine keys like `full_name=` once the runner has already formatted them cleanly.
+
+Do not freestyle recipient resolution, saved-recipient lookup, balance wording, onboarding wording, or action choices when the runner can answer them.
+
+Important path rule:
+- the runner path above is relative to the OpenClaw workspace root
+- do not improvise a different path from memory
+- if you are already operating inside the skill directory itself, resolve the equivalent skill-local path explicitly before executing
+
+The runner keeps per-chat state automatically using `OPENCLAW_SESSION_ID` / `OPENCLAW_AGENT_ID`, so repeated turns like:
+- `I wanna send money to Aleksandr`
+- `50 EUR`
+- `confirm`
+- `My full legal name is Alex Grape and my country is Estonia`
+- `Estonia`
+- `Yes money arrived`
+
+must continue through the same saved session file instead of restarting from general chat context.
+
+Important saved-recipient rule:
+- saved payout details already present on live UNIGOX count as saved recipients, even if local `contacts.json` is empty
+- do not say `I don't have X saved as a contact yet` until both local contacts and live UNIGOX saved payout details were checked
+- if the user gives a shortened or fuzzy saved name, like `Aleksandr`, and there is one clear saved beneficiary match such as `Aleksandr Example`, confirm the full saved name and use that saved route instead of falling back to new-recipient collection
+
+Expected pattern:
+- `I wanna send money to Aleksandr`
+- `I found saved payout details for Aleksandr Example. Should I use that saved recipient?`
+- or, if the amount is already present and the match is clear, continue directly into the amount / quote / confirmation flow
 
 ## First Run — Onboarding
 
@@ -42,7 +116,10 @@ The onboarding flow:
 ## Flow
 
 The reusable orchestration layer now lives in `scripts/transfer-orchestrator.ts`.
+The executable turn handler lives in `scripts/run-transfer-turn.ts`.
 For the end-to-end map, stage transitions, and unhappy-path handling, see `references/transfer-flow.md`.
+
+For every real send-money turn, use `scripts/transfer-orchestrator.ts` as the source of truth. Do not freestyle recipient resolution, saved-payout matching, payment-method questions, or confirmation wording from general chat context when the orchestrator can answer it.
 
 ### 1. Parse Request
 
@@ -54,6 +131,12 @@ Extract from user message:
 ### 2. Resolve Contact
 
 Read `contacts.json` from skill directory. Match by `name` or `aliases` (case-insensitive), and also attempt partial saved-contact resolution when the user only gives part of the saved name.
+
+Saved-recipient resolution order:
+1. local `contacts.json`
+2. live saved payout details on the user's UNIGOX account
+
+For conversational purposes, live saved payout details are equivalent to saved contacts.
 
 - **Single clear saved-contact match** → confirm the full saved name explicitly before continuing
 - **Single clear match + exactly one saved currency / payout setup** → use that stored route as the default instead of asking a broad generic currency question
@@ -165,6 +248,7 @@ Preferred auth environment variables:
 
 - **Always confirm** before executing transfers
 - **Never assume** payment details — ask if missing
+- **Never fund automated escrow as part of this skill.** `send-money` only funds the live matched trade escrow at that trade's `escrow_address` after vendor match and any required payout-detail completion / revalidation.
 - **Surface balance early** in any send flow, before trade creation and before the final confirmation prompt
 - **If balance is clearly insufficient, stop before trade creation**
 - **Default currency** is EUR

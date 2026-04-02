@@ -13,7 +13,10 @@ import type {
   AgenticPaymentsSettings,
   CurrencyPaymentData,
   DepositFlowSelection,
+  InitiatorTradeSummary,
+  KycVerificationData,
   NetworkFieldConfig,
+  PartnerPaymentDetailsDiffData,
   PaymentDetail,
   PaymentFieldValidationResult,
   PaymentMethodInfo,
@@ -38,6 +41,7 @@ import {
 } from "./settlement-monitor.ts";
 import type {
   SettlementMonitorState,
+  SettlementMonitorOptions,
   SettlementPhase,
   SettlementSnapshot,
   SettlementTrade,
@@ -46,13 +50,14 @@ import {
   DEFAULT_CONTACTS_FILE,
   SKILL_DIR,
   loadContacts,
+  normalizeContactKey,
   normalizeLookupValue,
   saveContacts,
   resolveContact,
   resolveContactQuery,
   upsertContactPaymentMethod,
 } from "./contact-store.ts";
-import type { ContactMatch, ContactRecord, StoredPaymentMethod } from "./contact-store.ts";
+import type { ContactMatch, ContactRecord, ContactResolution, ContactStoreData, StoredPaymentMethod } from "./contact-store.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -72,19 +77,25 @@ export type TransferStage =
   | "awaiting_secret_cleanup_confirmation"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
+  | "awaiting_saved_recipient_confirmation"
   | "awaiting_currency"
   | "awaiting_payment_method"
   | "awaiting_payment_network"
   | "awaiting_payment_details"
   | "awaiting_save_contact_decision"
   | "awaiting_amount"
+  | "awaiting_kyc_full_name"
+  | "awaiting_kyc_country"
+  | "awaiting_kyc_completion"
   | "awaiting_confirmation"
   | "awaiting_topup_method"
   | "awaiting_external_deposit_asset"
   | "awaiting_external_deposit_chain"
   | "awaiting_balance_resolution"
   | "awaiting_match_status"
+  | "awaiting_new_price_confirmation"
   | "awaiting_no_match_resolution"
+  | "awaiting_partner_payment_details_input"
   | "awaiting_trade_settlement"
   | "awaiting_receipt_confirmation"
   | "awaiting_release_completion"
@@ -106,6 +117,10 @@ export interface TransferFlowEvent {
     | "payment_detail_ensured"
     | "trade_request_created"
     | "trade_matched"
+    | "trade_price_changed"
+    | "trade_price_change_confirmed"
+    | "trade_price_change_cancelled"
+    | "escrow_funding_submitted"
     | "trade_pending"
     | "blocked_missing_auth"
     | "blocked_insufficient_balance"
@@ -130,6 +145,10 @@ export interface TransferFlowEvent {
 export interface TransferExecutionClient {
   getProfile?(): Promise<Pick<UserProfile, "username"> | UserProfile>;
   getWalletBalance(): Promise<WalletBalance>;
+  getKycVerificationStatus?(): Promise<KycVerificationData>;
+  initializeKycVerification?(params: { fullName: string; country: string }): Promise<KycVerificationData>;
+  listPaymentDetails?(): Promise<PaymentDetail[]>;
+  listInitiatorTrades?(filter?: "action_required" | "waiting_other_party" | "history"): Promise<InitiatorTradeSummary[]>;
   ensurePaymentDetail(params: {
     paymentMethodId: number;
     paymentNetworkId: number;
@@ -156,9 +175,19 @@ export interface TransferExecutionClient {
     tradePartner?: "licensed" | "p2p" | "all";
   }): Promise<TradeRequest>;
   waitForTradeMatch(tradeRequestId: number, timeoutMs?: number): Promise<TradeRequest>;
+  fundTradeEscrow?(tokenCode: "USDC" | "USDT", amount: string, escrowAddress: string): Promise<{ txId: number; txHash: string }>;
   getTradeRequest?(tradeRequestId: number): Promise<TradeRequest>;
   getTrade?(tradeId: number): Promise<SettlementTrade | undefined>;
+  getPartnerPaymentDetailsDiff?(tradeId: number): Promise<PartnerPaymentDetailsDiffData>;
+  createOrUpdatePartnerPaymentDetails?(params: {
+    internalDetailsId: number;
+    partner: string;
+    details: Record<string, string>;
+  }): Promise<{ details?: Record<string, string> }>;
+  revalidateTradePaymentDetails?(tradeId: number): Promise<{ trade?: SettlementTrade | undefined } | undefined>;
   confirmFiatReceived?(tradeId: number): Promise<SettlementTrade | undefined>;
+  confirmTradeRequestPrice?(tradeRequestId: number): Promise<TradeRequest>;
+  refuseTradeRequestPrice?(tradeRequestId: number): Promise<TradeRequest>;
   getSupportedDepositOptions?(): Promise<SupportedDepositAssetOption[]>;
   describeDepositSelection?(selection: DepositFlowSelection): Promise<SupportedDepositChainOption & { depositAddress: string }>;
 }
@@ -168,10 +197,14 @@ export interface TransferFlowDeps {
   settingsFilePath?: string;
   waitForMatchTimeoutMs?: number;
   waitForSettlementTimeoutMs?: number;
+  receiptConfirmationHandoffTimeoutMs?: number;
   settlementPollIntervalMs?: number;
   receiptReminderMs?: number;
   receiptTimeoutMs?: number;
+  kycVerificationPollIntervalMs?: number;
+  kycVerificationPollTimeoutMs?: number;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
   authState?: AuthState;
   client?: TransferExecutionClient;
   clientFactory?: () => Promise<TransferExecutionClient>;
@@ -264,6 +297,42 @@ export interface TopUpState {
   chainId?: number;
 }
 
+interface PartnerFieldToComplete {
+  fieldKey: string;
+  label: string;
+  required: boolean;
+  currentValue?: string;
+  expectedPattern?: string;
+  example?: string;
+  hint?: string;
+  options?: Array<{ value: string; label: string }>;
+}
+
+interface PartnerDetailCollectionState {
+  tradeId: number;
+  tradeRequestId: number;
+  paymentDetailsId: number;
+  partner: string;
+  index: number;
+  fields: PartnerFieldToComplete[];
+  values: Record<string, string>;
+}
+
+interface OutstandingTradeReminderState {
+  tradeId: number;
+  phase: SettlementPhase;
+  recipient: string;
+  fiatAmount?: number;
+  fiatCurrencyCode?: string;
+}
+
+interface PendingSavedRecipientConfirmationState {
+  source: "local" | "remote";
+  query: string;
+  matchedBy: "exact" | "partial" | "fuzzy";
+  match: ContactMatch;
+}
+
 export interface TransferSession {
   id: string;
   goal: TransferGoal;
@@ -274,6 +343,8 @@ export interface TransferSession {
   recipientMode?: "saved" | "new";
   recipientQuery?: string;
   contactKey?: string;
+  remoteSavedContact?: ContactRecord;
+  pendingSavedRecipientConfirmation?: PendingSavedRecipientConfirmationState;
   recipientName?: string;
   aliases?: string[];
   currency?: string;
@@ -293,9 +364,18 @@ export interface TransferSession {
     choice?: AuthChoice;
     evmSigningKeyAvailable?: boolean;
     username?: string;
+    kycStatus?: string;
+    kycCountryCode?: string;
+    kycFullName?: string;
+    totalTradedVolumeUsd?: number;
+    kycVerificationUrl?: string;
+    kycVerificationSecondsLeft?: number;
     balanceUsd?: number;
     walletBalance?: WalletBalance;
     startupSnapshotShown?: boolean;
+    outstandingTradeReminderShown?: boolean;
+    outstandingTradeReminder?: string;
+    outstandingTrade?: OutstandingTradeReminderState;
     pendingSecret?: SecretSubmissionState;
   };
   execution: {
@@ -306,6 +386,18 @@ export interface TransferSession {
     tradeId?: number;
     tradeRequestStatus?: string;
     tradeStatus?: string;
+    pendingPriceChange?: {
+      originalFiatAmount?: number;
+      originalCryptoAmount?: number;
+      newFiatAmount?: number;
+      newCryptoAmount?: number;
+      vendorOfferRate?: number;
+      fiatCurrencyCode?: string;
+      cryptoCurrencyCode?: string;
+      paymentMethodName?: string;
+      paymentNetworkName?: string;
+    };
+    partnerDetailCollection?: PartnerDetailCollectionState;
     settlement?: SettlementMonitorState;
     lastError?: string;
   };
@@ -368,6 +460,59 @@ const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
 const SIGNIN_READY_RE = /^(yes|y|done|ready|already signed in|already logged in|signed in|logged in|i signed in|i have signed in|i already signed in|i logged in|i have logged in)$/i;
 const NOT_READY_RE = /^(no|n|not yet|haven'?t|have not|didn'?t|did not)$/i;
 const DELETED_RE = /^(deleted|i deleted it|deleted it|it'?s deleted|removed it|done deleting)$/i;
+const MAX_AMOUNT_WITHOUT_KYC = 100;
+const KYC_VERIFIED_STATUSES = new Set(["VERIFIED", "APPROVED", "verified", "approved"]);
+const KYC_ACTIVE_STATUSES = new Set(["initial", "pending", "in_progress"]);
+const KYC_AUTH_FAILURE_KEYS = new Set([
+  "invalid_auth_token",
+  "auth_token_required",
+  "verification_service_auth_failed",
+]);
+const DEFAULT_KYC_VERIFICATION_POLL_INTERVAL_MS = 1_000;
+// The frontend keeps polling /kyc until the verification URL appears.
+// In chat we still need a ceiling, but 15s was too short and caused Cinnamon
+// to give up before the provider URL became available.
+const DEFAULT_KYC_VERIFICATION_POLL_TIMEOUT_MS = 60_000;
+const COMMON_COUNTRY_CODES: Record<string, string> = {
+  estonia: "EE",
+  thailand: "TH",
+  india: "IN",
+  kenya: "KE",
+  nigeria: "NG",
+  ghana: "GH",
+  philippines: "PH",
+  uganda: "UG",
+  tanzania: "TZ",
+  rwanda: "RW",
+  unitedstates: "US",
+  "united states": "US",
+  usa: "US",
+  uk: "GB",
+  "united kingdom": "GB",
+  britain: "GB",
+  england: "GB",
+  belgium: "BE",
+  netherlands: "NL",
+  france: "FR",
+  germany: "DE",
+  spain: "ES",
+  italy: "IT",
+  portugal: "PT",
+  ireland: "IE",
+  poland: "PL",
+  sweden: "SE",
+  norway: "NO",
+  finland: "FI",
+  denmark: "DK",
+  uae: "AE",
+  "united arab emirates": "AE",
+  singapore: "SG",
+  malaysia: "MY",
+  indonesia: "ID",
+  vietnam: "VN",
+  australia: "AU",
+  canada: "CA",
+};
 
 function nowIso(deps: TransferFlowDeps): string {
   return (deps.now ? deps.now() : new Date()).toISOString();
@@ -395,10 +540,110 @@ function sentenceCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function maskDetailMap(details: Record<string, string>): string {
-  return Object.entries(details)
-    .map(([field, value]) => `${field}=${value}`)
-    .join(", ");
+function isUserKycVerified(status: string | undefined): boolean {
+  return Boolean(status && KYC_VERIFIED_STATUSES.has(status));
+}
+
+function buildKycFullName(firstName: string | undefined, lastName: string | undefined): string | undefined {
+  const fullName = `${(firstName || "").trim()} ${(lastName || "").trim()}`.trim();
+  return fullName || undefined;
+}
+
+function resolveCountryCode(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  if (/^[A-Za-z]{2}$/.test(value)) {
+    return value.toUpperCase();
+  }
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const compact = normalized.replace(/\s+/g, "");
+  return COMMON_COUNTRY_CODES[normalized] || COMMON_COUNTRY_CODES[compact];
+}
+
+function parseKycIdentityInput(text: string | undefined): { fullName?: string; countryCode?: string } {
+  const value = cleanText(text);
+  if (!value) return {};
+
+  const combined = value.match(
+    /(?:my\s+)?(?:full\s+legal\s+name|legal\s+name|name)\s+is\s+(.+?)\s+(?:and|,)\s+(?:my\s+)?country\s+is\s+(.+)$/i
+  );
+  if (combined) {
+    return {
+      fullName: combined[1]?.trim() || undefined,
+      countryCode: resolveCountryCode(combined[2]),
+    };
+  }
+
+  // Accept a natural one-line reply like "Alex Grape, Estonia" while KYC is collecting
+  // identity details. Require a comma so we do not steal unrelated free-text turns.
+  const commaSeparated = value.match(/^(.+?),\s*([^,]+)$/);
+  if (commaSeparated) {
+    const fullName = commaSeparated[1]?.trim() || undefined;
+    const countryCode = resolveCountryCode(commaSeparated[2]);
+    if (fullName && countryCode && /\s+/.test(fullName)) {
+      return {
+        fullName,
+        countryCode,
+      };
+    }
+  }
+
+  const fullNameMatch = value.match(/(?:my\s+)?(?:full\s+legal\s+name|legal\s+name|name)\s+is\s+(.+)$/i);
+  const countryMatch = value.match(/(?:my\s+)?country\s+is\s+(.+)$/i);
+
+  return {
+    fullName: fullNameMatch?.[1]?.trim() || undefined,
+    countryCode: resolveCountryCode(countryMatch?.[1]),
+  };
+}
+
+const DETAIL_LABELS: Record<string, string> = {
+  full_name: "Full name",
+  iban: "IBAN",
+  bic: "BIC",
+  swift: "SWIFT",
+  phone: "Phone",
+  email: "Email",
+  bank_name: "Bank name",
+  bank_code: "Bank code",
+  account_number: "Account number",
+  account_name: "Account name",
+  username: "Username",
+  tag: "Tag",
+  handle: "Handle",
+  wallet_address: "Wallet address",
+  holder_city: "Holder city",
+  holder_postal_code: "Postal code",
+  holder_street: "Street address",
+  country: "Country",
+  country_code: "Country",
+};
+
+function formatDetailLabel(field: string): string {
+  const normalized = field.trim().toLowerCase();
+  const known = DETAIL_LABELS[normalized];
+  if (known) return known;
+
+  const titleCased = normalized
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.length <= 4 ? part.toUpperCase() : `${part[0]?.toUpperCase() || ""}${part.slice(1)}`)
+    .join(" ");
+
+  return titleCased || field;
+}
+
+function buildHumanDetailBlock(details: Record<string, string>): string | undefined {
+  const entries = Object.entries(details).filter(([, value]) => value != null && String(value).trim().length > 0);
+  if (!entries.length) return undefined;
+  return [
+    "Recipient details:",
+    ...entries.map(([field, value]) => `• ${formatDetailLabel(field)}: ${value}`),
+  ].join("\n");
 }
 
 function parseCurrencyToken(token: string | undefined): string | undefined {
@@ -557,6 +802,7 @@ function createSession(goal: TransferGoal, deps: TransferFlowDeps): TransferSess
       checked: false,
       available: false,
       startupSnapshotShown: false,
+      outstandingTradeReminderShown: false,
     },
     execution: {
       confirmed: false,
@@ -580,7 +826,93 @@ function buildStartupAuthSnapshot(session: TransferSession): string | undefined 
   if (balanceLine) {
     parts.push(balanceLine);
   }
+  if (session.auth.outstandingTradeReminder) {
+    parts.push(session.auth.outstandingTradeReminder);
+  }
   return parts.length ? parts.join(" ") : undefined;
+}
+
+function clearPendingSavedRecipientConfirmation(session: TransferSession): void {
+  session.pendingSavedRecipientConfirmation = undefined;
+}
+
+function isExplicitReceiptResponse(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  if (/^(yes|no)$/i.test(value)) return false;
+  return /\b(receiv(?:e|ed)|arriv(?:e|ed)|got|money|funds|payment|paid|not yet|didn'?t|did not|hasn'?t|have not)\b/i.test(value);
+}
+
+function shouldDoubleConfirmSavedRecipient(resolution: ContactResolution, query: string): boolean {
+  if (!resolution.match) return false;
+  return normalizeLookupValue(query) !== normalizeLookupValue(resolution.match.contact.name);
+}
+
+function buildSavedRecipientConfirmationPrompt(pending: PendingSavedRecipientConfirmationState): string {
+  const route = getSingleStoredPaymentSetup(pending.match.contact);
+  const routeLine = route ? ` (${summarizeStoredPaymentRoute(route.currency, route.method)})` : "";
+  const sourceLine = pending.source === "remote" ? "saved UNIGOX payout details" : "saved contact";
+  return `I think you mean ${sourceLine} for ${pending.match.contact.name}${routeLine}. Should I use that saved recipient?`;
+}
+
+function startSavedRecipientConfirmation(
+  session: TransferSession,
+  resolution: ContactResolution,
+  source: "local" | "remote",
+  query: string
+): string | undefined {
+  if (!resolution.match) return undefined;
+  session.pendingSavedRecipientConfirmation = {
+    source,
+    query,
+    matchedBy: resolution.matchedBy || "fuzzy",
+    match: resolution.match,
+  };
+  session.stage = "awaiting_saved_recipient_confirmation";
+  return buildSavedRecipientConfirmationPrompt(session.pendingSavedRecipientConfirmation);
+}
+
+function acceptPendingSavedRecipientConfirmation(session: TransferSession): string | undefined {
+  const pending = session.pendingSavedRecipientConfirmation;
+  if (!pending) return undefined;
+
+  const pendingResolution: ContactResolution = {
+    match: pending.match,
+    ambiguous: [],
+    matchedBy: pending.matchedBy,
+  };
+  const note = pending.source === "remote"
+    ? `Okay — I’ll use saved UNIGOX payout details for ${pending.match.contact.name}.`
+    : `Okay — I’ll use the saved contact ${pending.match.contact.name}.`;
+  applyResolvedSavedRecipient(session, pendingResolution, pending.source, pending.query);
+  session.recipientQuery = pending.match.contact.name;
+  clearPendingSavedRecipientConfirmation(session);
+  session.stage = "resolving";
+  return note;
+}
+
+function clearOutstandingTradeReminder(session: TransferSession): void {
+  session.auth.outstandingTradeReminder = undefined;
+  session.auth.outstandingTrade = undefined;
+  session.auth.outstandingTradeReminderShown = true;
+}
+
+function buildTransferContinuationPrompt(session: TransferSession): string | undefined {
+  if (session.goal !== "transfer") return undefined;
+
+  if (session.recipientName && session.currency && !session.amount) {
+    return `How much ${session.currency} should I send to ${session.recipientName} now?`;
+  }
+
+  if (session.recipientName && !session.currency) {
+    return `Which currency should ${session.recipientName} receive?`;
+  }
+
+  if (!session.recipientName) {
+    return "Who do you want to send money to?";
+  }
+
+  return undefined;
 }
 
 function decorateStartupReply(session: TransferSession, message: string): string {
@@ -602,8 +934,12 @@ function decorateStartupReply(session: TransferSession, message: string): string
       snapshotParts.push(balanceLine);
     }
   }
+  if (session.auth.outstandingTradeReminder && !message.includes(session.auth.outstandingTradeReminder)) {
+    snapshotParts.push(session.auth.outstandingTradeReminder);
+  }
 
   session.auth.startupSnapshotShown = true;
+  session.auth.outstandingTradeReminderShown = true;
   if (!snapshotParts.length) return message;
   return `${snapshotParts.join(" ")} ${message}`;
 }
@@ -816,6 +1152,107 @@ function buildUsernameReminder(username: string | undefined): string | undefined
   const formatted = formatUsername(username);
   if (!formatted) return undefined;
   return `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
+}
+
+function getInitiatorTradeRecipientName(trade: InitiatorTradeSummary | undefined): string | undefined {
+  const details = trade?.initiator_payment_details?.details;
+  if (!details || typeof details !== "object") return undefined;
+  const candidates = [
+    (details as Record<string, unknown>).full_name,
+    (details as Record<string, unknown>).name,
+  ];
+  for (const candidate of candidates) {
+    const value = cleanText(typeof candidate === "string" ? candidate : undefined);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function getInitiatorTradeActionPhase(trade: InitiatorTradeSummary | undefined): SettlementPhase | undefined {
+  if (!trade?.status) return undefined;
+  if (trade.status === "trade_created" && trade.partner_short_name && trade.partner_details_checked_at == null) {
+    return "awaiting_partner_payment_details";
+  }
+  if (trade.payment_request === true && trade.status === "awaiting_escrow_funding_by_seller" && !trade.initiator_payment_details) {
+    return "awaiting_buyer_payment_details";
+  }
+  switch (trade.status) {
+    case "trade_created":
+    case "awaiting_escrow_funding_by_seller":
+      return "awaiting_escrow_funding";
+    case "fiat_payment_proof_submitted_by_buyer":
+    case "fiat_payment_proof_accepted_by_system":
+      return "awaiting_receipt_confirmation";
+    default:
+      return undefined;
+  }
+}
+
+function pickOutstandingActionTrade(trades: InitiatorTradeSummary[]): InitiatorTradeSummary | undefined {
+  const candidates = trades
+    .map((trade) => ({ trade, phase: getInitiatorTradeActionPhase(trade) }))
+    .filter((entry): entry is { trade: InitiatorTradeSummary; phase: SettlementPhase } => !!entry.phase);
+
+  if (!candidates.length) return undefined;
+
+  const phasePriority: Record<SettlementPhase, number> = {
+    awaiting_receipt_confirmation: 0,
+    awaiting_partner_payment_details: 1,
+    awaiting_buyer_payment_details: 2,
+    awaiting_escrow_funding: 3,
+    matching: 4,
+    waiting_for_fiat: 5,
+    receipt_confirmed_release_started: 6,
+    completed: 7,
+    refunded_or_cancelled: 8,
+    deferred: 9,
+  };
+
+  candidates.sort((a, b) => {
+    const priorityDelta = (phasePriority[a.phase] ?? 99) - (phasePriority[b.phase] ?? 99);
+    if (priorityDelta !== 0) return priorityDelta;
+    const aTime = Date.parse(a.trade.status_changed_at || "") || 0;
+    const bTime = Date.parse(b.trade.status_changed_at || "") || 0;
+    return bTime - aTime;
+  });
+
+  return candidates[0]?.trade;
+}
+
+function buildOutstandingTradeReminderState(trade: InitiatorTradeSummary | undefined): OutstandingTradeReminderState | undefined {
+  if (!trade?.id) return undefined;
+  const phase = getInitiatorTradeActionPhase(trade);
+  const recipient = getInitiatorTradeRecipientName(trade);
+  if (!phase || !recipient) return undefined;
+  return {
+    tradeId: trade.id,
+    phase,
+    recipient,
+    fiatAmount: trade.fiat_amount ?? undefined,
+    fiatCurrencyCode: trade.fiat_currency_code ?? undefined,
+  };
+}
+
+function buildOutstandingTradeReminder(trade: InitiatorTradeSummary | undefined): string | undefined {
+  const phase = getInitiatorTradeActionPhase(trade);
+  if (!trade || !phase) return undefined;
+
+  const recipient = getInitiatorTradeRecipientName(trade) || "the recipient";
+  const fiatAmount = typeof trade.fiat_amount === "number" && trade.fiat_currency_code
+    ? `${formatFixed(trade.fiat_amount, 2)} ${trade.fiat_currency_code}`
+    : "that transfer";
+
+  switch (phase) {
+    case "awaiting_receipt_confirmation":
+      return `By the way, your earlier ${fiatAmount} transfer to ${recipient} may already have arrived or still be on the way from the counterparty bank. Did ${recipient} receive it already?`;
+    case "awaiting_partner_payment_details":
+    case "awaiting_buyer_payment_details":
+      return `By the way, your earlier ${fiatAmount} transfer to ${recipient} still needs one more payout detail before it can continue.`;
+    case "awaiting_escrow_funding":
+      return `By the way, your earlier ${fiatAmount} transfer to ${recipient} is matched and still needs to be secured before it can continue.`;
+    default:
+      return undefined;
+  }
 }
 
 function formatFixed(value: number, digits = 2): string {
@@ -1148,13 +1585,27 @@ async function maybeHydrateAuthIdentity(
   deps: TransferFlowDeps,
   client?: TransferExecutionClient
 ): Promise<void> {
-  if (!session.auth.available || session.auth.username) return;
+  if (!session.auth.available) return;
   const executionClient = client || await getExecutionClient(deps);
   if (!executionClient.getProfile) return;
   try {
     const profile = await executionClient.getProfile();
     if (profile?.username) {
       session.auth.username = profile.username;
+    }
+    const fullProfile = profile as UserProfile;
+    const fullName = buildKycFullName(fullProfile.first_name, fullProfile.last_name);
+    if (fullName) {
+      session.auth.kycFullName = fullName;
+    }
+    if (fullProfile.kyc_country_code) {
+      session.auth.kycCountryCode = fullProfile.kyc_country_code.toUpperCase();
+    }
+    if (typeof fullProfile.total_traded_volume_usd === "number") {
+      session.auth.totalTradedVolumeUsd = fullProfile.total_traded_volume_usd;
+    }
+    if (fullProfile.id_verification_status) {
+      session.auth.kycStatus = fullProfile.id_verification_status;
     }
   } catch {
     // Username is a nice UX enhancement, not a hard blocker.
@@ -1185,6 +1636,54 @@ async function maybeHydrateStartupAuthStatus(
   } catch {
     // Early balance surfacing improves UX but should not block the flow.
   }
+
+  if (!session.execution.tradeRequestId && !session.auth.outstandingTradeReminderShown && !session.auth.outstandingTradeReminder && executionClient.listInitiatorTrades) {
+    try {
+      const trades = await executionClient.listInitiatorTrades("action_required");
+      const outstanding = pickOutstandingActionTrade(trades);
+      session.auth.outstandingTrade = buildOutstandingTradeReminderState(outstanding);
+      session.auth.outstandingTradeReminder = buildOutstandingTradeReminder(outstanding);
+    } catch {
+      // Startup reminders are helpful, but should never block the main send flow.
+    }
+  }
+}
+
+async function maybeRefreshStoredAuthState(
+  session: TransferSession,
+  deps: TransferFlowDeps
+): Promise<void> {
+  if (session.goal !== "transfer" || session.auth.available) return;
+
+  const auth = resolveInitialAuthState(deps.authState);
+  if (!auth.hasReplayableAuth) return;
+
+  session.auth.checked = true;
+  session.auth.available = true;
+  session.auth.mode = auth.authMode || session.auth.mode;
+  session.auth.choice = auth.authMode || session.auth.choice;
+  session.auth.evmSigningKeyAvailable = auth.evmSigningKeyAvailable;
+  session.auth.username = auth.username || session.auth.username;
+  session.auth.balanceUsd = auth.balanceUsd ?? session.auth.balanceUsd;
+  session.auth.walletBalance = auth.walletBalance ?? session.auth.walletBalance;
+  session.auth.startupSnapshotShown = false;
+  session.auth.outstandingTradeReminderShown = false;
+  session.auth.outstandingTradeReminder = undefined;
+  session.auth.outstandingTrade = undefined;
+  session.auth.pendingSecret = undefined;
+
+  if ([
+    "awaiting_auth_choice",
+    "awaiting_evm_wallet_signin",
+    "awaiting_evm_login_key",
+    "awaiting_evm_signing_key",
+    "awaiting_secret_cleanup_confirmation",
+  ].includes(session.stage)) {
+    session.status = "active";
+    session.stage = "resolving";
+  }
+
+  await maybeHydrateStartupAuthStatus(session, deps);
 }
 
 async function maybeHandleSensitiveInput(
@@ -1416,6 +1915,7 @@ function buildConfirmationMessage(session: TransferSession): string {
         assets: session.execution.preflight.walletBalanceAssets,
       }, session.execution.preflight.balanceUsd)
     : undefined;
+  const detailBlock = buildHumanDetailBlock(session.details);
   return [
     buildUsernameReminder(session.auth.username),
     balanceLine,
@@ -1423,9 +1923,481 @@ function buildConfirmationMessage(session: TransferSession): string {
     buildAssetCoverageLine(session.execution.preflight),
     buildPreflightQuoteCaveat(session.execution.preflight),
     `Send ${session.amount} ${session.currency} to ${session.recipientName} via ${summarizePayment(session)}?`,
-    `Details: ${maskDetailMap(session.details)}`,
+    detailBlock,
     "Reply 'confirm' to place the trade, or tell me what to change.",
+  ].filter(Boolean).join("\n\n");
+}
+
+function getProjectedTradeUsd(session: TransferSession): number {
+  return session.execution.preflight?.sellAssetRequiredUsd
+    ?? session.execution.preflight?.quote?.totalCryptoAmount
+    ?? session.amount
+    ?? 0;
+}
+
+function buildKycRequirementMessage(session: TransferSession): string {
+  const projectedTotal = (session.auth.totalTradedVolumeUsd || 0) + getProjectedTradeUsd(session);
+  const projectedLine = projectedTotal > 0
+    ? `This transfer would bring your no-KYC volume to about ${formatFixed(projectedTotal, 2)} USD, and UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`
+    : `UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`;
+  return [
+    `To continue with this ${session.amount ? `${session.amount} ${session.currency}` : "transfer"}, UNIGOX needs KYC first.`,
+    projectedLine,
+    "The steps are simple:",
+    "1. You give me your full name and country.",
+    "2. I give you a secure link for the third-party KYC service. You can also complete the same KYC directly in the UNIGOX website or app if you prefer.",
+    "3. Once UNIGOX approves it, I continue the transfer.",
+  ].join(" ");
+}
+
+function buildKycCountryPrompt(session: TransferSession): string {
+  return [
+    buildKycRequirementMessage(session),
+    "Which country should I use for KYC?",
+    "Send the country name or the 2-letter country code, for example EE.",
+  ].join(" ");
+}
+
+function buildKycPendingMessage(session: TransferSession): string {
+  const projectedTotal = (session.auth.totalTradedVolumeUsd || 0) + getProjectedTradeUsd(session);
+  const projectedLine = projectedTotal > 0
+    ? `This transfer would bring your no-KYC volume to about ${formatFixed(projectedTotal, 2)} USD, and UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`
+    : `UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`;
+  return [
+    `To continue with this ${session.amount ? `${session.amount} ${session.currency}` : "transfer"}, UNIGOX needs KYC first.`,
+    projectedLine,
+  ].join(" ");
+}
+
+function buildKycVerificationLinkMessage(session: TransferSession, data: KycVerificationData): string {
+  const link = data.verification_url || session.auth.kycVerificationUrl;
+  const status = data.status || session.auth.kycStatus;
+  const statusLine = link
+    ? "The verification link is ready."
+    : status && KYC_ACTIVE_STATUSES.has(status)
+      ? "I’ve started the verification."
+      : "UNIGOX has started the verification.";
+  return [
+    buildKycPendingMessage(session),
+    statusLine,
+    link
+      ? `Open this link and complete the checks on the verification site: ${link}`
+      : "UNIGOX has started the verification, but the secure link still has not appeared yet. This can take a little longer on the provider side. If it still does not show up, message me again and I’ll re-check immediately, and you can also open KYC directly in the UNIGOX website or app if you prefer.",
+    "If you prefer, you can also complete the same KYC directly from the UNIGOX website or app.",
+    "Once UNIGOX shows the verification as approved, message me here and I’ll continue the transfer.",
   ].filter(Boolean).join(" ");
+}
+
+function kycVerificationHasAuthFailure(data: KycVerificationData | undefined): boolean {
+  return Boolean(data?.error_key && KYC_AUTH_FAILURE_KEYS.has(data.error_key));
+}
+
+function buildKycVerificationAuthFailureMessage(session: TransferSession): string {
+  return [
+    buildKycRequirementMessage(session),
+    "I couldn't fetch the secure verification link from chat on this machine right now.",
+    "Please open KYC directly in the UNIGOX website or app and complete it there.",
+    "Once UNIGOX shows the verification as approved, message me here and I’ll continue the transfer.",
+  ].join(" ");
+}
+
+function mergeKycVerificationData(
+  initial: KycVerificationData | undefined,
+  refreshed: KycVerificationData | undefined
+): KycVerificationData {
+  return {
+    ...(initial || {}),
+    ...(refreshed || {}),
+    status: refreshed?.status || initial?.status,
+    verification_url: refreshed?.verification_url || initial?.verification_url,
+    verification_seconds_left:
+      typeof refreshed?.verification_seconds_left === "number"
+        ? refreshed.verification_seconds_left
+        : initial?.verification_seconds_left,
+    max_attempts_reached:
+      typeof refreshed?.max_attempts_reached === "boolean"
+        ? refreshed.max_attempts_reached
+        : initial?.max_attempts_reached,
+    error_key: refreshed?.error_key || initial?.error_key,
+    provider_messages:
+      (Array.isArray(refreshed?.provider_messages) && refreshed.provider_messages.length > 0)
+        ? refreshed.provider_messages
+        : initial?.provider_messages,
+  };
+}
+
+function applyKycVerificationSnapshot(session: TransferSession, data: KycVerificationData | undefined): void {
+  if (!data) return;
+  if (data.status) {
+    // Do not let a stale active verification session downgrade an account that
+    // UNIGOX already reports as fully verified in the profile.
+    if (!(isUserKycVerified(session.auth.kycStatus) && !isUserKycVerified(data.status))) {
+      session.auth.kycStatus = data.status;
+    }
+  }
+  if (typeof data.verification_seconds_left === "number") {
+    session.auth.kycVerificationSecondsLeft = data.verification_seconds_left;
+  }
+  if (data.verification_url) {
+    session.auth.kycVerificationUrl = data.verification_url;
+  }
+}
+
+function kycVerificationNeedsAttention(status: string | undefined): boolean {
+  return Boolean(status && KYC_ACTIVE_STATUSES.has(status));
+}
+
+function transferFlowSleep(deps: TransferFlowDeps, ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  if (deps.sleep) {
+    return deps.sleep(ms);
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForKycVerificationLink(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient,
+  initial: KycVerificationData
+): Promise<KycVerificationData> {
+  let resolved = initial;
+  if (!client.getKycVerificationStatus) {
+    return resolved;
+  }
+
+  const timeoutMs = deps.kycVerificationPollTimeoutMs ?? DEFAULT_KYC_VERIFICATION_POLL_TIMEOUT_MS;
+  const intervalMs = deps.kycVerificationPollIntervalMs ?? DEFAULT_KYC_VERIFICATION_POLL_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  while (!resolved.verification_url && kycVerificationNeedsAttention(resolved.status) && Date.now() < deadline) {
+    await transferFlowSleep(deps, intervalMs);
+    try {
+      const refreshed = await client.getKycVerificationStatus();
+      resolved = mergeKycVerificationData(resolved, refreshed);
+    } catch {
+      break;
+    }
+  }
+
+  return resolved;
+}
+
+async function startKycVerificationFlow(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<TransferFlowResult> {
+  session.status = "blocked";
+  session.execution.confirmed = false;
+
+  const existingVerificationResult = await maybeResumeExistingKycVerification(session, deps, client);
+  if (existingVerificationResult) {
+    return existingVerificationResult;
+  }
+
+  if (!session.auth.kycFullName) {
+    session.stage = "awaiting_kyc_full_name";
+    return reply(
+      withUpdate(session, deps),
+      `${buildKycRequirementMessage(session)} First, what full legal name should I use for the verification?`
+    );
+  }
+
+  if (!session.auth.kycCountryCode) {
+    session.stage = "awaiting_kyc_country";
+    return reply(withUpdate(session, deps), buildKycCountryPrompt(session));
+  }
+
+  if (!client.initializeKycVerification) {
+    session.stage = "awaiting_kyc_completion";
+    return reply(
+      withUpdate(session, deps),
+      `${buildKycRequirementMessage(session)} I can’t start the KYC link automatically in this environment right now, but once UNIGOX marks your account as verified, message me here and I’ll continue the transfer.`
+    );
+  }
+
+  const verification = await client.initializeKycVerification({
+    fullName: session.auth.kycFullName,
+    country: session.auth.kycCountryCode,
+  });
+  let resolvedVerification = verification;
+  if (client.getKycVerificationStatus) {
+    try {
+      const refreshedVerification = await client.getKycVerificationStatus();
+      resolvedVerification = mergeKycVerificationData(verification, refreshedVerification);
+    } catch {
+      // Fall back to the initialization response if the immediate refetch fails.
+    }
+  }
+  if (!resolvedVerification.verification_url && kycVerificationNeedsAttention(resolvedVerification.status)) {
+    resolvedVerification = await waitForKycVerificationLink(session, deps, client, resolvedVerification);
+  }
+  applyKycVerificationSnapshot(session, resolvedVerification);
+  session.stage = "awaiting_kyc_completion";
+  if (kycVerificationHasAuthFailure(resolvedVerification)) {
+    return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
+  }
+  return reply(withUpdate(session, deps), buildKycVerificationLinkMessage(session, resolvedVerification));
+}
+
+async function maybeEnsureKycReady(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<{ blockedResult?: TransferFlowResult }> {
+  await maybeHydrateAuthIdentity(session, deps, client);
+  if (isUserKycVerified(session.auth.kycStatus)) {
+    return {};
+  }
+
+  const projectedTradeUsd = getProjectedTradeUsd(session);
+  const totalTradedVolumeUsd = session.auth.totalTradedVolumeUsd || 0;
+  if (!(projectedTradeUsd > 0) || projectedTradeUsd + totalTradedVolumeUsd < MAX_AMOUNT_WITHOUT_KYC) {
+    return {};
+  }
+
+  if (client.getKycVerificationStatus) {
+    try {
+      let verification = await client.getKycVerificationStatus();
+      if (!verification.verification_url && kycVerificationNeedsAttention(verification.status)) {
+        verification = await waitForKycVerificationLink(session, deps, client, verification);
+      }
+      applyKycVerificationSnapshot(session, verification);
+      if (isUserKycVerified(session.auth.kycStatus)) {
+        return {};
+      }
+      if (kycVerificationHasAuthFailure(verification)) {
+        session.status = "blocked";
+        session.execution.confirmed = false;
+        session.stage = "awaiting_kyc_completion";
+        return {
+          blockedResult: reply(
+            withUpdate(session, deps),
+            buildKycVerificationAuthFailureMessage(session)
+          ),
+        };
+      }
+      if (kycVerificationNeedsAttention(verification.status)) {
+        session.status = "blocked";
+        session.execution.confirmed = false;
+        session.stage = "awaiting_kyc_completion";
+        return {
+          blockedResult: reply(
+            withUpdate(session, deps),
+            buildKycVerificationLinkMessage(session, verification)
+          ),
+        };
+      }
+    } catch {
+      // If the verification status lookup fails, fall through to the guided KYC prompts.
+    }
+  }
+
+  return {
+    blockedResult: await startKycVerificationFlow(session, deps, client),
+  };
+}
+
+async function maybeResumeExistingKycVerification(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<TransferFlowResult | undefined> {
+  if (!client.getKycVerificationStatus) {
+    return undefined;
+  }
+
+  try {
+    let verification = await client.getKycVerificationStatus();
+    if (!verification.verification_url && kycVerificationNeedsAttention(verification.status)) {
+      verification = await waitForKycVerificationLink(session, deps, client, verification);
+    }
+    applyKycVerificationSnapshot(session, verification);
+
+    if (isUserKycVerified(session.auth.kycStatus)) {
+      return undefined;
+    }
+
+    if (kycVerificationHasAuthFailure(verification)) {
+      session.status = "blocked";
+      session.execution.confirmed = false;
+      session.stage = "awaiting_kyc_completion";
+      return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
+    }
+
+    if (kycVerificationNeedsAttention(verification.status)) {
+      session.status = "blocked";
+      session.execution.confirmed = false;
+      session.stage = "awaiting_kyc_completion";
+      return reply(withUpdate(session, deps), buildKycVerificationLinkMessage(session, verification));
+    }
+  } catch {
+    // Fall back to normal prompt collection if the verification lookup fails.
+  }
+
+  return undefined;
+}
+
+function capturePendingPriceChange(session: TransferSession, tradeRequest: TradeRequest): void {
+  session.execution.pendingPriceChange = {
+    originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
+    originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+    newFiatAmount: tradeRequest.fiat_amount,
+    newCryptoAmount: tradeRequest.total_crypto_amount,
+    vendorOfferRate: tradeRequest.vendor_offer_rate,
+    fiatCurrencyCode: tradeRequest.fiat_currency_code || session.currency,
+    cryptoCurrencyCode: tradeRequest.crypto_currency_code || session.execution.preflight?.quote?.cryptoCurrencyCode,
+    paymentMethodName: tradeRequest.payment_method_name || session.payment?.methodName,
+    paymentNetworkName: tradeRequest.payment_network_name || session.payment?.networkName,
+  };
+}
+
+function clearPendingPriceChange(session: TransferSession): void {
+  delete session.execution.pendingPriceChange;
+}
+
+function buildNewPriceConfirmationMessage(session: TransferSession, tradeRequest?: TradeRequest): string {
+  const priceChange = tradeRequest
+    ? {
+        originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
+        originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+        newFiatAmount: tradeRequest.fiat_amount,
+        newCryptoAmount: tradeRequest.total_crypto_amount,
+        vendorOfferRate: tradeRequest.vendor_offer_rate,
+        fiatCurrencyCode: tradeRequest.fiat_currency_code || session.currency,
+        cryptoCurrencyCode: tradeRequest.crypto_currency_code || session.execution.preflight?.quote?.cryptoCurrencyCode,
+        paymentMethodName: tradeRequest.payment_method_name || session.payment?.methodName,
+        paymentNetworkName: tradeRequest.payment_network_name || session.payment?.networkName,
+      }
+    : session.execution.pendingPriceChange;
+
+  const fiatCode = priceChange?.fiatCurrencyCode || session.currency || "EUR";
+  const cryptoCode = priceChange?.cryptoCurrencyCode || session.execution.preflight?.quote?.cryptoCurrencyCode || "USDT";
+  const newFiat = typeof priceChange?.newFiatAmount === "number"
+    ? formatQuoteAmount(priceChange.newFiatAmount, fiatCode, 2)
+    : undefined;
+  const newCrypto = typeof priceChange?.newCryptoAmount === "number"
+    ? formatQuoteAmount(priceChange.newCryptoAmount, cryptoCode, 6)
+    : undefined;
+  const originalFiat = typeof priceChange?.originalFiatAmount === "number"
+    ? formatQuoteAmount(priceChange.originalFiatAmount, fiatCode, 2)
+    : undefined;
+  const originalCrypto = typeof priceChange?.originalCryptoAmount === "number"
+    ? formatQuoteAmount(priceChange.originalCryptoAmount, cryptoCode, 6)
+    : undefined;
+  const route = priceChange?.paymentMethodName && priceChange?.paymentNetworkName
+    ? `${priceChange.paymentMethodName}, ${priceChange.paymentNetworkName}`
+    : summarizePayment(session);
+  const rateLine = typeof priceChange?.vendorOfferRate === "number"
+    ? `Current live rate: ${formatRate(priceChange.vendorOfferRate, cryptoCode, fiatCode)}.`
+    : undefined;
+
+  return [
+    "The original quote is no longer available.",
+    newCrypto && newFiat ? `Right now this counterparty can do ${newCrypto} for ${newFiat} via ${route}.` : undefined,
+    originalFiat && originalCrypto ? `Your original target was ${originalFiat} for about ${originalCrypto}.` : undefined,
+    rateLine,
+    "I have not funded escrow.",
+    "Reply 'confirm new price' to accept this updated quote, or 'cancel' to stop this request.",
+  ].filter(Boolean).join(" ");
+}
+
+async function continueFromMatchedTradeRequest(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient,
+  matched: TradeRequest,
+  events: TransferFlowEvent[],
+  sellAssetCode: string,
+  quotedCryptoAmount: number
+): Promise<TransferFlowResult> {
+  session.execution.tradeRequestStatus = matched.status;
+  session.execution.tradeId = matched.trade?.id;
+  session.execution.tradeStatus = matched.trade?.status;
+  clearPendingPriceChange(session);
+  session.execution.settlement = createInitialSettlementState({
+    tradeRequestId: matched.id,
+    tradeRequestStatus: matched.status,
+    tradeId: matched.trade?.id,
+    tradeStatus: matched.trade?.status,
+  });
+
+  events.push({
+    type: "trade_matched",
+    message: `Trade request #${matched.id} matched${matched.trade?.id ? ` with trade #${matched.trade.id}` : ""}.`,
+    data: { tradeRequestId: matched.id, tradeId: matched.trade?.id, tradeStatus: matched.trade?.status },
+  });
+
+  let tradeSnapshot = matched.trade?.id && client.getTrade ? await client.getTrade(matched.trade.id) : undefined;
+
+  if (tradeSnapshot?.status) {
+    session.execution.tradeStatus = tradeSnapshot.status;
+    session.execution.settlement = createInitialSettlementState({
+      tradeRequestId: matched.id,
+      tradeRequestStatus: matched.status,
+      tradeId: matched.trade?.id,
+      tradeStatus: tradeSnapshot.status,
+    });
+  }
+
+  const preEscrowAdvance = await maybeAdvanceMatchedTradePreEscrow(
+    session,
+    deps,
+    client,
+    matched,
+    tradeSnapshot,
+    events,
+    sellAssetCode,
+    quotedCryptoAmount
+  );
+  if (preEscrowAdvance.blockedResult) {
+    return preEscrowAdvance.blockedResult;
+  }
+  tradeSnapshot = preEscrowAdvance.tradeSnapshot;
+
+  events.push({
+    type: "settlement_monitor_started",
+    message: `Started post-match settlement monitoring for trade request #${matched.id}.`,
+    data: { tradeRequestId: matched.id, tradeId: matched.trade?.id },
+  });
+
+  const settlement = await refreshSettlementForSession(
+    session,
+    deps,
+    "poll",
+    preEscrowAdvance.escrowJustFunded ? settlementReceiptHandoffOptions(deps) : {}
+  );
+  if (settlement) {
+    events.push(...settlement.events.map(mapSettlementEvent));
+    if (settlement.phase === "completed") {
+      events.push({
+        type: "settlement_completed",
+        message: `Trade #${settlement.state.tradeId} reached escrow release.`,
+        data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
+      });
+    } else if (settlement.phase === "refunded_or_cancelled") {
+      events.push({
+        type: "settlement_refunded_or_cancelled",
+        message: `Trade #${settlement.state.tradeId} ended without release.`,
+        data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
+      });
+    }
+    return reply(withUpdate(session, deps), settlement.prompt, settlement.options, events);
+  }
+
+  session.stage = "awaiting_trade_settlement";
+  session.status = "active";
+  return reply(
+    withUpdate(session, deps),
+    matched.trade?.id
+      ? "I found a counterparty and started securing the transfer. I’ll keep monitoring it automatically and I’ll come back only if I need one more detail or a payout confirmation from you."
+      : "I’ve started the transfer and I’m waiting for the next settlement update. I’ll keep watching it automatically.",
+    ["status"],
+    events
+  );
 }
 
 function buildSavePrompt(session: TransferSession): string {
@@ -1451,6 +2423,29 @@ function addReplyNote(existing: string | undefined, note: string | undefined): s
   return existing ? `${existing} ${note}` : note;
 }
 
+function applyResolvedSavedRecipient(
+  session: TransferSession,
+  resolution: ReturnType<typeof resolveContactQuery>,
+  source: "local" | "remote",
+  query: string
+): string | undefined {
+  if (!resolution.match) return undefined;
+  const queryDiffersFromSavedName = normalizeLookupValue(query) !== normalizeLookupValue(resolution.match.contact.name);
+  session.contactKey = source === "local" ? resolution.match.key : undefined;
+  session.remoteSavedContact = source === "remote" ? resolution.match.contact : undefined;
+  session.recipientName = resolution.match.contact.name;
+  session.aliases = resolution.match.contact.aliases || [];
+  session.contactExists = true;
+  session.contactStale = false;
+  session.recipientMode = "saved";
+  session.contactSaveAction = undefined;
+  return queryDiffersFromSavedName || resolution.matchedBy === "partial"
+    ? source === "remote"
+      ? `I found saved UNIGOX payout details for ${session.recipientName}.`
+      : `I found saved contact ${session.recipientName}.`
+    : undefined;
+}
+
 function summarizeStoredPaymentRoute(currency: string, payment: StoredPaymentMethod): string {
   const methodName = payment.method?.trim();
   const networkName = payment.network?.trim();
@@ -1465,6 +2460,91 @@ function getSingleStoredPaymentSetup(contact: ContactRecord | undefined): { curr
   if (entries.length !== 1) return undefined;
   const [currency, method] = entries[0];
   return { currency, method };
+}
+
+function getPaymentDetailRecipientName(detail: PaymentDetail): string | undefined {
+  const candidates = [
+    detail.details?.full_name,
+    detail.details?.name,
+  ];
+  for (const candidate of candidates) {
+    const value = cleanText(candidate);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function toStoredPaymentMethod(detail: PaymentDetail): StoredPaymentMethod | undefined {
+  if (!detail.payment_method?.id || !detail.payment_network?.id) return undefined;
+  const methodName = cleanText(detail.payment_method.name);
+  const networkName = cleanText(detail.payment_network.name);
+  if (!methodName || !networkName) return undefined;
+  return {
+    method: methodName,
+    methodId: detail.payment_method.id,
+    methodSlug: detail.payment_method.slug,
+    networkId: detail.payment_network.id,
+    network: networkName,
+    networkSlug: detail.payment_network.slug,
+    details: { ...(detail.details || {}) },
+  };
+}
+
+function buildRemoteSavedContactStore(details: PaymentDetail[]): ContactStoreData {
+  const store: ContactStoreData = {
+    contacts: {},
+    _meta: { lastUpdated: "" },
+  };
+
+  for (const detail of details) {
+    const name = getPaymentDetailRecipientName(detail);
+    const paymentMethod = toStoredPaymentMethod(detail);
+    if (!name || !paymentMethod || !detail.fiat_currency_code) continue;
+    upsertContactPaymentMethod(store, {
+      key: normalizeContactKey(name),
+      name,
+      aliases: [],
+      currency: detail.fiat_currency_code,
+      method: paymentMethod,
+    });
+  }
+
+  return store;
+}
+
+async function resolveSavedRecipientQuery(
+  session: TransferSession,
+  deps: TransferFlowDeps
+): Promise<{ resolution: ReturnType<typeof resolveContactQuery>; source: "local" | "remote" }> {
+  const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
+  const localResolution = resolveContactQuery(store, session.recipientQuery);
+  if (localResolution.match || localResolution.ambiguous.length) {
+    return { resolution: localResolution, source: "local" };
+  }
+
+  try {
+    const client = await getExecutionClient(deps);
+    if (!client.listPaymentDetails) {
+      return { resolution: localResolution, source: "local" };
+    }
+    const remoteResolution = resolveContactQuery(
+      buildRemoteSavedContactStore(await client.listPaymentDetails()),
+      session.recipientQuery
+    );
+    if (remoteResolution.match || remoteResolution.ambiguous.length) {
+      return { resolution: remoteResolution, source: "remote" };
+    }
+  } catch {
+    // Fall back to local resolution if the remote saved-payment lookup fails.
+  }
+
+  return { resolution: localResolution, source: "local" };
+}
+
+function getResolvedSavedContact(session: TransferSession, deps: TransferFlowDeps): ContactRecord | undefined {
+  if (session.remoteSavedContact) return session.remoteSavedContact;
+  const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
+  return session.contactKey ? store.contacts[session.contactKey] : resolveContact(store, session.recipientName)?.contact;
 }
 
 function buildSavedContactDisambiguation(query: string, matches: ContactMatch[]): string {
@@ -1601,13 +2681,25 @@ function chooseNetwork(networks: PaymentNetworkInfo[], query: string): PaymentNe
   ) || networks.find((network) => normalizeMatchValue(network.name).includes(normalizedQuery));
 }
 
-function settlementMonitorOptions(deps: TransferFlowDeps) {
+function settlementMonitorOptions(
+  deps: TransferFlowDeps,
+  overrides: Partial<SettlementMonitorOptions> = {}
+): SettlementMonitorOptions {
   return {
     now: deps.now,
     pollIntervalMs: deps.settlementPollIntervalMs,
     timeoutMs: deps.waitForSettlementTimeoutMs,
     receiptReminderMs: deps.receiptReminderMs,
     receiptTimeoutMs: deps.receiptTimeoutMs,
+    ...overrides,
+  };
+}
+
+function settlementReceiptHandoffOptions(deps: TransferFlowDeps): Partial<SettlementMonitorOptions> {
+  return {
+    timeoutMs: deps.receiptConfirmationHandoffTimeoutMs
+      ?? Math.max(deps.waitForSettlementTimeoutMs ?? 15_000, 60_000),
+    continuePollingWhilePhases: ["waiting_for_fiat"],
   };
 }
 
@@ -1626,6 +2718,9 @@ function ensureSettlementState(session: TransferSession): SettlementMonitorState
 
 function mapSettlementPhaseToStage(phase: SettlementPhase): TransferStage {
   switch (phase) {
+    case "awaiting_partner_payment_details":
+    case "awaiting_buyer_payment_details":
+    case "awaiting_escrow_funding":
     case "waiting_for_fiat":
       return "awaiting_trade_settlement";
     case "awaiting_receipt_confirmation":
@@ -1641,6 +2736,324 @@ function mapSettlementPhaseToStage(phase: SettlementPhase): TransferStage {
     default:
       return "awaiting_match_status";
   }
+}
+
+function tradeCanFundEscrow(trade?: SettlementTrade, fallbackStatus?: string): boolean {
+  if (trade?.possible_actions?.includes("action_fund_escrow")) return true;
+  return (trade?.status || fallbackStatus) === "awaiting_escrow_funding_by_seller";
+}
+
+function tradeNeedsPartnerPaymentDetails(trade?: SettlementTrade): boolean {
+  return !!(
+    trade
+    && trade.status === "trade_created"
+    && trade.partner_short_name
+    && trade.partner_details_checked_at == null
+  );
+}
+
+function tradeNeedsBuyerPaymentDetails(trade?: SettlementTrade): boolean {
+  return !!(
+    trade
+    && trade.payment_request === true
+    && trade.status === "awaiting_escrow_funding_by_seller"
+    && !trade.initiator_payment_details
+  );
+}
+
+function formatPartnerFieldLabel(name: string): string {
+  return name.replace(/_/g, " ").trim();
+}
+
+function getPartnerFieldKey(field: {
+  internal_field_name?: string;
+  partner_field_name: string;
+}): string {
+  return field.internal_field_name || field.partner_field_name;
+}
+
+function buildPartnerFieldsToComplete(diff: PartnerPaymentDetailsDiffData): PartnerFieldToComplete[] {
+  const missing = diff.differences?.missing_fields || [];
+  const invalid = diff.differences?.invalid_fields || [];
+  return [
+    ...missing.map((field) => ({
+      fieldKey: getPartnerFieldKey(field),
+      label: sentenceCase(formatPartnerFieldLabel(getPartnerFieldKey(field))),
+      required: field.required ?? true,
+      expectedPattern: field.expected_pattern,
+      example: field.example,
+      hint: field.hint,
+      options: field.options,
+    })),
+    ...invalid.map((field) => ({
+      fieldKey: getPartnerFieldKey(field),
+      label: sentenceCase(formatPartnerFieldLabel(getPartnerFieldKey(field))),
+      required: true,
+      currentValue: field.current_value,
+      expectedPattern: field.expected_pattern,
+      example: field.example,
+      hint: field.hint,
+      options: field.options,
+    })),
+  ];
+}
+
+function summarizePartnerFieldNames(diff: PartnerPaymentDetailsDiffData): string[] {
+  const missing = diff.differences?.missing_fields || [];
+  const invalid = diff.differences?.invalid_fields || [];
+  const labels = [
+    ...missing.filter((field) => field.required).map((field) => formatPartnerFieldLabel(field.partner_field_name)),
+    ...invalid.map((field) => formatPartnerFieldLabel(field.partner_field_name)),
+  ];
+  return [...new Set(labels)];
+}
+
+function partnerDiffCanAutoResolve(diff: PartnerPaymentDetailsDiffData): boolean {
+  const missing = diff.differences?.missing_fields || [];
+  const invalid = diff.differences?.invalid_fields || [];
+  return invalid.length === 0 && missing.every((field) => !field.required);
+}
+
+function buildPartnerFieldReplyHint(field: PartnerFieldToComplete): string {
+  switch (field.fieldKey) {
+    case "holder_city":
+      return "Just send me the city name.";
+    case "holder_postal_code":
+      return "Just send me the postal code.";
+    case "holder_street":
+      return "Just send me the street address.";
+    default:
+      return `Just send me the ${field.label.toLowerCase()}.`;
+  }
+}
+
+function buildPartnerFieldPrompt(state: PartnerDetailCollectionState): string {
+  const field = state.fields[state.index];
+  if (!field) {
+    return "UNIGOX still needs one more payout detail before I can secure this transfer.";
+  }
+
+  const parts = [
+    `UNIGOX needs one more payout detail before I can secure this transfer: ${field.label}.`,
+  ];
+
+  if (field.currentValue) parts.push(`Current value on file: ${field.currentValue}.`);
+  if (field.hint) parts.push(field.hint);
+  if (field.example) parts.push(`Example: ${field.example}.`);
+  if (field.options?.length) {
+    parts.push(`Allowed options: ${field.options.map((option) => option.label || option.value).join(", ")}.`);
+  }
+
+  parts.push(buildPartnerFieldReplyHint(field));
+  return parts.join(" ");
+}
+
+function maybeConsumePartnerFieldValue(
+  turn: TransferTurn,
+  field: PartnerFieldToComplete
+): string | undefined {
+  if (!turn.fields) return undefined;
+  const direct = turn.fields[field.fieldKey];
+  if (typeof direct === "string") return direct;
+  const alias = Object.entries(turn.fields).find(([key]) => normalizeMatchValue(key) === normalizeMatchValue(field.fieldKey));
+  return typeof alias?.[1] === "string" ? alias[1] : undefined;
+}
+
+function validatePartnerFieldValue(field: PartnerFieldToComplete, rawValue: string): string | undefined {
+  const value = rawValue.trim();
+  if (!value) {
+    return field.required ? `${field.label} is required.` : undefined;
+  }
+
+  if (field.options?.length) {
+    const match = field.options.find((option) => normalizeMatchValue(option.value) === normalizeMatchValue(value) || normalizeMatchValue(option.label) === normalizeMatchValue(value));
+    if (!match) {
+      return `Please use one of the allowed ${field.label.toLowerCase()} options.`;
+    }
+  }
+
+  if (field.expectedPattern) {
+    try {
+      const regex = new RegExp(field.expectedPattern);
+      if (!regex.test(value)) {
+        return field.example
+          ? `${field.label} has the wrong format. Example: ${field.example}.`
+          : `${field.label} has the wrong format.`;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveMatchedFundingAmount(
+  currentTrade: SettlementTrade | undefined,
+  matched: TradeRequest,
+  session: TransferSession,
+  quotedCryptoAmount: number
+): string {
+  const candidates = [
+    currentTrade?.total_crypto_amount,
+    matched.total_crypto_amount,
+    session.execution.preflight?.quote?.totalCryptoAmount,
+    quotedCryptoAmount,
+  ];
+
+  for (const candidate of candidates) {
+    const amount = Number(candidate);
+    if (Number.isFinite(amount) && amount > 0) {
+      return String(amount);
+    }
+  }
+
+  return String(quotedCryptoAmount);
+}
+
+async function maybeAdvanceMatchedTradePreEscrow(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient,
+  matched: TradeRequest,
+  tradeSnapshot: SettlementTrade | undefined,
+  events: TransferFlowEvent[],
+  sellAssetCode: string,
+  quotedCryptoAmount: number
+): Promise<{ tradeSnapshot?: SettlementTrade; blockedResult?: TransferFlowResult; escrowJustFunded?: boolean }> {
+  let currentTrade = tradeSnapshot;
+  let escrowJustFunded = false;
+
+  if (currentTrade?.id && tradeNeedsPartnerPaymentDetails(currentTrade)) {
+    if (!client.getPartnerPaymentDetailsDiff || !client.revalidateTradePaymentDetails) {
+      session.stage = "awaiting_trade_settlement";
+      session.status = "active";
+      return {
+        blockedResult: reply(
+          withUpdate(session, deps),
+          "UNIGOX still needs to confirm the payout route before I can secure this transfer, and this setup cannot resolve that step automatically yet.",
+          ["status"],
+          events
+        ),
+      };
+    }
+
+    const diff = await client.getPartnerPaymentDetailsDiff(currentTrade.id);
+    const fieldsToComplete = buildPartnerFieldsToComplete(diff);
+    if (fieldsToComplete.length > 0) {
+      session.execution.partnerDetailCollection = {
+        tradeId: currentTrade.id,
+        tradeRequestId: matched.id,
+        paymentDetailsId: diff.payment_details_id || session.execution.paymentDetailsId || 0,
+        partner: currentTrade.partner_short_name || "",
+        index: 0,
+        fields: fieldsToComplete,
+        values: {},
+      };
+      session.stage = "awaiting_partner_payment_details_input";
+      session.status = "active";
+      return {
+        blockedResult: reply(
+          withUpdate(session, deps),
+          buildPartnerFieldPrompt(session.execution.partnerDetailCollection),
+          ["status"],
+          [
+            ...events,
+            {
+              type: "settlement_status_changed",
+              message: `UNIGOX needs additional payout details before escrow funding on trade #${currentTrade.id}.`,
+              data: {
+                tradeId: currentTrade.id,
+                tradeRequestId: matched.id,
+                fields: fieldsToComplete.map((field) => field.fieldKey),
+              },
+            },
+          ]
+        ),
+      };
+    }
+
+    const revalidated = await client.revalidateTradePaymentDetails(currentTrade.id);
+    const refreshedTrade = client.getTrade
+      ? await client.getTrade(revalidated?.trade?.id || currentTrade.id)
+      : currentTrade;
+    if (refreshedTrade) {
+      currentTrade = refreshedTrade;
+    }
+
+    session.execution.tradeStatus = currentTrade?.status || session.execution.tradeStatus;
+    session.execution.settlement = createInitialSettlementState({
+      tradeRequestId: matched.id,
+      tradeRequestStatus: matched.status,
+      tradeId: currentTrade?.id || matched.trade?.id,
+      tradeStatus: currentTrade?.status,
+    });
+
+    events.push({
+      type: "settlement_status_changed",
+      message: `Rechecked the payout route with UNIGOX for trade #${currentTrade?.id || matched.trade?.id}.`,
+      data: { tradeId: currentTrade?.id || matched.trade?.id, tradeRequestId: matched.id, tradeStatus: currentTrade?.status },
+    });
+
+    if (currentTrade && tradeNeedsPartnerPaymentDetails(currentTrade)) {
+      session.stage = "awaiting_trade_settlement";
+      session.status = "active";
+      return {
+        blockedResult: reply(
+          withUpdate(session, deps),
+          "UNIGOX still wants one more payout detail before I can secure this transfer, so I’m keeping the trade on hold for now.",
+          ["status"],
+          events
+        ),
+      };
+    }
+  }
+
+  const matchedAssetCode = (session.execution.preflight?.selectedAssetCode
+    || session.execution.preflight?.quote?.cryptoCurrencyCode
+    || sellAssetCode) as "USDC" | "USDT";
+  const matchedFundingAmount = resolveMatchedFundingAmount(currentTrade, matched, session, quotedCryptoAmount);
+
+  if (
+    matched.trade?.id
+    && tradeCanFundEscrow(currentTrade, matched.trade?.status)
+    && client.fundTradeEscrow
+    && !tradeNeedsPartnerPaymentDetails(currentTrade)
+    && !tradeNeedsBuyerPaymentDetails(currentTrade)
+    && currentTrade?.escrow_address
+  ) {
+    const funding = await client.fundTradeEscrow(matchedAssetCode, matchedFundingAmount, currentTrade.escrow_address);
+    events.push({
+      type: "escrow_funding_submitted",
+      message: `Submitted ${matchedFundingAmount} ${matchedAssetCode} to the trade escrow address for trade #${matched.trade.id}.`,
+      data: {
+        tradeId: matched.trade.id,
+        tradeRequestId: matched.id,
+        assetCode: matchedAssetCode,
+        amount: matchedFundingAmount,
+        escrowAddress: currentTrade.escrow_address,
+        txId: funding.txId,
+        txHash: funding.txHash,
+      },
+    });
+
+    if (client.getTrade) {
+      const fundedTrade = await client.getTrade(matched.trade.id);
+      if (fundedTrade) {
+        currentTrade = fundedTrade;
+        session.execution.tradeStatus = fundedTrade.status;
+        session.execution.settlement = createInitialSettlementState({
+          tradeRequestId: matched.id,
+          tradeRequestStatus: matched.status,
+          tradeId: fundedTrade.id,
+          tradeStatus: fundedTrade.status,
+        });
+      }
+    }
+    escrowJustFunded = true;
+  }
+
+  return { tradeSnapshot: currentTrade, escrowJustFunded };
 }
 
 function mapSettlementEvent(event: SettlementSnapshot["events"][number]): TransferFlowEvent {
@@ -1680,14 +3093,15 @@ function applySettlementSnapshotToSession(session: TransferSession, snapshot: Se
 async function refreshSettlementForSession(
   session: TransferSession,
   deps: TransferFlowDeps,
-  mode: "refresh" | "poll" = "refresh"
+  mode: "refresh" | "poll" = "refresh",
+  overrides: Partial<SettlementMonitorOptions> = {}
 ): Promise<SettlementSnapshot | undefined> {
   const state = ensureSettlementState(session);
   if (!state) return undefined;
   const client = await getExecutionClient(deps);
   const snapshot = mode === "poll"
-    ? await pollSettlementSnapshot(state, client, settlementMonitorOptions(deps))
-    : await refreshSettlementSnapshot(state, client, settlementMonitorOptions(deps));
+    ? await pollSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides))
+    : await refreshSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides));
   applySettlementSnapshotToSession(session, snapshot);
   return snapshot;
 }
@@ -1841,6 +3255,177 @@ async function maybeHandleTopUpTurn(
   return undefined;
 }
 
+async function maybeHandlePartnerPaymentDetailsTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (session.stage !== "awaiting_partner_payment_details_input") return undefined;
+  const collection = session.execution.partnerDetailCollection;
+  if (!collection) return undefined;
+
+  let consumedText = false;
+  while (collection.index < collection.fields.length) {
+    const field = collection.fields[collection.index];
+    const structuredValue = maybeConsumePartnerFieldValue(turn, field);
+    const textValue = !consumedText ? cleanText(turn.text) : "";
+    const provided = structuredValue ?? (textValue || undefined);
+
+    if (!provided) {
+      return reply(withUpdate(session, deps), buildPartnerFieldPrompt(collection), ["status"]);
+    }
+
+    if (!structuredValue) consumedText = true;
+
+    const validationError = validatePartnerFieldValue(field, provided);
+    if (validationError) {
+      return reply(withUpdate(session, deps), `${validationError} ${buildPartnerFieldPrompt(collection)}`, ["status"]);
+    }
+
+    collection.values[field.fieldKey] = provided.trim();
+    collection.index += 1;
+  }
+
+  const client = await getExecutionClient(deps);
+  if (!client.createOrUpdatePartnerPaymentDetails || !client.revalidateTradePaymentDetails) {
+    session.stage = "awaiting_trade_settlement";
+    session.status = "active";
+    return reply(
+      withUpdate(session, deps),
+      "I captured the extra payout details, but this setup cannot push them back into UNIGOX automatically yet.",
+      ["status"]
+    );
+  }
+
+  await client.createOrUpdatePartnerPaymentDetails({
+    internalDetailsId: collection.paymentDetailsId,
+    partner: collection.partner,
+    details: collection.values,
+  });
+
+  const revalidated = await client.revalidateTradePaymentDetails(collection.tradeId);
+  let currentTrade = client.getTrade
+    ? await client.getTrade(revalidated?.trade?.id || collection.tradeId)
+    : undefined;
+  let escrowJustFunded = false;
+
+  session.execution.partnerDetailCollection = undefined;
+  session.execution.tradeId = currentTrade?.id || collection.tradeId;
+  session.execution.tradeStatus = currentTrade?.status || session.execution.tradeStatus;
+  session.execution.settlement = createInitialSettlementState({
+    tradeRequestId: collection.tradeRequestId,
+    tradeRequestStatus: session.execution.tradeRequestStatus,
+    tradeId: currentTrade?.id || collection.tradeId,
+    tradeStatus: currentTrade?.status,
+  });
+
+  const events: TransferFlowEvent[] = [{
+    type: "settlement_status_changed",
+    message: `Updated the payout details UNIGOX needed for trade #${collection.tradeId}.`,
+    data: { tradeId: collection.tradeId, tradeRequestId: collection.tradeRequestId, details: collection.values },
+  }];
+
+  if (currentTrade && tradeNeedsPartnerPaymentDetails(currentTrade)) {
+    const diff = client.getPartnerPaymentDetailsDiff
+      ? await client.getPartnerPaymentDetailsDiff(collection.tradeId)
+      : undefined;
+    const nextFields = diff ? buildPartnerFieldsToComplete(diff) : [];
+    if (diff && nextFields.length > 0) {
+      session.execution.partnerDetailCollection = {
+        tradeId: collection.tradeId,
+        tradeRequestId: collection.tradeRequestId,
+        paymentDetailsId: diff.payment_details_id || collection.paymentDetailsId,
+        partner: collection.partner,
+        index: 0,
+        fields: nextFields,
+        values: {},
+      };
+      session.stage = "awaiting_partner_payment_details_input";
+      return reply(
+        withUpdate(session, deps),
+        buildPartnerFieldPrompt(session.execution.partnerDetailCollection),
+        ["status"],
+        events
+      );
+    }
+
+    session.stage = "awaiting_trade_settlement";
+    return reply(
+      withUpdate(session, deps),
+      "UNIGOX still wants one more payout detail before I can secure this transfer, so I’m keeping the trade on hold for now.",
+      ["status"],
+      events
+    );
+  }
+
+  const matchedAssetCode = (session.execution.preflight?.selectedAssetCode
+    || session.execution.preflight?.quote?.cryptoCurrencyCode
+    || "USDC") as "USDC" | "USDT";
+  const matchedFundingAmount = resolveMatchedFundingAmount(
+    currentTrade,
+    {
+      id: collection.tradeRequestId,
+      status: session.execution.tradeRequestStatus || "accepted_by_vendor",
+      trade: currentTrade ? { id: currentTrade.id, status: currentTrade.status } : undefined,
+      total_crypto_amount: currentTrade?.total_crypto_amount,
+      trade_type: "SELL",
+    },
+    session,
+    session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0
+  );
+
+  if (
+    currentTrade?.id
+    && tradeCanFundEscrow(currentTrade, currentTrade.status)
+    && client.fundTradeEscrow
+    && !tradeNeedsBuyerPaymentDetails(currentTrade)
+    && currentTrade.escrow_address
+  ) {
+    const funding = await client.fundTradeEscrow(matchedAssetCode, matchedFundingAmount, currentTrade.escrow_address);
+    events.push({
+      type: "escrow_funding_submitted",
+      message: `Submitted ${matchedFundingAmount} ${matchedAssetCode} to the trade escrow address for trade #${currentTrade.id}.`,
+      data: {
+        tradeId: currentTrade.id,
+        tradeRequestId: collection.tradeRequestId,
+        assetCode: matchedAssetCode,
+        amount: matchedFundingAmount,
+        escrowAddress: currentTrade.escrow_address,
+        txId: funding.txId,
+        txHash: funding.txHash,
+      },
+    });
+
+    if (client.getTrade) {
+      const fundedTrade = await client.getTrade(currentTrade.id);
+      if (fundedTrade) {
+        currentTrade = fundedTrade;
+        session.execution.tradeStatus = fundedTrade.status;
+        session.execution.settlement = createInitialSettlementState({
+          tradeRequestId: collection.tradeRequestId,
+          tradeRequestStatus: session.execution.tradeRequestStatus,
+          tradeId: fundedTrade.id,
+          tradeStatus: fundedTrade.status,
+        });
+      }
+    }
+    escrowJustFunded = true;
+  }
+
+  const snapshot = await refreshSettlementForSession(
+    session,
+    deps,
+    escrowJustFunded ? "poll" : "refresh",
+    escrowJustFunded ? settlementReceiptHandoffOptions(deps) : {}
+  );
+  if (snapshot) {
+    return reply(withUpdate(session, deps), snapshot.prompt, snapshot.options, [...events, ...snapshot.events.map(mapSettlementEvent)]);
+  }
+
+  session.stage = "awaiting_trade_settlement";
+  return reply(withUpdate(session, deps), "I updated the payout details and I’m continuing the transfer.", ["status"], events);
+}
+
 async function maybeHandleSettlementTurn(
   session: TransferSession,
   turn: TransferTurn,
@@ -1923,12 +3508,307 @@ async function maybeHandleSettlementTurn(
   return reply(withUpdate(session, deps), deferred.prompt, deferred.options, [...events, ...deferred.events.map(mapSettlementEvent)]);
 }
 
+async function maybeHandleKycTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (!["awaiting_kyc_full_name", "awaiting_kyc_country", "awaiting_kyc_completion"].includes(session.stage)) {
+    return undefined;
+  }
+
+  const client = await getExecutionClient(deps);
+  const existingVerificationResult = await maybeResumeExistingKycVerification(session, deps, client);
+  if (existingVerificationResult) {
+    return existingVerificationResult;
+  }
+  const text = cleanText(turn.text || turn.option);
+  const parsedIdentity = parseKycIdentityInput(text);
+
+  if (session.stage === "awaiting_kyc_full_name") {
+    const fullName = parsedIdentity.fullName || text?.trim();
+    if (!fullName) {
+      return reply(
+        withUpdate(session, deps),
+        `${buildKycRequirementMessage(session)} First, what full legal name should I use for the verification?`
+      );
+    }
+    const words = fullName.split(/\s+/).filter(Boolean);
+    if (words.length < 2) {
+      return reply(
+        withUpdate(session, deps),
+        `${buildKycRequirementMessage(session)} Please send the full legal name with at least first and last name.`
+      );
+    }
+    session.auth.kycFullName = fullName;
+    if (!session.auth.kycCountryCode && parsedIdentity.countryCode) {
+      session.auth.kycCountryCode = parsedIdentity.countryCode;
+    }
+    return startKycVerificationFlow(session, deps, client);
+  }
+
+  if (session.stage === "awaiting_kyc_country") {
+    if (!session.auth.kycFullName && parsedIdentity.fullName) {
+      session.auth.kycFullName = parsedIdentity.fullName;
+    }
+    const countryCode = parsedIdentity.countryCode || resolveCountryCode(text);
+    if (!countryCode) {
+      return reply(withUpdate(session, deps), buildKycCountryPrompt(session));
+    }
+    session.auth.kycCountryCode = countryCode;
+    return startKycVerificationFlow(session, deps, client);
+  }
+
+  if (!client.getKycVerificationStatus) {
+    return reply(
+      withUpdate(session, deps),
+      "I still need UNIGOX to mark your KYC as approved before I can continue. Once that is done, message me here and I’ll resume the transfer."
+    );
+  }
+
+  let verification = await client.getKycVerificationStatus();
+  if (!verification.verification_url && kycVerificationNeedsAttention(verification.status)) {
+    verification = await waitForKycVerificationLink(session, deps, client, verification);
+  }
+  applyKycVerificationSnapshot(session, verification);
+
+  if (isUserKycVerified(session.auth.kycStatus)) {
+    session.status = "active";
+    session.stage = "resolving";
+    session.execution.confirmed = false;
+    clearExecutionPreflight(session);
+    const refreshedPreflight = await ensureExecutionPreflight(session, deps, client);
+    if (refreshedPreflight.blockedResult) {
+      return refreshedPreflight.blockedResult;
+    }
+    session.stage = "awaiting_confirmation";
+    return reply(
+      withUpdate(session, deps),
+      `KYC is approved now. ${buildConfirmationMessage(session)}`
+    );
+  }
+
+  if (kycVerificationHasAuthFailure(verification)) {
+    return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
+  }
+
+  if (kycVerificationNeedsAttention(verification.status)) {
+    return reply(withUpdate(session, deps), buildKycVerificationLinkMessage(session, verification));
+  }
+
+  if (verification.status === "failed" || verification.status === "expired") {
+    session.auth.kycVerificationUrl = undefined;
+    session.auth.kycVerificationSecondsLeft = undefined;
+    return startKycVerificationFlow(session, deps, client);
+  }
+
+  return startKycVerificationFlow(session, deps, client);
+}
+
+async function maybeHandleOutstandingTradeReminderTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  const outstanding = session.auth.outstandingTrade;
+  if (!outstanding || !session.auth.outstandingTradeReminderShown) return undefined;
+  if (outstanding.phase !== "awaiting_receipt_confirmation") return undefined;
+
+  const decision = parseReceiptDecision(turn.option || turn.text);
+  if (!decision || decision === "other") return undefined;
+
+  const amountLabel = outstanding.fiatAmount && outstanding.fiatCurrencyCode
+    ? `${formatFixed(outstanding.fiatAmount, 2)} ${outstanding.fiatCurrencyCode}`
+    : "that earlier transfer";
+  const continuation = buildTransferContinuationPrompt(session);
+
+  if (decision === "not_received") {
+    clearOutstandingTradeReminder(session);
+    return reply(
+      withUpdate(session, deps),
+      continuation
+        ? `Okay, I won't confirm receipt for ${amountLabel} to ${outstanding.recipient} yet. ${continuation}`
+        : `Okay, I won't confirm receipt for ${amountLabel} to ${outstanding.recipient} yet.`,
+    );
+  }
+
+  const client = await getExecutionClient(deps);
+  if (!client.confirmFiatReceived) {
+    return reply(
+      withUpdate(session, deps),
+      `I still need the signed confirm-payment step for ${amountLabel} to ${outstanding.recipient}, and this setup cannot execute it automatically yet.`,
+    );
+  }
+
+  try {
+    await client.confirmFiatReceived(outstanding.tradeId);
+    clearOutstandingTradeReminder(session);
+    return reply(
+      withUpdate(session, deps),
+      continuation
+        ? `I confirmed receipt for ${amountLabel} to ${outstanding.recipient}. Escrow release should now be in progress. ${continuation}`
+        : `I confirmed receipt for ${amountLabel} to ${outstanding.recipient}. Escrow release should now be in progress.`,
+      undefined,
+      [{
+        type: "receipt_confirmed",
+        message: `Confirmed fiat receipt for earlier trade #${outstanding.tradeId}.`,
+        data: { tradeId: outstanding.tradeId, source: "startup_reminder" },
+      }]
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply(
+      withUpdate(session, deps),
+      `I tried to confirm receipt for ${amountLabel} to ${outstanding.recipient}, but the signed confirm-payment step failed: ${message}`,
+    );
+  }
+}
+
+async function maybeHandlePendingPriceChangeTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (session.stage !== "awaiting_new_price_confirmation" || !session.execution.tradeRequestId) return undefined;
+
+  const responseText = cleanText(turn.option || turn.text);
+  const wantsConfirm = /^(confirm(?: new price)?|accept(?: new price)?|go ahead|proceed|continue)$/i.test(responseText);
+  const wantsCancel = /^(cancel|stop|reject(?: new price)?|decline)$/i.test(responseText);
+  const client = await getExecutionClient(deps);
+  const tradeRequestId = session.execution.tradeRequestId;
+  const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0;
+  const sellAssetCode = session.execution.preflight?.selectedAssetCode
+    || session.execution.preflight?.quote?.cryptoCurrencyCode
+    || "USDC";
+  const events: TransferFlowEvent[] = [];
+
+  const latest = client.getTradeRequest ? await client.getTradeRequest(tradeRequestId) : undefined;
+  if (latest?.status) {
+    session.execution.tradeRequestStatus = latest.status;
+  }
+
+  if (latest?.status === "accepted_by_vendor" && latest.trade?.id) {
+    return continueFromMatchedTradeRequest(session, deps, client, latest, events, sellAssetCode, quotedCryptoAmount);
+  }
+
+  if (latest?.status === "new_price_refused_by_initiator" || latest?.status === "canceled_by_initiator") {
+    clearPendingPriceChange(session);
+    session.stage = "awaiting_no_match_resolution";
+    session.status = "active";
+    return reply(
+      withUpdate(session, deps),
+      "That updated quote has already been cancelled. You can retry, change the method, or change the currency.",
+      ["retry", "change method", "change currency", "change amount"],
+      events
+    );
+  }
+
+  if (!wantsConfirm && !wantsCancel) {
+    if (latest?.status === "new_price_confirming_by_initiator") {
+      capturePendingPriceChange(session, latest);
+    }
+    return reply(
+      withUpdate(session, deps),
+      buildNewPriceConfirmationMessage(session, latest),
+      ["confirm new price", "cancel"],
+      events
+    );
+  }
+
+  if (wantsCancel) {
+    if (client.refuseTradeRequestPrice) {
+      const refused = await client.refuseTradeRequestPrice(tradeRequestId);
+      session.execution.tradeRequestStatus = refused.status;
+    }
+    clearPendingPriceChange(session);
+    session.stage = "awaiting_no_match_resolution";
+    session.status = "active";
+    events.push({
+      type: "trade_price_change_cancelled",
+      message: `Cancelled the updated quote for trade request #${tradeRequestId}.`,
+      data: { tradeRequestId },
+    });
+    return reply(
+      withUpdate(session, deps),
+      "Okay, I cancelled that updated quote. If you want, I can retry the transfer, change the method, or change the currency.",
+      ["retry", "change method", "change currency", "change amount"],
+      events
+    );
+  }
+
+  if (!client.confirmTradeRequestPrice) {
+    return reply(
+      withUpdate(session, deps),
+      "This setup cannot confirm a changed vendor price yet. Please cancel this request or retry the transfer.",
+      ["cancel", "retry"],
+      events
+    );
+  }
+
+  const confirmed = await client.confirmTradeRequestPrice(tradeRequestId);
+  session.execution.tradeRequestStatus = confirmed.status;
+  clearPendingPriceChange(session);
+  events.push({
+    type: "trade_price_change_confirmed",
+    message: `Confirmed the updated quote for trade request #${tradeRequestId}.`,
+    data: { tradeRequestId, status: confirmed.status },
+  });
+
+  const resolved = confirmed.trade?.id || confirmed.status === "accepted_by_vendor"
+    ? confirmed
+    : await client.waitForTradeMatch(tradeRequestId, deps.waitForMatchTimeoutMs || 120_000);
+
+  if (resolved.status === "new_price_confirming_by_initiator") {
+    capturePendingPriceChange(session, resolved);
+    session.stage = "awaiting_new_price_confirmation";
+    return reply(
+      withUpdate(session, deps),
+      buildNewPriceConfirmationMessage(session, resolved),
+      ["confirm new price", "cancel"],
+      events
+    );
+  }
+
+  return continueFromMatchedTradeRequest(session, deps, client, resolved, events, sellAssetCode, quotedCryptoAmount);
+}
+
 async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedHints, deps: TransferFlowDeps): Promise<TransferFlowResult | undefined> {
   if (!hints.checkStatus || !session.execution.tradeRequestId) return undefined;
 
   const snapshot = await refreshSettlementForSession(session, deps, "refresh");
   if (snapshot) {
     const events = snapshot.events.map(mapSettlementEvent);
+    if (
+      snapshot.phase === "awaiting_partner_payment_details"
+      || snapshot.phase === "awaiting_escrow_funding"
+    ) {
+      const tradeRequest = snapshot.tradeRequest || (client.getTradeRequest ? await client.getTradeRequest(session.execution.tradeRequestId) : undefined);
+      if (tradeRequest) {
+        const advanceEvents = [...events];
+        const advanceResult = await maybeAdvanceMatchedTradePreEscrow(
+          session,
+          deps,
+          client,
+          tradeRequest,
+          snapshot.trade,
+          advanceEvents,
+          session.execution.preflight?.selectedAssetCode
+            || session.execution.preflight?.quote?.cryptoCurrencyCode
+            || "USDC",
+          session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0
+        );
+        if (advanceResult.blockedResult) {
+          return advanceResult.blockedResult;
+        }
+        if (advanceResult.tradeSnapshot?.status && advanceResult.tradeSnapshot.status !== snapshot.trade?.status) {
+          const followUp = await refreshSettlementForSession(session, deps, "refresh");
+          if (followUp) {
+            const followUpEvents = followUp.events.map(mapSettlementEvent);
+            return reply(withUpdate(session, deps), followUp.prompt, followUp.options, [...advanceEvents, ...followUpEvents]);
+          }
+        }
+      }
+    }
     if (snapshot.phase === "completed") {
       events.push({
         type: "settlement_completed",
@@ -1951,6 +3831,16 @@ async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedH
     tradeRequest = await client.getTradeRequest(session.execution.tradeRequestId);
     session.execution.tradeRequestStatus = tradeRequest.status;
     if (tradeRequest.trade?.id) session.execution.tradeId = tradeRequest.trade.id;
+    if (tradeRequest.status === "new_price_confirming_by_initiator") {
+      capturePendingPriceChange(session, tradeRequest);
+      session.stage = "awaiting_new_price_confirmation";
+      session.status = "active";
+      return reply(
+        withUpdate(session, deps),
+        buildNewPriceConfirmationMessage(session, tradeRequest),
+        ["confirm new price", "cancel"]
+      );
+    }
   }
 
   let tradeStatus = session.execution.tradeStatus;
@@ -2288,17 +4178,31 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
 
   const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || amount;
   const sellAssetCode = session.execution.preflight?.selectedAssetCode || session.execution.preflight?.quote?.cryptoCurrencyCode || "USDC";
-  const tradeRequest = await client.createTradeRequest({
-    tradeType: "SELL",
-    cryptoCurrencyCode: sellAssetCode,
-    fiatCurrencyCode: session.currency!,
-    fiatAmount: amount,
-    cryptoAmount: quotedCryptoAmount,
-    paymentDetailsId,
-    paymentMethodId: session.payment!.methodId,
-    paymentNetworkId: session.payment!.networkId,
-    tradePartner: settings.tradePartner,
-  });
+  let tradeRequest: TradeRequest;
+  try {
+    tradeRequest = await client.createTradeRequest({
+      tradeType: "SELL",
+      cryptoCurrencyCode: sellAssetCode,
+      fiatCurrencyCode: session.currency!,
+      fiatAmount: amount,
+      cryptoAmount: quotedCryptoAmount,
+      paymentDetailsId,
+      paymentMethodId: session.payment!.methodId,
+      paymentNetworkId: session.payment!.networkId,
+      tradePartner: settings.tradePartner,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/kyc_verification_needed/i.test(message)) {
+      session.execution.confirmed = false;
+      const kycCheck = await maybeEnsureKycReady(session, deps, client);
+      if (kycCheck.blockedResult) {
+        return kycCheck.blockedResult;
+      }
+      return startKycVerificationFlow(session, deps, client);
+    }
+    throw error;
+  }
 
   session.execution.tradeRequestId = tradeRequest.id;
   session.execution.tradeRequestStatus = tradeRequest.status;
@@ -2310,56 +4214,30 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
 
   try {
     const matched = await client.waitForTradeMatch(tradeRequest.id, deps.waitForMatchTimeoutMs || 120_000);
-    session.execution.tradeRequestStatus = matched.status;
-    session.execution.tradeId = matched.trade?.id;
-    session.execution.tradeStatus = matched.trade?.status;
-    session.execution.settlement = createInitialSettlementState({
-      tradeRequestId: matched.id,
-      tradeRequestStatus: matched.status,
-      tradeId: matched.trade?.id,
-      tradeStatus: matched.trade?.status,
-    });
-
-    events.push({
-      type: "trade_matched",
-      message: `Trade request #${matched.id} matched${matched.trade?.id ? ` with trade #${matched.trade.id}` : ""}.`,
-      data: { tradeRequestId: matched.id, tradeId: matched.trade?.id, tradeStatus: matched.trade?.status },
-    });
-    events.push({
-      type: "settlement_monitor_started",
-      message: `Started post-match settlement monitoring for trade request #${matched.id}.`,
-      data: { tradeRequestId: matched.id, tradeId: matched.trade?.id },
-    });
-
-    const settlement = await refreshSettlementForSession(session, deps, "poll");
-    if (settlement) {
-      events.push(...settlement.events.map(mapSettlementEvent));
-      if (settlement.phase === "completed") {
-        events.push({
-          type: "settlement_completed",
-          message: `Trade #${settlement.state.tradeId} reached escrow release.`,
-          data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
-        });
-      } else if (settlement.phase === "refunded_or_cancelled") {
-        events.push({
-          type: "settlement_refunded_or_cancelled",
-          message: `Trade #${settlement.state.tradeId} ended without release.`,
-          data: { tradeId: settlement.state.tradeId, tradeStatus: settlement.state.tradeStatus },
-        });
-      }
-      return reply(withUpdate(session, deps), settlement.prompt, settlement.options, events);
+    if (matched.status === "new_price_confirming_by_initiator") {
+      capturePendingPriceChange(session, matched);
+      session.stage = "awaiting_new_price_confirmation";
+      session.status = "active";
+      events.push({
+        type: "trade_price_changed",
+        message: `Trade request #${matched.id} needs a new price confirmation before funding.`,
+        data: {
+          tradeRequestId: matched.id,
+          newFiatAmount: matched.fiat_amount,
+          newCryptoAmount: matched.total_crypto_amount,
+          originalFiatAmount: matched.best_deal_fiat_amount || session.amount,
+          originalCryptoAmount: matched.best_deal_crypto_amount || quotedCryptoAmount,
+        },
+      });
+      return reply(
+        withUpdate(session, deps),
+        buildNewPriceConfirmationMessage(session, matched),
+        ["confirm new price", "cancel"],
+        events
+      );
     }
 
-    session.stage = "awaiting_trade_settlement";
-    session.status = "active";
-    return reply(
-      withUpdate(session, deps),
-      matched.trade?.id
-        ? `Trade request #${matched.id} matched. Trade #${matched.trade.id} is now ${matched.trade.status || "created"}. I am monitoring settlement. Reply 'received' only after the recipient confirms the fiat arrived, or 'not received' to keep escrow locked.`
-        : `Trade request #${matched.id} matched successfully. I am now monitoring settlement.`,
-      ["received", "not received", "status"],
-      events
-    );
+    return continueFromMatchedTradeRequest(session, deps, client, matched, events, sellAssetCode, quotedCryptoAmount);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     session.execution.lastError = message;
@@ -2422,7 +4300,17 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+    delete stageAwareHints.recipient;
+    delete stageAwareHints.currency;
+    delete stageAwareHints.amount;
+    delete stageAwareHints.savedOrNew;
+    delete stageAwareHints.saveContactDecision;
+    delete stageAwareHints.confirm;
+    delete stageAwareHints.changeAmount;
+    delete stageAwareHints.changeCurrency;
+  }
+  if (["awaiting_kyc_full_name", "awaiting_kyc_country", "awaiting_kyc_completion"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -2435,18 +4323,88 @@ export async function advanceTransferFlow(
   const events: TransferFlowEvent[] = [];
   let consumedTurnForSelection = false;
   let savedContactReplyNote: string | undefined;
+  let handledSavedRecipientDecision = false;
 
-  if (hints.cancel) {
+  if (hints.cancel && session.stage !== "awaiting_new_price_confirmation") {
     session.status = "cancelled";
     session.stage = "cancelled";
     return reply(withUpdate(session, deps), "Okay, I cancelled this transfer flow.");
   }
 
+  if (session.stage === "awaiting_saved_recipient_confirmation" && session.pendingSavedRecipientConfirmation) {
+    const decisionText = cleanText(normalizedTurn.option || normalizedTurn.text);
+    const alternateRecipient = cleanText(stageAwareHints.recipient);
+    const reminderDecision = parseReceiptDecision(decisionText);
+
+    if (
+      session.auth.outstandingTradeReminderShown
+      && session.auth.outstandingTrade?.phase === "awaiting_receipt_confirmation"
+      && reminderDecision
+      && reminderDecision !== "other"
+      && isExplicitReceiptResponse(decisionText)
+    ) {
+      const reminderReply = await maybeHandleOutstandingTradeReminderTurn(session, normalizedTurn, deps);
+      if (reminderReply) {
+        reminderReply.session.stage = "awaiting_saved_recipient_confirmation";
+        reminderReply.reply = `${reminderReply.reply} ${buildSavedRecipientConfirmationPrompt(session.pendingSavedRecipientConfirmation)}`;
+        reminderReply.options = ["yes", "no"];
+        return reminderReply;
+      }
+    }
+
+    if (AFFIRMATIVE_RE.test(decisionText) || CONFIRM_RE.test(decisionText) || /^(use (?:that|them|it)|that one)$/i.test(decisionText)) {
+      savedContactReplyNote = addReplyNote(savedContactReplyNote, acceptPendingSavedRecipientConfirmation(session));
+      handledSavedRecipientDecision = true;
+    } else if (NO_RE.test(decisionText) || /^(different|someone else|not that|other)$/i.test(decisionText)) {
+      clearPendingSavedRecipientConfirmation(session);
+      session.contactKey = undefined;
+      session.remoteSavedContact = undefined;
+      session.recipientName = undefined;
+      session.recipientQuery = undefined;
+      session.aliases = [];
+      session.contactExists = false;
+      session.contactStale = false;
+      session.recipientMode = "saved";
+      session.contactSaveAction = undefined;
+      session.stage = "awaiting_recipient_name";
+      handledSavedRecipientDecision = true;
+      return reply(withUpdate(session, deps), "Okay — what exact saved recipient name should I use?");
+    } else if (
+      alternateRecipient
+      && normalizeLookupValue(alternateRecipient) !== normalizeLookupValue(session.pendingSavedRecipientConfirmation.match.contact.name)
+    ) {
+      clearPendingSavedRecipientConfirmation(session);
+      session.contactKey = undefined;
+      session.remoteSavedContact = undefined;
+      session.recipientName = undefined;
+      session.recipientQuery = alternateRecipient;
+      session.aliases = [alternateRecipient];
+      session.contactExists = false;
+      session.contactStale = false;
+      session.recipientMode = "saved";
+      session.contactSaveAction = undefined;
+      session.stage = "resolving";
+      handledSavedRecipientDecision = true;
+    } else {
+      return reply(
+        withUpdate(session, deps),
+        buildSavedRecipientConfirmationPrompt(session.pendingSavedRecipientConfirmation),
+        ["yes", "no"]
+      );
+    }
+  }
+
   const statusReply = await maybeHandleStatusRequest(session, hints, deps);
   if (statusReply) return statusReply;
 
+  const pendingPriceReply = await maybeHandlePendingPriceChangeTurn(session, normalizedTurn, deps);
+  if (pendingPriceReply) return pendingPriceReply;
+
   const settlementReply = await maybeHandleSettlementTurn(session, normalizedTurn, deps);
   if (settlementReply) return settlementReply;
+
+  const partnerPaymentDetailsReply = await maybeHandlePartnerPaymentDetailsTurn(session, normalizedTurn, deps);
+  if (partnerPaymentDetailsReply) return partnerPaymentDetailsReply;
 
   if (settlementStageActive(session) && session.execution.tradeRequestId) {
     const snapshot = await refreshSettlementForSession(session, deps, "refresh");
@@ -2472,8 +4430,18 @@ export async function advanceTransferFlow(
     }
   }
 
+  await maybeRefreshStoredAuthState(session, deps);
+
+  if (!handledSavedRecipientDecision) {
+    const outstandingReminderReply = await maybeHandleOutstandingTradeReminderTurn(session, normalizedTurn, deps);
+    if (outstandingReminderReply) return outstandingReminderReply;
+  }
+
   const authOnboardingReply = await maybeHandleAuthOnboardingTurn(session, normalizedTurn, deps);
   if (authOnboardingReply) return authOnboardingReply;
+
+  const kycReply = await maybeHandleKycTurn(session, normalizedTurn, deps);
+  if (kycReply) return kycReply;
 
   applyHintsToSession(session, stageAwareHints);
   applyMidFlowChanges(session, hints);
@@ -2542,18 +4510,16 @@ export async function advanceTransferFlow(
   }
 
   if (session.recipientQuery && !session.recipientName) {
-    const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
-    const resolution = resolveContactQuery(store, session.recipientQuery);
+    const { resolution, source } = await resolveSavedRecipientQuery(session, deps);
     if (resolution.match) {
-      const queryDiffersFromSavedName = normalizeLookupValue(session.recipientQuery) !== normalizeLookupValue(resolution.match.contact.name);
-      session.contactKey = resolution.match.key;
-      session.recipientName = resolution.match.contact.name;
-      session.aliases = resolution.match.contact.aliases || [];
-      session.contactExists = true;
-      session.recipientMode = "saved";
-      if (queryDiffersFromSavedName || resolution.matchedBy === "partial") {
-        savedContactReplyNote = addReplyNote(savedContactReplyNote, `I found saved contact ${session.recipientName}.`);
+      if (shouldDoubleConfirmSavedRecipient(resolution, session.recipientQuery) && !stageAwareHints.amount) {
+        return reply(
+          withUpdate(session, deps),
+          startSavedRecipientConfirmation(session, resolution, source, session.recipientQuery),
+          ["yes", "no"]
+        );
       }
+      savedContactReplyNote = addReplyNote(savedContactReplyNote, applyResolvedSavedRecipient(session, resolution, source, session.recipientQuery));
     } else if (session.recipientMode === "saved") {
       session.stage = "awaiting_recipient_name";
       if (resolution.ambiguous.length) {
@@ -2563,8 +4529,9 @@ export async function advanceTransferFlow(
           resolution.ambiguous.map((match) => match.contact.name)
         );
       }
-      return reply(withUpdate(session, deps), `I couldn't find a saved contact for '${session.recipientQuery}'. Who is the recipient?`);
+      return reply(withUpdate(session, deps), `I couldn't find a saved contact or saved UNIGOX payout route for '${session.recipientQuery}'. Who is the recipient?`);
     } else {
+      session.remoteSavedContact = undefined;
       session.recipientName = session.recipientQuery;
       session.aliases = [session.recipientQuery];
       session.contactExists = false;
@@ -2573,9 +4540,60 @@ export async function advanceTransferFlow(
     }
   }
 
+  const knownRecipientQuery = cleanText(session.recipientQuery || session.recipientName);
+  const normalizedKnownRecipient = normalizeLookupValue(knownRecipientQuery);
+  const normalizedHintedRecipient = normalizeLookupValue(hints.recipient);
+  const shouldRecheckSavedRecipient = Boolean(
+    session.goal === "transfer"
+    && !session.contactExists
+    && !session.contactKey
+    && !session.remoteSavedContact
+    && (
+      (session.recipientQuery && !session.recipientName)
+      || session.recipientMode === "saved"
+      || (
+        hints.recipient
+        && session.stage !== "awaiting_recipient_name"
+        && normalizedHintedRecipient
+        && normalizedHintedRecipient === normalizedKnownRecipient
+      )
+    )
+  );
+  const recipientLookupQuery = cleanText(
+    shouldRecheckSavedRecipient && hints.recipient
+      ? hints.recipient
+      : knownRecipientQuery
+  );
+  if (
+    recipientLookupQuery
+    && shouldRecheckSavedRecipient
+  ) {
+    session.recipientQuery = recipientLookupQuery;
+    const { resolution, source } = await resolveSavedRecipientQuery(session, deps);
+    if (resolution.match) {
+      if (shouldDoubleConfirmSavedRecipient(resolution, recipientLookupQuery) && !stageAwareHints.amount) {
+        return prependReplyContext(
+          reply(
+            withUpdate(session, deps),
+            startSavedRecipientConfirmation(session, resolution, source, recipientLookupQuery),
+            ["yes", "no"]
+          ),
+          savedContactReplyNote
+        );
+      }
+      savedContactReplyNote = addReplyNote(savedContactReplyNote, applyResolvedSavedRecipient(session, resolution, source, recipientLookupQuery));
+    } else if (resolution.ambiguous.length && (hints.recipient || session.recipientMode === "saved")) {
+      session.stage = "awaiting_recipient_name";
+      return reply(
+        withUpdate(session, deps),
+        buildSavedContactDisambiguation(recipientLookupQuery, resolution.ambiguous),
+        resolution.ambiguous.map((match) => match.contact.name)
+      );
+    }
+  }
+
   if (session.contactExists && !session.currency) {
-    const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
-    const contact = session.contactKey ? store.contacts[session.contactKey] : resolveContact(store, session.recipientName)?.contact;
+    const contact = getResolvedSavedContact(session, deps);
     const singleStoredPayment = getSingleStoredPaymentSetup(contact);
     if (singleStoredPayment) {
       setCurrency(session, singleStoredPayment.currency);
@@ -2600,9 +4618,7 @@ export async function advanceTransferFlow(
   }
 
   if (session.contactExists && !session.payment) {
-    const store = loadContacts(deps.contactsFilePath || DEFAULT_CONTACTS_FILE);
-    const match = session.contactKey ? { key: session.contactKey, contact: store.contacts[session.contactKey] } as ContactMatch : resolveContact(store, session.recipientName);
-    const contact = match?.contact;
+    const contact = getResolvedSavedContact(session, deps);
     const singleStoredPayment = getSingleStoredPaymentSetup(contact);
     if (singleStoredPayment && singleStoredPayment.currency === session.currency) {
       savedContactReplyNote = addReplyNote(
@@ -2779,9 +4795,17 @@ export async function advanceTransferFlow(
     return prependReplyContext(preflight.blockedResult, savedContactReplyNote);
   }
 
+  const kycCheck = await maybeEnsureKycReady(session, deps, client);
+  if (kycCheck.blockedResult) {
+    return prependReplyContext(kycCheck.blockedResult, savedContactReplyNote);
+  }
+
+  const confirmationReply = stageAwareHints.confirm
+    || (session.stage === "awaiting_confirmation" && /^confirm\b/i.test(cleanText(normalizedTurn.text)));
+
   if (!session.execution.confirmed) {
     session.stage = "awaiting_confirmation";
-    if (hints.confirm) {
+    if (confirmationReply) {
       session.execution.confirmed = true;
     } else {
       return prependReplyContext(

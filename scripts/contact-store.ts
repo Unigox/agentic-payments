@@ -38,12 +38,13 @@ export interface ContactMatch {
   key: string;
   contact: ContactRecord;
   matchType: "key" | "name" | "alias";
+  score?: number;
 }
 
 export interface ContactResolution {
   match?: ContactMatch;
   ambiguous: ContactMatch[];
-  matchedBy?: "exact" | "partial";
+  matchedBy?: "exact" | "partial" | "fuzzy";
 }
 
 function baseStore(): ContactStoreData {
@@ -137,6 +138,53 @@ function isPartialLookupMatch(candidate: string, normalizedQuery: string): boole
   return candidate.includes(normalizedQuery);
 }
 
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const matrix = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
+
+  for (let i = 0; i < rows; i += 1) matrix[i][0] = i;
+  for (let j = 0; j < cols; j += 1) matrix[0][j] = j;
+
+  for (let i = 1; i < rows; i += 1) {
+    for (let j = 1; j < cols; j += 1) {
+      const substitutionCost = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[i][j] = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + substitutionCost
+      );
+    }
+  }
+
+  return matrix[a.length][b.length];
+}
+
+function normalizedSimilarity(candidate: string, normalizedQuery: string): number {
+  if (!candidate || !normalizedQuery) return 0;
+  if (candidate === normalizedQuery) return 1;
+  const distance = levenshteinDistance(candidate, normalizedQuery);
+  return 1 - distance / Math.max(candidate.length, normalizedQuery.length);
+}
+
+function fuzzyLookupScore(candidate: string, normalizedQuery: string): number {
+  if (!candidate || !normalizedQuery || normalizedQuery.length < 3) return 0;
+
+  const tokenCandidates = candidate.split(" ").filter(Boolean);
+  const variants = Array.from(new Set([candidate, candidate.replace(/\s+/g, ""), ...tokenCandidates]));
+  let best = 0;
+
+  for (const variant of variants) {
+    best = Math.max(best, normalizedSimilarity(variant, normalizedQuery));
+  }
+
+  return best;
+}
+
 function collectExactMatches(store: ContactStoreData, normalizedQuery: string): ContactMatch[] {
   const matches: ContactMatch[] = [];
 
@@ -181,6 +229,39 @@ function collectPartialMatches(store: ContactStoreData, normalizedQuery: string)
   return dedupeMatches(matches);
 }
 
+function collectFuzzyMatches(store: ContactStoreData, normalizedQuery: string): ContactMatch[] {
+  const bestByKey = new Map<string, ContactMatch>();
+
+  for (const [key, contact] of Object.entries(store.contacts)) {
+    const candidates: Array<{ value: string; matchType: ContactMatch["matchType"] }> = [
+      { value: normalizeLookupValue(key), matchType: "key" },
+      { value: normalizeLookupValue(contact.name), matchType: "name" },
+      ...((contact.aliases || []).map((alias) => ({ value: normalizeLookupValue(alias), matchType: "alias" }))),
+    ];
+
+    let bestScore = 0;
+    let bestMatchType: ContactMatch["matchType"] = "name";
+    for (const candidate of candidates) {
+      const score = fuzzyLookupScore(candidate.value, normalizedQuery);
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatchType = candidate.matchType;
+      }
+    }
+
+    if (bestScore >= 0.74) {
+      bestByKey.set(key, {
+        key,
+        contact,
+        matchType: bestMatchType,
+        score: bestScore,
+      });
+    }
+  }
+
+  return Array.from(bestByKey.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
+}
+
 export function resolveContactQuery(store: ContactStoreData, query: string | undefined | null): ContactResolution {
   const normalizedQuery = normalizeLookupValue(query);
   if (!normalizedQuery) return { ambiguous: [] };
@@ -199,6 +280,19 @@ export function resolveContactQuery(store: ContactStoreData, query: string | und
   }
   if (partialMatches.length > 1) {
     return { ambiguous: partialMatches, matchedBy: "partial" };
+  }
+
+  const fuzzyMatches = collectFuzzyMatches(store, normalizedQuery);
+  if (fuzzyMatches.length === 1) {
+    return { match: fuzzyMatches[0], ambiguous: [], matchedBy: "fuzzy" };
+  }
+  if (fuzzyMatches.length > 1) {
+    const [best, second, ...rest] = fuzzyMatches;
+    const gap = (best.score || 0) - (second.score || 0);
+    if ((best.score || 0) >= 0.85 && gap >= 0.08) {
+      return { match: best, ambiguous: [], matchedBy: "fuzzy" };
+    }
+    return { ambiguous: [best, second, ...rest.slice(0, 3)], matchedBy: "fuzzy" };
   }
 
   return { ambiguous: [] };

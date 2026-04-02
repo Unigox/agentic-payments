@@ -47,8 +47,8 @@ UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
 ```
 
 Use this key for EVM-signed actions inside UNIGOX:
+- `fundTradeEscrow()`
 - `confirmFiatReceived()`
-- `withdrawFromEscrow()`
 - `bridgeOut()`
 
 If the user only has the old single-key setup (`UNIGOX_PRIVATE_KEY`), the client still treats it as a legacy fallback for both login and signing.

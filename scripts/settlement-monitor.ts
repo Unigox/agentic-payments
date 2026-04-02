@@ -2,6 +2,9 @@ import type { TradeRequest } from "./unigox-client.ts";
 
 export type SettlementPhase =
   | "matching"
+  | "awaiting_partner_payment_details"
+  | "awaiting_buyer_payment_details"
+  | "awaiting_escrow_funding"
   | "waiting_for_fiat"
   | "awaiting_receipt_confirmation"
   | "receipt_confirmed_release_started"
@@ -12,7 +15,13 @@ export type SettlementPhase =
 export interface SettlementTrade {
   id: number;
   status: string;
+  total_crypto_amount?: number | null;
+  escrow_funded_amount?: number | null;
   possible_actions?: string[];
+  partner_short_name?: string | null;
+  partner_details_checked_at?: string | null;
+  initiator_payment_details?: Record<string, unknown> | null;
+  payment_request?: boolean;
   claim_autorelease_seconds_left?: number | null;
   payment_window_seconds_left?: number | null;
   open_dispute_seconds_left?: number | null;
@@ -45,6 +54,7 @@ export interface SettlementMonitorOptions {
   timeoutMs?: number;
   receiptReminderMs?: number;
   receiptTimeoutMs?: number;
+  continuePollingWhilePhases?: SettlementPhase[];
 }
 
 export interface SettlementMonitorEvent {
@@ -79,8 +89,8 @@ const RECEIPT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-const RECEIVED_RE = /^(yes|received|got it|got the money|got funds|funds arrived|money arrived|arrived|came through|recipient received|paid)$/i;
-const NOT_RECEIVED_RE = /^(no|not received|not yet|hasn'?t arrived|didn'?t arrive|did not arrive|didn'?t get it|did not get it|no payment|not paid)$/i;
+const RECEIVED_RE = /^(yes(?:\b.*)?|received|got it|got the money|got funds|funds arrived|money arrived|arrived|came through|recipient received|paid)$/i;
+const NOT_RECEIVED_RE = /^(no(?:\b.*)?|not received|not yet|hasn'?t arrived|didn'?t arrive|did not arrive|didn'?t get it|did not get it|no payment|not paid)$/i;
 
 function nowIso(opts: SettlementMonitorOptions): string {
   return (opts.now ? opts.now() : new Date()).toISOString();
@@ -171,6 +181,7 @@ function classifyPhase(tradeStatus?: string): SettlementPhase {
       return "matching";
     case "trade_created":
     case "awaiting_escrow_funding_by_seller":
+      return "awaiting_escrow_funding";
     case "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer":
       return "waiting_for_fiat";
     case "fiat_payment_proof_submitted_by_buyer":
@@ -197,59 +208,109 @@ function classifyPhase(tradeStatus?: string): SettlementPhase {
   }
 }
 
-function buildSummary(state: SettlementMonitorState): string {
-  const parts: string[] = [];
-  if (state.tradeRequestId) parts.push(`Trade request #${state.tradeRequestId}`);
-  if (state.tradeRequestStatus) parts.push(`request status: ${state.tradeRequestStatus}`);
-  if (state.tradeId) parts.push(`trade #${state.tradeId}`);
-  if (state.tradeStatus) parts.push(`trade status: ${state.tradeStatus}`);
-  return parts.join(" · ");
+function needsPartnerPaymentDetails(trade?: SettlementTrade): boolean {
+  return !!(
+    trade
+    && trade.status === "trade_created"
+    && trade.partner_short_name
+    && trade.partner_details_checked_at == null
+  );
+}
+
+function needsBuyerPaymentDetails(trade?: SettlementTrade): boolean {
+  return !!(
+    trade
+    && trade.payment_request === true
+    && trade.status === "awaiting_escrow_funding_by_seller"
+    && !trade.initiator_payment_details
+  );
+}
+
+function buildSummary(phase: SettlementPhase): string {
+  switch (phase) {
+    case "awaiting_partner_payment_details":
+    case "awaiting_buyer_payment_details":
+      return "Waiting for payout details";
+    case "awaiting_escrow_funding":
+      return "Securing the transfer";
+    case "waiting_for_fiat":
+      return "Waiting for payout";
+    case "awaiting_receipt_confirmation":
+      return "Waiting for recipient confirmation";
+    case "receipt_confirmed_release_started":
+      return "Release in progress";
+    case "completed":
+      return "Transfer complete";
+    case "refunded_or_cancelled":
+      return "Transfer ended";
+    case "deferred":
+      return "Manual follow-up needed";
+    case "matching":
+    default:
+      return "Waiting for match";
+  }
 }
 
 function buildPrompt(phase: SettlementPhase, state: SettlementMonitorState, trade?: SettlementTrade): { prompt: string; options: string[] } {
-  const base = buildSummary(state);
   const paymentWindowLeft = formatRelativeSeconds(trade?.payment_window_seconds_left);
   const claimWindowLeft = formatRelativeSeconds(trade?.claim_autorelease_seconds_left);
 
   switch (phase) {
-    case "waiting_for_fiat": {
-      const extra = paymentWindowLeft ? ` Payment window left: ${paymentWindowLeft}.` : "";
+    case "awaiting_partner_payment_details":
       return {
-        prompt: `${base}. The trade is matched and still waiting on fiat settlement (${describeTradeStatus(state.tradeStatus)}). Reply 'received' only after the recipient confirms the fiat arrived, or 'not received' if it has not. I will keep escrow locked unless you explicitly confirm receipt.${extra}`,
-        options: ["received", "not received", "status"],
+        prompt: "I found a payout route, but UNIGOX still needs one more payout detail before I can secure the transfer. I’m checking that now and I’ll come back if I need anything from you.",
+        options: ["status"],
+      };
+    case "awaiting_buyer_payment_details":
+      return {
+        prompt: "The transfer is almost ready, but UNIGOX is still waiting for the payout details required before I can fund escrow. I’ll continue automatically as soon as those details are available.",
+        options: ["status"],
+      };
+    case "awaiting_escrow_funding": {
+      const extra = paymentWindowLeft ? ` I still have about ${paymentWindowLeft} before the payout window changes.` : "";
+      return {
+        prompt: `I found a counterparty and I’m securing the transfer now. The next step is funding escrow, and I’ll keep going automatically until there’s something you need to confirm.${extra}`,
+        options: ["status"],
+      };
+    }
+    case "waiting_for_fiat": {
+      const extra = paymentWindowLeft ? ` I’ll keep watching the payout until the window closes in about ${paymentWindowLeft}.` : "";
+      return {
+        prompt: `The transfer is live and escrow is funded. I’m watching for the payout to leave the counterparty bank, and I’ll tell you as soon as I need you to confirm receipt.${extra}`,
+        options: ["status"],
       };
     }
     case "awaiting_receipt_confirmation": {
-      const extra = claimWindowLeft ? ` Auto-release claim window: ${claimWindowLeft}.` : paymentWindowLeft ? ` Payment window left: ${paymentWindowLeft}.` : "";
+      const extra = claimWindowLeft ? ` If nothing changes, the protection window is about ${claimWindowLeft}.` : paymentWindowLeft ? ` The current payout window is about ${paymentWindowLeft}.` : "";
       return {
-        prompt: `${base}. The backend now indicates ${describeTradeStatus(state.tradeStatus)}. Has the recipient actually received the fiat? Reply 'received' to confirm and release escrow, or 'not received' to keep escrow locked.${extra}`,
+        prompt: `The counterparty says the payout has been sent. It may already have arrived, or it may still be on the way from the counterparty bank. Please let me know once you receive the payment. If it has not arrived, reply 'not received' so I keep the transfer protected.${extra}`,
         options: ["received", "not received", "status"],
       };
     }
     case "receipt_confirmed_release_started":
       return {
-        prompt: `${base}. Receipt has already been confirmed and release has started (${describeTradeStatus(state.tradeStatus)}). I can keep checking until it reaches the final released state.`,
+        prompt: "You confirmed the payout, so release has started. I’m watching it through the final completion.",
         options: ["status"],
       };
     case "completed":
       return {
-        prompt: `${base}. Settlement is complete: ${describeTradeStatus(state.tradeStatus)}.`,
+        prompt: "The transfer is complete.",
         options: [],
       };
     case "refunded_or_cancelled":
       return {
-        prompt: `${base}. The trade ended without release (${describeTradeStatus(state.tradeStatus)}). Escrow should remain with / return to the seller side.`,
+        prompt: "This transfer ended without payout completion, so the funds should stay on or return to the sender side.",
         options: ["status"],
       };
     case "deferred":
       return {
-        prompt: `${base}. The trade is in a post-match state I am intentionally not automating in this phase (${describeTradeStatus(state.tradeStatus)}). I will keep escrow untouched and defer to manual follow-up.`,
+        prompt: "This transfer needs manual follow-up. I’m keeping it protected and I won’t release anything automatically.",
         options: ["status"],
       };
     case "matching":
     default:
       return {
-        prompt: `${base || "Trade created"}. Still waiting for a concrete trade settlement state.`,
+        prompt: "The transfer is created and I’m still waiting for the next concrete settlement update.",
         options: ["status"],
       };
   }
@@ -257,7 +318,7 @@ function buildPrompt(phase: SettlementPhase, state: SettlementMonitorState, trad
 
 function updateReminderState(state: SettlementMonitorState, phase: SettlementPhase, opts: SettlementMonitorOptions): { reminderDue: boolean; responseTimedOut: boolean; events: SettlementMonitorEvent[] } {
   const events: SettlementMonitorEvent[] = [];
-  const requiresResponse = phase === "waiting_for_fiat" || phase === "awaiting_receipt_confirmation";
+  const requiresResponse = phase === "awaiting_receipt_confirmation";
 
   if (!requiresResponse) {
     state.awaitingUserActionSince = undefined;
@@ -345,7 +406,13 @@ export async function refreshSettlementSnapshot(
     if (trade?.status) nextState.tradeStatus = trade.status;
   }
 
-  nextState.phase = nextState.tradeId ? classifyPhase(nextState.tradeStatus) : "matching";
+  if (needsPartnerPaymentDetails(trade)) {
+    nextState.phase = "awaiting_partner_payment_details";
+  } else if (needsBuyerPaymentDetails(trade)) {
+    nextState.phase = "awaiting_buyer_payment_details";
+  } else {
+    nextState.phase = nextState.tradeId ? classifyPhase(nextState.tradeStatus) : "matching";
+  }
   const phase = nextState.phase;
   const reminder = updateReminderState(nextState, phase, opts);
   events.push(...reminder.events);
@@ -357,8 +424,8 @@ export async function refreshSettlementSnapshot(
     trade,
     phase,
     terminal: phase === "completed" || phase === "refunded_or_cancelled",
-    userActionRequired: phase === "waiting_for_fiat" || phase === "awaiting_receipt_confirmation",
-    summary: buildSummary(nextState),
+    userActionRequired: phase === "awaiting_receipt_confirmation",
+    summary: buildSummary(phase),
     prompt: built.prompt,
     options: built.options,
     events,
@@ -374,6 +441,7 @@ export async function pollSettlementSnapshot(
 ): Promise<SettlementSnapshot> {
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const continuePollingWhilePhases = new Set(opts.continuePollingWhilePhases || []);
   const started = Date.now();
 
   let first = await refreshSettlementSnapshot(state, client, opts);
@@ -388,7 +456,14 @@ export async function pollSettlementSnapshot(
     await sleep(pollIntervalMs);
     snapshot = await refreshSettlementSnapshot(snapshot.state, client, opts);
     const currentStatus = `${snapshot.state.tradeRequestStatus || ""}|${snapshot.state.tradeStatus || ""}|${snapshot.phase}`;
-    if (snapshot.terminal || snapshot.userActionRequired || currentStatus !== previousStatus) {
+    if (snapshot.terminal || snapshot.userActionRequired) {
+      return snapshot;
+    }
+    if (currentStatus !== previousStatus) {
+      if (continuePollingWhilePhases.has(snapshot.phase)) {
+        previousStatus = currentStatus;
+        continue;
+      }
       return snapshot;
     }
     previousStatus = currentStatus;
@@ -416,7 +491,7 @@ export function noteReceiptNotReceived(
         data: { reason },
       },
     ],
-    prompt: `${buildSummary(nextState)}. Okay — I am keeping escrow locked because the fiat has not been confirmed as received. The real dispute / extension flow is intentionally deferred in this phase, so the safe next step is manual follow-up while I continue monitoring status.`,
+    prompt: "Okay — I’m keeping the transfer protected because the payout has not been confirmed as received yet. The next step is manual follow-up while I continue monitoring status.",
     options: ["status", "received"],
   };
 }
@@ -440,7 +515,7 @@ export function noteDeferredPlaceholder(
         data: { reason },
       },
     ],
-    prompt: `${buildSummary(nextState)}. I am not automating that response path yet. Escrow stays locked and this trade is deferred for manual follow-up. In this phase, only explicit 'received' confirmation triggers release; 'not received' keeps it locked.`,
+    prompt: "I’m not automating that response path yet. The transfer stays protected and moves to manual follow-up. In this phase, only an explicit 'received' confirmation would allow release; 'not received' keeps it locked.",
     options: ["status", "received", "not received"],
   };
 }
