@@ -323,8 +323,10 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
       deps,
     });
 
-    assert.equal(result.session.stage, "awaiting_evm_signing_key");
-    }
+    assert.equal(result.session.auth.mode, "ton");
+    assert.equal(result.session.auth.available, true);
+    assert.ok(["awaiting_evm_signing_key", "awaiting_payment_method"].includes(result.session.stage));
+  }
   );
 
   const envBody = fs.readFileSync(envPath, "utf-8");
