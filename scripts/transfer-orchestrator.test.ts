@@ -112,6 +112,22 @@ const PAYMENT_DATA: Record<string, CurrencyPaymentData> = {
       },
     ],
   },
+  INR: {
+    currency: { code: "INR", name: "Indian Rupee" },
+    paymentMethods: [
+      {
+        id: 2001,
+        name: "IMPS or NEFT Transfer",
+        slug: "imps-or-neft-transfer",
+        type: "Traditional Banks",
+        typeSlug: "traditional-banks",
+        fiatCurrencyCodes: ["INR"],
+        networks: [
+          { id: 551, name: "IMPS or NEFT India", slug: "imps-neft-india", fiatCurrencyCode: "INR", default: true },
+        ],
+      },
+    ],
+  },
   NGN: {
     currency: { code: "NGN", name: "Nigerian Naira" },
     paymentMethods: [
@@ -346,6 +362,95 @@ const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
         type: "text",
         required: true,
         validators: [],
+      },
+    ],
+  },
+  "INR:imps-or-neft-transfer:imps-neft-india": {
+    currency: PAYMENT_DATA.INR.currency,
+    method: PAYMENT_DATA.INR.paymentMethods[0],
+    network: PAYMENT_DATA.INR.paymentMethods[0].networks[0],
+    selectedFormatId: undefined,
+    networkConfig: {
+      slug: "imps-neft-india",
+      name: "IMPS or NEFT India",
+      description: "IMPS or NEFT India",
+      countryCode: "IN",
+      fields: [
+        {
+          field: "bank_name",
+          label: "Bank Name",
+          description: "Receiving bank name",
+          placeholder: "Example Bank",
+          type: "text",
+          required: true,
+          validators: [],
+        },
+        {
+          field: "ifsc_code",
+          label: "IFSC Code",
+          description: "Recipient bank IFSC code",
+          placeholder: "TEST0001234",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "ifscCode", message: "IFSC code must be 11 characters (e.g., HDFC0001234)" }],
+        },
+        {
+          field: "account_number",
+          label: "Account Number",
+          description: "Recipient bank account number",
+          placeholder: "123456789012",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "indiaBankAccount", message: "Account number must be 10-16 digits" }],
+        },
+        {
+          field: "full_name",
+          label: "Full Name",
+          description: "Recipient legal name",
+          placeholder: "Bhim Example",
+          type: "text",
+          required: true,
+          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
+        },
+      ],
+      formats: [],
+    },
+    fields: [
+      {
+        field: "bank_name",
+        label: "Bank Name",
+        description: "Receiving bank name",
+        placeholder: "Example Bank",
+        type: "text",
+        required: true,
+        validators: [],
+      },
+      {
+        field: "ifsc_code",
+        label: "IFSC Code",
+        description: "Recipient bank IFSC code",
+        placeholder: "TEST0001234",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "ifscCode", message: "IFSC code must be 11 characters (e.g., HDFC0001234)" }],
+      },
+      {
+        field: "account_number",
+        label: "Account Number",
+        description: "Recipient bank account number",
+        placeholder: "123456789012",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "indiaBankAccount", message: "Account number must be 10-16 digits" }],
+      },
+      {
+        field: "full_name",
+        label: "Full Name",
+        description: "Recipient legal name",
+        placeholder: "Bhim Example",
+        type: "text",
+        required: true,
+        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
       },
     ],
   },
@@ -2417,6 +2522,87 @@ test("bank-style SEPA flows collect bank name when required", async () => {
   res = await advanceTransferFlow(res.session, "Bank Person", deps);
   assert.equal(res.session.stage, "awaiting_payment_details");
   assert.match(res.reply, /Which bank should receive this payout/i);
+});
+
+test("India IMPS details validate and normalize placeholder IMPS payout fields", () => {
+  const config = FIELD_CONFIGS["INR:imps-or-neft-transfer:imps-neft-india"];
+  assert.ok(config);
+
+  const result = validatePaymentDetailInput({
+    bank_name: "Example Bank",
+    ifsc_code: "test0001234",
+    account_number: "123456789012",
+    full_name: "Bhim Example",
+  }, config.fields, {
+    countryCode: config.networkConfig.countryCode,
+    formatId: config.selectedFormatId,
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.normalizedDetails.bank_name, "Example Bank");
+  assert.equal(result.normalizedDetails.ifsc_code, "TEST0001234");
+  assert.equal(result.normalizedDetails.account_number, "123456789012");
+  assert.equal(result.normalizedDetails.full_name, "Bhim Example");
+  assert.equal(result.normalizedDetails.vpa, undefined);
+  assert.equal(result.normalizedDetails.communication_address, undefined);
+});
+
+test("India IMPS flow reaches confirmation with placeholder bank details", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    preflightQuote: {
+      fiatCurrencyCode: "INR",
+      fiatAmount: 45,
+      totalCryptoAmount: 54.8676,
+      feeCryptoAmount: 0.273,
+      vendorOfferRate: 0.820156,
+      paymentMethodName: "IMPS or NEFT Transfer",
+      paymentNetworkName: "IMPS or NEFT India",
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  await withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: VALID_LOGIN_KEY,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: VALID_SIGNING_KEY,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, async () => {
+    let res = await startTransferFlow("send 45 INR to Bhim", deps);
+    assert.equal(res.session.stage, "awaiting_payment_method");
+    assert.match(res.reply, /Available examples for INR: IMPS or NEFT Transfer/i);
+
+    res = await advanceTransferFlow(res.session, "IMPS or NEFT Transfer", deps);
+    assert.equal(res.session.stage, "awaiting_payment_details");
+    assert.match(res.reply, /Which bank should receive this payout/i);
+
+    res = await advanceTransferFlow(res.session, "Example Bank", deps);
+    assert.equal(res.session.stage, "awaiting_payment_details");
+    assert.match(res.reply, /IFSC Code/i);
+
+    res = await advanceTransferFlow(res.session, "test0001234", deps);
+    assert.equal(res.session.stage, "awaiting_payment_details");
+    assert.match(res.reply, /Account Number/i);
+
+    res = await advanceTransferFlow(res.session, "123456789012", deps);
+    assert.equal(res.session.stage, "awaiting_payment_details");
+    assert.match(res.reply, /Full Name/i);
+
+    res = await advanceTransferFlow(res.session, "Bhim Example", deps);
+    assert.equal(res.session.stage, "awaiting_save_contact_decision");
+    assert.match(res.reply, /save/i);
+
+    res = await advanceTransferFlow(res.session, "no", deps);
+    assert.equal(res.session.stage, "awaiting_confirmation");
+    assert.match(res.reply, /Send 45 INR to Bhim via IMPS or NEFT Transfer/i);
+    assert.match(res.reply, /Recipient details:/i);
+    assert.match(res.reply, /Full Name: Bhim Example/i);
+    assert.match(res.reply, /Bank Name: Example Bank/i);
+    assert.match(res.reply, /IFSC Code: TEST0001234/i);
+    assert.match(res.reply, /Account Number: 123456789012/i);
+  });
 });
 
 test("insufficient balance blocks before trade creation and asks for top-up method first", async () => {
