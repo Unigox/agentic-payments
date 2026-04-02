@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "agentic-payments-local",
   "display_name": "Agentic Payments",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Local UNIGOX send-money tool for Claude Desktop.",
   "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same send_money_turn contract used by the other runtime adapters.",
   "author": {
@@ -20,12 +20,11 @@
   "support": "mailto:hello@unigox.com",
   "server": {
     "type": "node",
-    "entry_point": "scripts/send-money-mcp-server.ts",
+    "entry_point": "scripts/send-money-mcp-server.js",
     "mcp_config": {
       "command": "node",
       "args": [
-        "--experimental-strip-types",
-        "${__dirname}/scripts/send-money-mcp-server.ts"
+        "${__dirname}/scripts/send-money-mcp-server.js"
       ],
       "env": {}
     }
@@ -51,7 +50,7 @@
       "win32"
     ],
     "runtimes": {
-      "node": ">=22"
+      "node": ">=20"
     }
   }
 }

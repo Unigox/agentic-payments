@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": ".",
+    "outDir": "../adapters/anthropic/.mcpb-build/scripts",
+    "rewriteRelativeImportExtensions": true,
+    "allowImportingTsExtensions": true,
+    "noCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "./*.ts"
+  ],
+  "exclude": [
+    "./*.test.ts"
+  ]
+}

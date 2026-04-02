@@ -18,6 +18,8 @@ if [[ ! -f "${SCRIPT_DIR}/package.json" ]]; then
   exit 1
 fi
 
+npm install --prefix "${SCRIPT_DIR}" --no-fund --no-audit >&2
+
 rm -rf "${BUNDLE_BUILD_DIR}"
 mkdir -p "${SCRIPTS_BUILD_DIR}" \
   "${BUNDLE_BUILD_DIR}/workflows/sessions" \
@@ -25,7 +27,10 @@ mkdir -p "${SCRIPTS_BUILD_DIR}" \
 
 cp "${SCRIPT_DIR}/package.json" "${SCRIPTS_BUILD_DIR}/package.json"
 cp "${SCRIPT_DIR}/package-lock.json" "${SCRIPTS_BUILD_DIR}/package-lock.json"
-find "${SCRIPT_DIR}" -maxdepth 1 -type f -name '*.ts' ! -name '*.test.ts' -exec cp {} "${SCRIPTS_BUILD_DIR}/" \;
+
+"${SCRIPT_DIR}/node_modules/.bin/tsc" \
+  -p "${SCRIPT_DIR}/tsconfig.bundle.json" \
+  --outDir "${SCRIPTS_BUILD_DIR}"
 
 npm ci --prefix "${SCRIPTS_BUILD_DIR}" --omit=dev --no-fund --no-audit >&2
 
