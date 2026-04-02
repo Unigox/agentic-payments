@@ -674,6 +674,12 @@ function parseEvmPrivateKey(text: string | undefined): string | undefined {
   }
 }
 
+function looksLikeEvmAddress(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(?:0x)?[0-9a-fA-F]{40}\b/.test(value);
+}
+
 const DETAIL_LABELS: Record<string, string> = {
   full_name: "Full name",
   iban: "IBAN",
@@ -1729,6 +1735,16 @@ function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", use
   const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username);
   return [
     "That doesn’t look like a valid EVM private key.",
+    "I accept the key with or without 0x, but it must be the full 32-byte private key, not the wallet address.",
+    followUp,
+  ].join(" ");
+}
+
+function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string): string {
+  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username);
+  return [
+    "That looks like an EVM address, not a private key.",
+    "I accept the private key with or without 0x, but it must be the full 32-byte private key, not the 20-byte wallet address.",
     followUp,
   ].join(" ");
 }
@@ -2340,7 +2356,9 @@ async function maybeHandleAuthOnboardingTurn(
 
     const loginKey = parseEvmPrivateKey(responseText);
     if (!loginKey) {
-      const prompt = buildInvalidEvmKeyPrompt("evm_login_key");
+      const prompt = looksLikeEvmAddress(responseText)
+        ? buildAddressInsteadOfPrivateKeyPrompt("evm_login_key")
+        : buildInvalidEvmKeyPrompt("evm_login_key");
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2432,7 +2450,9 @@ async function maybeHandleAuthOnboardingTurn(
 
     const signingKey = parseEvmPrivateKey(responseText);
     if (!signingKey) {
-      const prompt = buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username);
+      const prompt = looksLikeEvmAddress(responseText)
+        ? buildAddressInsteadOfPrivateKeyPrompt("evm_signing_key", session.auth.username)
+        : buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,

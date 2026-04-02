@@ -3354,6 +3354,23 @@ test("invalid text at the login-key step is rejected before secret-cleanup handl
   assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
+test("address-like input at the signing-key step is explained as an address, not a missing 0x prefix", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  res = await advanceTransferFlow(res.session, "0x50443A732F5766270427C14C652243D3e09B84E2", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /looks like an EVM address, not a private key/i);
+  assert.match(res.reply, /with or without 0x/i);
+  assert.equal(res.session.auth.pendingSecret, undefined);
+});
+
 test("invalid pending signing key is rejected at cleanup confirmation instead of being persisted", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
