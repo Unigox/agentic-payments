@@ -3221,12 +3221,14 @@ test("loadUnigoxConfigFromEnv prefers TON private-key auth when present", () => 
     UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_TON_ADDRESS: "0:abcd",
+    UNIGOX_TON_WALLET_VERSION: "v5r1",
     UNIGOX_EMAIL: "agent@example.com",
   }, () => loadUnigoxConfigFromEnv());
 
   assert.equal(result.authMode, "ton");
   assert.equal(result.tonPrivateKey, VALID_TON_PRIVATE_KEY);
   assert.equal(result.tonAddress, "0:abcd");
+  assert.equal(result.tonWalletVersion, "v5r1");
   assert.equal(result.evmSigningPrivateKey, "0xsign");
   assert.equal(result.email, "agent@example.com");
 });
@@ -3670,18 +3672,22 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
 test("successful TON login verification persists TON address and private key, then asks for the EVM signing key", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const persisted = { tonAddress: [] as string[], tonPrivateKey: [] as string[], signing: [] as string[] };
+  const persisted = { tonAddress: [] as string[], tonPrivateKey: [] as string[], tonWalletVersion: [] as string[], signing: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     verifyTonLogin: async ({ tonPrivateKey, tonAddress }) => ({
       success: tonPrivateKey === VALID_TON_PRIVATE_KEY && tonAddress?.includes("0:"),
       username: "tonuser",
+      tonWalletVersion: "v5r1",
     }),
     persistTonAddress: async (tonAddress) => {
       persisted.tonAddress.push(tonAddress);
     },
     persistTonPrivateKey: async (tonPrivateKey) => {
       persisted.tonPrivateKey.push(tonPrivateKey);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
     },
     persistEvmSigningKey: async (signingKey) => {
       persisted.signing.push(signingKey);
@@ -3718,6 +3724,7 @@ test("successful TON login verification persists TON address and private key, th
   assert.equal(persisted.tonAddress.length, 1);
   assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
 
   res = await advanceTransferFlow(res.session, ANOTHER_VALID_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");

@@ -30,6 +30,7 @@ function loadUnigoxConfig(): UnigoxClientConfig {
   const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
   const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
+  const tonWalletVersion = loadEnvValue("UNIGOX_TON_WALLET_VERSION");
   const email = loadEnvValue("UNIGOX_EMAIL");
 
   if (evmLoginPrivateKey) {
@@ -43,10 +44,11 @@ function loadUnigoxConfig(): UnigoxClientConfig {
 
   if (tonPrivateKey || tonMnemonic) {
     return {
-      authMode: loadEnvValue("UNIGOX_AUTH_MODE") === "ton" ? "ton" : "auto",
+      authMode: "ton",
       ...(tonPrivateKey && { tonPrivateKey }),
       ...(tonMnemonic && { tonMnemonic }),
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
+      ...(tonWalletVersion && { tonWalletVersion }),
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
       ...(email && { email }),
       ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
@@ -109,6 +111,7 @@ const client = new UnigoxClient({
   email: process.env.UNIGOX_EMAIL,
   tonPrivateKey: process.env.UNIGOX_TON_PRIVATE_KEY,
   tonAddress: process.env.UNIGOX_TON_ADDRESS,
+  tonWalletVersion: process.env.UNIGOX_TON_WALLET_VERSION,
 });
 
 await client.verifyEmailOTP(code);

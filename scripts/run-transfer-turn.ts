@@ -166,6 +166,13 @@ function buildDefaultRunnerDeps(): TransferFlowDeps {
         UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
       });
     },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_AUTH_MODE: "ton",
+        UNIGOX_TON_WALLET_VERSION: tonWalletVersion,
+        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
+      });
+    },
   };
 }
 

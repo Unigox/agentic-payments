@@ -26,7 +26,21 @@
 
 import crypto from "node:crypto";
 import { mnemonicToWalletKey } from "@ton/crypto";
-import { Address, WalletContractV4 } from "@ton/ton";
+import {
+  Address,
+  WalletContractV1R1,
+  WalletContractV1R2,
+  WalletContractV1R3,
+  WalletContractV2R1,
+  WalletContractV2R2,
+  WalletContractV3R1,
+  WalletContractV3R2,
+  WalletContractV4,
+  WalletContractV5Beta,
+  WalletContractV5R1,
+  beginCell,
+  storeStateInit,
+} from "@ton/ton";
 import nacl from "tweetnacl";
 import { Wallet, ethers } from "ethers";
 
@@ -110,6 +124,7 @@ export interface UnigoxClientConfig {
   tonPrivateKey?: string;
   tonMnemonic?: string | string[];
   tonAddress?: string;
+  tonWalletVersion?: TonWalletVersion;
   tonNetwork?: string;
   sessionToken?: string;
   sessionTokenExpiresAt?: number;
@@ -451,6 +466,8 @@ interface TonWalletAccount {
   publicKey: string;
   secretKey: Uint8Array;
   derivedAddress: string;
+  walletVersion: TonWalletVersion;
+  stateInit: string;
 }
 
 export interface ParsedTonPrivateKey {
@@ -459,6 +476,40 @@ export interface ParsedTonPrivateKey {
   publicKey: Uint8Array;
   source: "seed32" | "secret64";
 }
+
+export type TonWalletVersion =
+  | "v1r1"
+  | "v1r2"
+  | "v1r3"
+  | "v2r1"
+  | "v2r2"
+  | "v3r1"
+  | "v3r2"
+  | "v4"
+  | "v5beta"
+  | "v5r1";
+
+export interface TonWalletCandidate {
+  version: TonWalletVersion;
+  address: string;
+  stateInit: string;
+}
+
+const TON_WALLET_FACTORIES: Array<{
+  version: TonWalletVersion;
+  create: (workchain: number, publicKey: Uint8Array) => { address: Address; init?: { code?: unknown; data?: unknown } };
+}> = [
+  { version: "v1r1", create: (workchain, publicKey) => WalletContractV1R1.create({ workchain, publicKey }) },
+  { version: "v1r2", create: (workchain, publicKey) => WalletContractV1R2.create({ workchain, publicKey }) },
+  { version: "v1r3", create: (workchain, publicKey) => WalletContractV1R3.create({ workchain, publicKey }) },
+  { version: "v2r1", create: (workchain, publicKey) => WalletContractV2R1.create({ workchain, publicKey }) },
+  { version: "v2r2", create: (workchain, publicKey) => WalletContractV2R2.create({ workchain, publicKey }) },
+  { version: "v3r1", create: (workchain, publicKey) => WalletContractV3R1.create({ workchain, publicKey }) },
+  { version: "v3r2", create: (workchain, publicKey) => WalletContractV3R2.create({ workchain, publicKey }) },
+  { version: "v4", create: (workchain, publicKey) => WalletContractV4.create({ workchain, publicKey }) },
+  { version: "v5beta", create: (workchain, publicKey) => WalletContractV5Beta.create({ workchain, publicKey }) },
+  { version: "v5r1", create: (workchain, publicKey) => WalletContractV5R1.create({ workchain, publicKey }) },
+];
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -525,6 +576,92 @@ export function parseTonPrivateKeyInput(secret?: string): ParsedTonPrivateKey | 
   }
 }
 
+export function normalizeTonWalletVersion(value?: string | null): TonWalletVersion | undefined {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  switch (compact) {
+    case "v1r1":
+    case "v1r2":
+    case "v1r3":
+    case "v2r1":
+    case "v2r2":
+    case "v3r1":
+    case "v3r2":
+    case "v4":
+    case "v5beta":
+    case "v5r1":
+      return compact;
+    default:
+      return undefined;
+  }
+}
+
+function buildTonStateInitBase64(init: { code?: unknown; data?: unknown } | undefined): string | undefined {
+  if (!init) return undefined;
+  try {
+    return beginCell().store(storeStateInit(init as any)).endCell().toBoc().toString("base64");
+  } catch {
+    return undefined;
+  }
+}
+
+export function deriveTonWalletCandidates(publicKey: Uint8Array, workchain = 0): TonWalletCandidate[] {
+  const normalizedPublicKey = Buffer.from(publicKey);
+  const seen = new Set<string>();
+  const candidates: TonWalletCandidate[] = [];
+
+  for (const definition of TON_WALLET_FACTORIES) {
+    try {
+      const wallet = definition.create(workchain, normalizedPublicKey);
+      const address = wallet.address.toRawString().toLowerCase();
+      if (seen.has(address)) continue;
+      const stateInit = buildTonStateInitBase64(wallet.init);
+      if (!stateInit) continue;
+      seen.add(address);
+      candidates.push({
+        version: definition.version,
+        address,
+        stateInit,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return candidates;
+}
+
+export function resolveTonWalletCandidate(params: {
+  publicKey: Uint8Array;
+  workchain?: number;
+  address?: string;
+  preferredVersion?: TonWalletVersion;
+}): { matched?: TonWalletCandidate; candidates: TonWalletCandidate[] } {
+  const candidates = deriveTonWalletCandidates(params.publicKey, params.workchain ?? 0);
+  const normalizedAddress = params.address ? Address.parse(params.address).toRawString().toLowerCase() : undefined;
+  const preferredVersion = normalizeTonWalletVersion(params.preferredVersion);
+
+  if (normalizedAddress) {
+    return {
+      matched: candidates.find((candidate) => candidate.address === normalizedAddress),
+      candidates,
+    };
+  }
+
+  if (preferredVersion) {
+    const preferred = candidates.find((candidate) => candidate.version === preferredVersion);
+    if (preferred) {
+      return { matched: preferred, candidates };
+    }
+  }
+
+  return {
+    matched: candidates.find((candidate) => candidate.version === "v4") ?? candidates[0],
+    candidates,
+  };
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
 export class UnigoxClient {
@@ -536,6 +673,7 @@ export class UnigoxClient {
   private tonPrivateKey: ParsedTonPrivateKey | null;
   private tonMnemonicWords: string[] | null;
   private tonAddressOverride: string | null;
+  private tonWalletVersion: TonWalletVersion | null;
   private tonNetwork: string;
   private tonWalletAccount: TonWalletAccount | null = null;
   private token: string | null = null;
@@ -558,6 +696,7 @@ export class UnigoxClient {
     this.tonPrivateKey = parseTonPrivateKeyInput(config.tonPrivateKey) || null;
     this.tonMnemonicWords = this.parseTonMnemonic(config.tonMnemonic);
     this.tonAddressOverride = config.tonAddress ? this.normalizeTonAddress(config.tonAddress) : null;
+    this.tonWalletVersion = normalizeTonWalletVersion(config.tonWalletVersion) || null;
     this.tonNetwork = config.tonNetwork || "-239";
     if (config.sessionToken) {
       this.token = config.sessionToken;
@@ -642,22 +781,45 @@ export class UnigoxClient {
       ? { publicKey: this.tonPrivateKey.publicKey, secretKey: this.tonPrivateKey.secretKey }
       : await mnemonicToWalletKey(this.tonMnemonicWords!);
     const workchain = this.tonAddressOverride ? Address.parse(this.tonAddressOverride).workChain : 0;
-    const derivedAddress = WalletContractV4.create({ workchain, publicKey: keyPair.publicKey }).address.toRawString().toLowerCase();
-    const address = this.tonAddressOverride || derivedAddress;
+    const { matched, candidates } = resolveTonWalletCandidate({
+      publicKey: keyPair.publicKey,
+      workchain,
+      address: this.tonAddressOverride || undefined,
+      preferredVersion: this.tonWalletVersion || undefined,
+    });
 
-    if (this.tonAddressOverride && this.tonAddressOverride !== derivedAddress) {
-      console.warn(`[UNIGOX] Using TON address override ${this.tonAddressOverride} (derived V4 address: ${derivedAddress})`);
+    if (!matched) {
+      const candidateSummary = candidates.map((candidate) => `${candidate.version}:${candidate.address}`).join(", ");
+      throw new Error(
+        `The supplied TON key does not derive the exact TON address you provided across the supported wallet versions. ` +
+        `Address: ${this.tonAddressOverride}. Tried: ${candidateSummary || "none"}.`
+      );
+    }
+
+    this.tonWalletVersion = matched.version;
+    if (this.tonAddressOverride && this.tonAddressOverride === matched.address) {
+      console.log(`[UNIGOX] TON address matched local ${matched.version.toUpperCase()} derivation: ${matched.address}`);
+    } else {
+      console.log(`[UNIGOX] Using local TON ${matched.version.toUpperCase()} derivation: ${matched.address}`);
     }
 
     this.tonWalletAccount = {
-      address,
+      address: matched.address,
       network: this.tonNetwork,
       publicKey: Buffer.from(keyPair.publicKey).toString("hex"),
       secretKey: keyPair.secretKey,
-      derivedAddress,
+      derivedAddress: matched.address,
+      walletVersion: matched.version,
+      stateInit: matched.stateInit,
     };
 
     return this.tonWalletAccount;
+  }
+
+  getTonWalletDerivation(): Pick<TonWalletAccount, "address" | "derivedAddress" | "walletVersion"> | undefined {
+    if (!this.tonWalletAccount) return undefined;
+    const { address, derivedAddress, walletVersion } = this.tonWalletAccount;
+    return { address, derivedAddress, walletVersion };
   }
 
   private async generateTonPayloadTokenPair(): Promise<TonPayloadTokenPair> {
@@ -831,7 +993,10 @@ export class UnigoxClient {
     const primaryToken = this.requireFreshToken("TON wallet linking");
     const tonWallet = await this.ensureTonWalletAccount();
     const { payloadToken, payloadTokenHash } = await this.generateTonPayloadTokenPair();
-    const proof = this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey);
+    const proof = {
+      ...this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey),
+      stateInit: tonWallet.stateInit,
+    };
 
     const res = await jsonFetch(`${this.frontendUrl}/api/ton-link`, {
       method: "POST",
@@ -884,7 +1049,10 @@ export class UnigoxClient {
   private async loginOnceWithTon(): Promise<string> {
     const tonWallet = await this.ensureTonWalletAccount();
     const { payloadToken, payloadTokenHash } = await this.generateTonPayloadTokenPair();
-    const proof = this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey);
+    const proof = {
+      ...this.buildTonProof(tonWallet.address, payloadTokenHash, tonWallet.secretKey),
+      stateInit: tonWallet.stateInit,
+    };
 
     const loginRes = await jsonFetch(`${this.frontendUrl}/api/ton-login`, {
       method: "POST",

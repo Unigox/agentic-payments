@@ -75,6 +75,7 @@ Important implementation note:
 > For TON, send me the **exact raw TON address** shown by the wallet you used on UNIGOX first.
 >
 > I’ll echo it back and ask you to confirm whether that exact address/version is the right one before I ask for the TON private key / secret key.
+> After that, I’ll check the supported TON wallet versions locally and keep the one that actually matches this exact address.
 >
 > Do **not** send a mnemonic phrase in chat for new TON setup. The agent should use the exact address as the source of truth and the TON private key only for proof signing.
 
@@ -158,6 +159,7 @@ When the user provides TON credentials:
 - Save `UNIGOX_AUTH_MODE=ton`
 - Save `UNIGOX_TON_PRIVATE_KEY`
 - Save `UNIGOX_TON_ADDRESS` if they provide it
+- Save `UNIGOX_TON_WALLET_VERSION` after local version matching
 - Call `login()` to verify TON auth works
 - Proceed to Step 3
 

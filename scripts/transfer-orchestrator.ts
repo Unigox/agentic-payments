@@ -28,6 +28,7 @@ import type {
   ResolvedPaymentMethodFieldConfig,
   SupportedDepositAssetOption,
   SupportedDepositChainOption,
+  TonWalletVersion,
   TradeRequest,
   UnigoxClientConfig,
   UserProfile,
@@ -219,12 +220,13 @@ export interface TransferFlowDeps {
   clientFactory?: () => Promise<TransferExecutionClient>;
   clientConfig?: UnigoxClientConfig;
   verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
-  verifyTonLogin?: (params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string }) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
+  verifyTonLogin?: (params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string }) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string; tonWalletVersion?: TonWalletVersion } | void>;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
   persistTonMnemonic?: (mnemonic: string) => Promise<void> | void;
   persistTonAddress?: (tonAddress: string) => Promise<void> | void;
+  persistTonWalletVersion?: (tonWalletVersion: TonWalletVersion) => Promise<void> | void;
   handleSensitiveInput?: (params: {
     kind: SecretKind;
     secret: string;
@@ -380,6 +382,7 @@ export interface TransferSession {
     emailAuthTokenExpiresAt?: string;
     evmSigningKeyAvailable?: boolean;
     tonAddress?: string;
+    tonWalletVersion?: TonWalletVersion;
     username?: string;
     kycStatus?: string;
     kycCountryCode?: string;
@@ -1140,6 +1143,7 @@ export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
       ...(tonPrivateKey && { tonPrivateKey }),
       ...(tonMnemonic && { tonMnemonic }),
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
+      tonWalletVersion: loadEnvValue("UNIGOX_TON_WALLET_VERSION") as TonWalletVersion | undefined,
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
       ...(email && { email }),
       ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
@@ -1264,7 +1268,7 @@ async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps):
 async function verifyTonLoginInput(
   params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string },
   deps: TransferFlowDeps
-): Promise<{ success: boolean; message?: string; username?: string }> {
+): Promise<{ success: boolean; message?: string; username?: string; tonWalletVersion?: TonWalletVersion }> {
   const { tonPrivateKey, mnemonic, tonAddress } = params;
   if (!tonPrivateKey && !mnemonic) {
     return { success: false, message: "TON auth requires a TON private key or legacy mnemonic." };
@@ -1277,22 +1281,26 @@ async function verifyTonLoginInput(
       success: result.success ?? result.ok ?? true,
       message: result.message,
       username: result.username,
+      tonWalletVersion: result.tonWalletVersion,
     };
   }
 
   let email: string | undefined;
   let frontendUrl: string | undefined;
   let evmSigningPrivateKey: string | undefined;
+  let tonWalletVersion: TonWalletVersion | undefined;
   if (deps.clientConfig) {
     email = deps.clientConfig.email;
     frontendUrl = deps.clientConfig.frontendUrl;
     evmSigningPrivateKey = deps.clientConfig.evmSigningPrivateKey || deps.clientConfig.privateKey;
+    tonWalletVersion = deps.clientConfig.tonWalletVersion;
   } else {
     try {
       const config = loadUnigoxConfigFromEnv();
       email = config.email;
       frontendUrl = config.frontendUrl;
       evmSigningPrivateKey = config.evmSigningPrivateKey || config.privateKey;
+      tonWalletVersion = config.tonWalletVersion;
     } catch {
       // Verification can proceed with the supplied TON credentials alone.
     }
@@ -1304,11 +1312,13 @@ async function verifyTonLoginInput(
       ...(tonPrivateKey ? { tonPrivateKey } : {}),
       ...(mnemonic ? { tonMnemonic: mnemonic } : {}),
       ...(tonAddress ? { tonAddress } : {}),
+      ...(tonWalletVersion ? { tonWalletVersion } : {}),
       ...(email ? { email } : {}),
       ...(frontendUrl ? { frontendUrl } : {}),
       ...(evmSigningPrivateKey ? { evmSigningPrivateKey } : {}),
     });
     await client.login();
+    const derivation = client.getTonWalletDerivation();
 
     let username: string | undefined;
     try {
@@ -1317,7 +1327,7 @@ async function verifyTonLoginInput(
       // Username is helpful but optional for a successful verification.
     }
 
-    return { success: true, username };
+    return { success: true, username, tonWalletVersion: derivation?.walletVersion };
   } catch (error) {
     return {
       success: false,
@@ -1835,6 +1845,7 @@ function buildTonAddressConfirmationPrompt(tonAddress: string): string {
   return [
     `I’ll use this exact raw TON address: ${tonAddress}.`,
     "Is this the correct wallet address for the wallet you used on UNIGOX, or should I use a different version / address?",
+    "After you send the TON key, I’ll check the supported TON wallet versions locally and keep the one that actually matches this exact address.",
   ].join(" ");
 }
 
@@ -2115,6 +2126,10 @@ async function finalizeTonPrivateKey(
 
   if (session.auth.tonAddress) {
     await deps.persistTonAddress?.(session.auth.tonAddress);
+  }
+  if (verification.tonWalletVersion) {
+    session.auth.tonWalletVersion = verification.tonWalletVersion;
+    await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
   }
   await deps.persistTonPrivateKey?.(tonPrivateKey);
 

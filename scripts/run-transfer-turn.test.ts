@@ -293,6 +293,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
       verifyTonLogin: async ({ tonPrivateKey: normalizedKey, tonAddress: normalizedAddress }: { tonPrivateKey?: string; tonAddress?: string }) => ({
         success: normalizedKey === tonPrivateKey && Boolean(normalizedAddress?.startsWith("0:")),
         username: "tonuser",
+        tonWalletVersion: "v5r1",
       }),
       handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
     };
@@ -343,5 +344,6 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
   assert.match(envBody, /UNIGOX_TON_PRIVATE_KEY=4444444444444444444444444444444444444444444444444444444444444444/);
   assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
+  assert.match(envBody, /UNIGOX_TON_WALLET_VERSION=v5r1/);
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
 });
