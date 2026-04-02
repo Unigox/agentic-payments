@@ -35,6 +35,9 @@
     "defaultPrompt": [
       "Use Agentic Payments to help me send money through UNIGOX"
     ],
-    "brandColor": "#0F766E"
+    "brandColor": "#0F766E",
+    "composerIcon": "./assets/unigox-favicon.svg",
+    "logo": "./assets/unigox-favicon-96.png",
+    "screenshots": []
   }
 }
