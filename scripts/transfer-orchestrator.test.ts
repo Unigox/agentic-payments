@@ -3706,8 +3706,8 @@ test("successful TON login verification persists TON address and private key, th
   assert.match(res.reply, /I’ll use this exact raw TON address/i);
 
   res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  assert.equal(res.session.stage, "awaiting_ton_private_key");
-  assert.match(res.reply, /TON private key/i);
+  assert.equal(res.session.stage, "awaiting_ton_auth_method");
+  assert.match(res.reply, /TON mnemonic|TON private key|TonConnect/i);
 
   res = await advanceTransferFlow(res.session, VALID_TON_PRIVATE_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
@@ -3734,11 +3734,26 @@ test("successful TON login verification persists TON address and private key, th
   assert.equal(res.session.stage, "awaiting_payment_method");
 });
 
-test("mnemonic text is rejected during new TON onboarding and the flow asks for a private key instead", async () => {
+test("successful TON mnemonic verification persists the exact TON address and matched wallet version, then asks for the EVM signing key", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
+  const persisted = { tonAddress: [] as string[], tonMnemonic: [] as string[], tonWalletVersion: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
+      success: mnemonic === VALID_TON_MNEMONIC && tonAddress?.includes("0:"),
+      username: "tonuser",
+      tonWalletVersion: "v4",
+    }),
+    persistTonAddress: async (tonAddress) => {
+      persisted.tonAddress.push(tonAddress);
+    },
+    persistTonMnemonic: async (mnemonic) => {
+      persisted.tonMnemonic.push(mnemonic);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
+    },
   });
 
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
@@ -3747,23 +3762,39 @@ test("mnemonic text is rejected during new TON onboarding and the flow asks for 
   res = await advanceTransferFlow(res.session, "ton", deps);
   res = await advanceTransferFlow(res.session, tonAddress, deps);
   res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  assert.equal(res.session.stage, "awaiting_ton_private_key");
+  assert.equal(res.session.stage, "awaiting_ton_auth_method");
+  assert.match(res.reply, /TON mnemonic|TonConnect/i);
 
   res = await advanceTransferFlow(res.session, VALID_TON_MNEMONIC, deps);
-  assert.equal(res.session.stage, "awaiting_ton_private_key");
-  assert.match(res.reply, /Please do not send a TON mnemonic here/i);
-  assert.doesNotMatch(res.reply, /delete the message/i);
-  assert.equal(res.session.auth.pendingSecret, undefined);
+  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
+  assert.match(res.reply, /delete the message/i);
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /TON login works/i);
+  assert.equal(res.session.auth.tonWalletVersion, "v4");
+  assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+  assert.equal(persisted.tonAddress.length, 1);
+  assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
 });
 
-test("legacy pending TON mnemonic is discarded at cleanup confirmation and the flow asks for a private key instead", async () => {
+test("legacy pending TON mnemonic still finalizes correctly after cleanup confirmation", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const persisted = { tonPrivateKey: [] as string[] };
+  const persisted = { tonMnemonic: [] as string[], tonWalletVersion: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      persisted.tonPrivateKey.push(tonPrivateKey);
+    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
+      success: mnemonic === VALID_TON_MNEMONIC && tonAddress === "0:1234",
+      username: "tonuser",
+      tonWalletVersion: "v5r1",
+    }),
+    persistTonMnemonic: async (mnemonic) => {
+      persisted.tonMnemonic.push(mnemonic);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
     },
   });
 
@@ -3772,14 +3803,90 @@ test("legacy pending TON mnemonic is discarded at cleanup confirmation and the f
   res.session.auth.tonAddress = "0:1234";
   res.session.auth.pendingSecret = {
     kind: "ton_mnemonic",
-    value: "deleted",
+    value: VALID_TON_MNEMONIC,
   };
 
   res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_ton_private_key");
-  assert.match(res.reply, /Please do not send a TON mnemonic here/i);
-  assert.deepEqual(persisted.tonPrivateKey, []);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /TON login works/i);
+  assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
   assert.equal(res.session.auth.pendingSecret, undefined);
+});
+
+test("TonConnect can be started from the TON auth-method step and stays pending until the wallet approves it", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    startTonConnectLogin: async () => ({
+      universalLink: "https://wallet.example/connect",
+      manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+      expiresAt: "2026-04-02T12:00:00.000Z",
+      payloadToken: "payload-token",
+    }),
+    checkTonConnectLogin: async () => ({
+      status: "pending",
+    }),
+  });
+
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "ton", deps);
+  res = await advanceTransferFlow(res.session, tonAddress, deps);
+  res = await advanceTransferFlow(res.session, "this address is correct", deps);
+  assert.equal(res.session.stage, "awaiting_ton_auth_method");
+
+  res = await advanceTransferFlow(res.session, "TonConnect QR", deps);
+  assert.equal(res.session.stage, "awaiting_tonconnect_completion");
+  assert.match(res.reply, /fresh TonConnect login link is ready/i);
+  assert.match(res.reply, /wallet\.example\/connect/i);
+  assert.equal(res.session.auth.tonConnect?.payloadToken, "payload-token");
+
+  res = await advanceTransferFlow(res.session, "status", deps);
+  assert.equal(res.session.stage, "awaiting_tonconnect_completion");
+  assert.match(res.reply, /still waiting for the TonConnect approval/i);
+  assert.match(res.reply, /wallet\.example\/connect/i);
+});
+
+test("TonConnect refuses a wallet approval if it comes back for a different TON address", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    startTonConnectLogin: async () => ({
+      universalLink: "https://wallet.example/connect",
+      manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+      expiresAt: "2026-04-02T12:00:00.000Z",
+      payloadToken: "payload-token",
+    }),
+    checkTonConnectLogin: async () => ({
+      status: "connected",
+      walletAddress: "0:different",
+      network: "-239",
+      publicKey: "abcd1234",
+      proof: {
+        timestamp: 1,
+        domain: { lengthBytes: 16, value: "www.unigox.com" },
+        signature: "signature",
+        payload: "payload",
+      },
+    }),
+  });
+
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "ton", deps);
+  res = await advanceTransferFlow(res.session, tonAddress, deps);
+  res = await advanceTransferFlow(res.session, "this address is correct", deps);
+  res = await advanceTransferFlow(res.session, "TonConnect QR", deps);
+  res = await advanceTransferFlow(res.session, "connected", deps);
+
+  assert.equal(res.session.stage, "awaiting_ton_address");
+  assert.match(res.reply, /different wallet or address version/i);
+  assert.match(res.reply, /Send the exact raw TON address/i);
 });
 
 test("stored TON auth without a signing key prompts for the UNIGOX signing key instead of failing later", async () => {

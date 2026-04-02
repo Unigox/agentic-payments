@@ -10,11 +10,18 @@ import {
   type TransferFlowResult,
   type TransferSession,
 } from "./transfer-orchestrator.ts";
+import { UnigoxClient } from "./unigox-client.ts";
+import {
+  checkTonConnectSession,
+  clearTonConnectSession,
+  startTonConnectSession,
+} from "./tonconnect-session.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SKILL_DIR = path.join(__dirname, "..");
 const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
+const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconnect");
 const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
 
 export interface TransferRunnerOptions {
@@ -132,8 +139,18 @@ function upsertEnvAssignments(filePath: string, assignments: Record<string, stri
   }
 }
 
-function buildDefaultRunnerDeps(): TransferFlowDeps {
+function resolveFrontendUrl(): string | undefined {
+  return process.env.UNIGOX_FRONTEND_URL || process.env.NEXT_PUBLIC_UNIGOX_FRONTEND_URL;
+}
+
+function buildTonConnectClient(): UnigoxClient {
+  const frontendUrl = resolveFrontendUrl();
+  return new UnigoxClient(frontendUrl ? { frontendUrl } : {});
+}
+
+function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
   const envPath = resolveEnvFilePath();
+  const frontendUrl = resolveFrontendUrl();
   return {
     persistEvmLoginKey: async (loginKey) => {
       upsertEnvAssignments(envPath, {
@@ -173,6 +190,30 @@ function buildDefaultRunnerDeps(): TransferFlowDeps {
         UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
       });
     },
+    startTonConnectLogin: async () => {
+      const client = buildTonConnectClient();
+      const { payloadToken, payloadTokenHash } = await client.createTonLoginPayloadTokenPair();
+      const started = await startTonConnectSession({
+        sessionKey,
+        tonProof: payloadTokenHash,
+        ...(frontendUrl ? { frontendUrl } : {}),
+        stateDir: DEFAULT_TONCONNECT_STATE_DIR,
+      });
+      return {
+        ...started,
+        payloadToken,
+      };
+    },
+    checkTonConnectLogin: async () => checkTonConnectSession({
+      sessionKey,
+      ...(frontendUrl ? { frontendUrl } : {}),
+      stateDir: DEFAULT_TONCONNECT_STATE_DIR,
+    }),
+    clearTonConnectLogin: async () => clearTonConnectSession({
+      sessionKey,
+      ...(frontendUrl ? { frontendUrl } : {}),
+      stateDir: DEFAULT_TONCONNECT_STATE_DIR,
+    }),
   };
 }
 
@@ -241,7 +282,7 @@ export async function runTransferTurn(options: TransferRunnerOptions): Promise<T
   const startFresh = shouldStartFreshSession(existingSession, options.text, options.reset);
 
   const deps: TransferFlowDeps = {
-    ...buildDefaultRunnerDeps(),
+    ...buildDefaultRunnerDeps(sessionKey),
     ...(options.deps || {}),
   };
   const result = startFresh

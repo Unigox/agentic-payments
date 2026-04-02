@@ -108,15 +108,16 @@ The onboarding flow:
 10. Explain clearly why it is needed: login auth only gets a UNIGOX session; secure in-app actions like funding trade escrow, confirming receipt, and releasing escrow still require the separate exported signing key
 11. If the user cannot find the export option in UNIGOX settings, explain that this is a beta feature, their account likely still needs agentic-payments access enabled, and tell them to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it
 12. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — EVM, TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
-13. For TON, collect the raw TON address first, echo it back and confirm that it is the correct wallet address/version, then collect the TON private key / secret key for that same wallet, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
-14. After TON key collection, derive the supported TON wallet versions locally and ensure one of them matches the exact confirmed raw TON address before accepting the secret. Persist the matched version locally as `UNIGOX_TON_WALLET_VERSION` for later runs.
-15. Do not accept TON mnemonic phrases in new chat onboarding. They can derive a different wallet version/address than the one the wallet app actually used on UNIGOX
-16. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
-17. Optionally link the other wallet path later if the user wants flexibility
-18. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
-19. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
-20. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
-21. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
+13. For TON, collect the raw TON address first and confirm that it is the correct wallet address/version the user used on UNIGOX
+14. After the address is confirmed, offer three first-class TON login paths for that exact wallet: send the mnemonic phrase, send the TON private key / secret key, or request a fresh TonConnect QR / deep link
+15. For mnemonic/private-key flows, apply the same secret-cleanup rule, derive the supported TON wallet versions locally, ensure one of them matches the exact confirmed raw TON address, and persist the matched version locally as `UNIGOX_TON_WALLET_VERSION`
+16. For TonConnect, generate a fresh live deep link, accept the login only if the connected wallet comes back as the exact confirmed address, and explain that old QR screenshots are not reusable login credentials
+17. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
+18. Optionally link the other wallet path later if the user wants flexibility
+19. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+20. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+21. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
+22. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 

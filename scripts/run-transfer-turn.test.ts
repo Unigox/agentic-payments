@@ -333,7 +333,8 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
       deps,
     });
 
-    assert.equal(result.session.stage, "awaiting_ton_private_key");
+    assert.equal(result.session.stage, "awaiting_ton_auth_method");
+    assert.match(result.reply, /TON mnemonic|TON private key|TonConnect/i);
     assert.equal(finalResult.session.auth.mode, "ton");
     assert.equal(finalResult.session.auth.available, true);
     assert.ok(["awaiting_evm_signing_key", "awaiting_payment_method"].includes(finalResult.session.stage));

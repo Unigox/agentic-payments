@@ -4,7 +4,7 @@
 
 - Node.js 22+
 - `ethers` v6
-- `@ton/crypto`, `@ton/ton`, `tweetnacl` for TON auth
+- `@ton/crypto`, `@ton/ton`, `@tonconnect/sdk`, `tweetnacl` for TON auth
 - `unigox-client.ts` module (the UNIGOX SDK)
 
 ## UNIGOX Client Module
@@ -57,10 +57,11 @@ If the user only has the old single-key setup (`UNIGOX_PRIVATE_KEY`), the client
 
 ```env
 UNIGOX_AUTH_MODE=ton
-UNIGOX_TON_PRIVATE_KEY=... # 32-byte or 64-byte TON key material, hex or base64
-UNIGOX_TON_ADDRESS=0:...   # exact wallet address to use as the TON source of truth
+UNIGOX_TON_PRIVATE_KEY=...   # or use UNIGOX_TON_MNEMONIC for agent-side derivation
+UNIGOX_TON_MNEMONIC=...      # first-class agent-side login path when paired with the exact address
+UNIGOX_TON_ADDRESS=0:...     # exact wallet address to use as the TON source of truth
 UNIGOX_TON_WALLET_VERSION=v4 # persisted after local version matching
-UNIGOX_TON_NETWORK=-239    # optional, defaults to mainnet
+UNIGOX_TON_NETWORK=-239      # optional, defaults to mainnet
 # optional, if EVM signed actions are also needed later:
 UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
 ```
@@ -72,7 +73,9 @@ This mode uses the frontend TON routes:
 
 TON auth is only for JWT acquisition and optional wallet linking. After the JWT is obtained, the rest of the client keeps using the same account/trade APIs as before.
 
-Legacy note: `UNIGOX_TON_MNEMONIC` is still supported for older installs, but new onboarding should prefer `UNIGOX_TON_PRIVATE_KEY` plus the exact raw TON address. The agent now checks the supported TON wallet versions locally and stores the matched one in `UNIGOX_TON_WALLET_VERSION`.
+The TON wallet address is the source of truth. For agent-side login, the user can provide either the mnemonic phrase or the TON private key for that same wallet, and the skill checks the supported TON wallet versions locally until one matches the exact address. The matched version is stored in `UNIGOX_TON_WALLET_VERSION`.
+
+The other first-class TON path is a fresh live TonConnect deep link / QR. That flow does not store a reusable QR token. The user must use the current live link (or a QR generated from it right now); old screenshots of prior QR codes are not reusable.
 
 ### 4. Email OTP onboarding
 

@@ -118,6 +118,35 @@ await client.verifyEmailOTP(code);
 await client.linkTonWallet();
 ```
 
+## Agent-side TON derivation login
+
+```typescript
+const client = new UnigoxClient({
+  authMode: "ton",
+  tonMnemonic: process.env.UNIGOX_TON_MNEMONIC, // or tonPrivateKey
+  tonAddress: process.env.UNIGOX_TON_ADDRESS,
+  tonWalletVersion: process.env.UNIGOX_TON_WALLET_VERSION,
+});
+
+await client.login();
+```
+
+The exact raw TON address is the source of truth. The client derives the supported TON wallet versions locally until one matches that exact address, then persists the matched version as `UNIGOX_TON_WALLET_VERSION`.
+
+## Fresh TonConnect login
+
+Use the same frontend flow the UNIGOX website uses:
+
+1. `createTonLoginPayloadTokenPair()` to get `{ payloadToken, payloadTokenHash }`
+2. Generate a fresh live TonConnect deep link / QR with `payloadTokenHash`
+3. Wait for the wallet to approve and return `tonProof`
+4. Call `loginWithTonConnect({ address, network, public_key, proof, payloadToken })`
+
+Important:
+- only accept the TonConnect result if the returned wallet address matches the exact address the user confirmed earlier
+- use the current live link (or a QR generated from it right now)
+- do not treat old QR screenshots as reusable login credentials
+
 ## Resolving dynamic payment fields before save / send
 
 The frontend/payment-network config is the source of truth here:

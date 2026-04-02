@@ -460,6 +460,14 @@ interface TonProofPayload {
   stateInit?: string;
 }
 
+export interface TonConnectLoginPayload {
+  address: string;
+  network: string;
+  public_key?: string;
+  proof: TonProofPayload;
+  payloadToken: string;
+}
+
 interface TonWalletAccount {
   address: string;
   network: string;
@@ -822,6 +830,10 @@ export class UnigoxClient {
     return { address, derivedAddress, walletVersion };
   }
 
+  async createTonLoginPayloadTokenPair(): Promise<{ payloadToken: string; payloadTokenHash: string }> {
+    return this.generateTonPayloadTokenPair();
+  }
+
   private async generateTonPayloadTokenPair(): Promise<TonPayloadTokenPair> {
     const res = await jsonFetch(`${this.frontendUrl}/api/ton-generate-payload`, { method: "POST" });
     if (!res?.payloadToken || !res?.payloadTokenHash) {
@@ -1070,6 +1082,21 @@ export class UnigoxClient {
     }
 
     return this.finalizeAccountLogin(loginRes.id_token as string, { linkedTonAddress: tonWallet.address });
+  }
+
+  async loginWithTonConnect(payload: TonConnectLoginPayload): Promise<string> {
+    const loginRes = await jsonFetch(`${this.frontendUrl}/api/ton-login`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    if (!loginRes.id_token) {
+      throw new Error(`TON Connect login failed: ${JSON.stringify(loginRes)}`);
+    }
+
+    return this.finalizeAccountLogin(loginRes.id_token as string, {
+      linkedTonAddress: this.normalizeTonAddress(payload.address),
+    });
   }
 
   private async loginOnce(): Promise<string> {

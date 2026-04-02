@@ -74,15 +74,19 @@ Important implementation note:
 
 > For TON, send me the **exact raw TON address** shown by the wallet you used on UNIGOX first.
 >
-> I’ll echo it back and ask you to confirm whether that exact address/version is the right one before I ask for the TON private key / secret key.
-> After that, I’ll check the supported TON wallet versions locally and keep the one that actually matches this exact address.
+> I’ll echo it back and ask you to confirm whether that exact address/version is the right one.
+> After that, you can choose one of three login paths for that same wallet:
+> 1. send the mnemonic phrase
+> 2. send the TON private key / secret key
+> 3. say `TonConnect QR` and I’ll generate a fresh live TonConnect deep link / QR
 >
-> Do **not** send a mnemonic phrase in chat for new TON setup. The agent should use the exact address as the source of truth and the TON private key only for proof signing.
+> For the mnemonic/private-key paths, I’ll check the supported TON wallet versions locally and keep the one that actually matches this exact address.
+> For TonConnect, I’ll only accept the connection if the wallet comes back as this exact address. Old screenshots of previous QR codes are not reusable login credentials.
 
 When the user provides TON credentials:
 - Save to `.env` as:
   - `UNIGOX_AUTH_MODE=ton`
-  - `UNIGOX_TON_PRIVATE_KEY=...`
+  - `UNIGOX_TON_PRIVATE_KEY=...` or `UNIGOX_TON_MNEMONIC=...`
   - `UNIGOX_TON_ADDRESS=0:...`
   - `UNIGOX_TON_NETWORK=-239` unless they explicitly use testnet
 - Call `login()` to verify TON auth works
@@ -153,7 +157,12 @@ When the user provides the login key:
 
 > Sign up / log in on unigox.com with your TON wallet first, then give me the exact raw TON address from the wallet app.
 >
-> I’ll confirm that exact address/version with you, then ask for the TON private key / secret key for that same wallet. I’ll use that key only to generate the TON proof for login. Everything after the JWT stays on the normal UNIGOX APIs.
+> I’ll confirm that exact address/version with you, then let you choose how to finish login for that same wallet:
+> - send the mnemonic phrase
+> - send the TON private key / secret key
+> - or use a fresh TonConnect deep link / QR
+>
+> For mnemonic/private-key flows, I’ll derive supported wallet versions locally until one matches the exact address. For TonConnect, I’ll only accept the wallet if it comes back as that exact address. Everything after the JWT stays on the normal UNIGOX APIs.
 
 When the user provides TON credentials:
 - Save `UNIGOX_AUTH_MODE=ton`

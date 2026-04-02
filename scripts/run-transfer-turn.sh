@@ -13,7 +13,7 @@ if [[ ! -f "${SCRIPT_DIR}/package.json" ]]; then
   exit 1
 fi
 
-if missing_dependency "@ton/crypto" || missing_dependency "@ton/ton" || missing_dependency "ethers" || missing_dependency "tweetnacl"; then
+if missing_dependency "@ton/crypto" || missing_dependency "@ton/ton" || missing_dependency "@tonconnect/sdk" || missing_dependency "ethers" || missing_dependency "tweetnacl"; then
   npm install --prefix "${SCRIPT_DIR}" --no-fund --no-audit >&2
 fi
 

@@ -2,6 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { mnemonicValidate } from "@ton/crypto";
 import { Address } from "@ton/ton";
 import { Wallet } from "ethers";
 
@@ -82,8 +83,10 @@ export type TransferStage =
   | "awaiting_evm_signing_key"
   | "awaiting_ton_address"
   | "awaiting_ton_address_confirmation"
+  | "awaiting_ton_auth_method"
   | "awaiting_ton_private_key"
   | "awaiting_ton_mnemonic"
+  | "awaiting_tonconnect_completion"
   | "awaiting_secret_cleanup_confirmation"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
@@ -221,6 +224,22 @@ export interface TransferFlowDeps {
   clientConfig?: UnigoxClientConfig;
   verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
   verifyTonLogin?: (params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string }) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string; tonWalletVersion?: TonWalletVersion } | void>;
+  startTonConnectLogin?: () => Promise<{ universalLink: string; manifestUrl?: string; expiresAt?: string; payloadToken: string }>;
+  checkTonConnectLogin?: () => Promise<{
+    status: "pending" | "connected" | "error";
+    walletAddress?: string;
+    network?: string;
+    publicKey?: string;
+    proof?: {
+      timestamp: number;
+      domain: { lengthBytes: number; value: string };
+      signature: string;
+      payload: string;
+      stateInit?: string;
+    };
+    message?: string;
+  }>;
+  clearTonConnectLogin?: () => Promise<void> | void;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
@@ -383,6 +402,14 @@ export interface TransferSession {
     evmSigningKeyAvailable?: boolean;
     tonAddress?: string;
     tonWalletVersion?: TonWalletVersion;
+    sessionToken?: string;
+    sessionTokenExpiresAt?: string;
+    tonConnect?: {
+      universalLink?: string;
+      manifestUrl?: string;
+      expiresAt?: string;
+      payloadToken?: string;
+    };
     username?: string;
     kycStatus?: string;
     kycCountryCode?: string;
@@ -662,6 +689,15 @@ function parseTonMnemonic(text: string | undefined): string | undefined {
   if (words.length < 12 || words.length > 24) return undefined;
   if (!words.every((entry) => /^[a-z]+$/i.test(entry))) return undefined;
   return words.join(" ");
+}
+
+function chooseTonCredentialMethod(text: string | undefined): "mnemonic" | "private_key" | "tonconnect" | undefined {
+  const value = cleanText(text)?.toLowerCase();
+  if (!value) return undefined;
+  if (/\b(tonconnect|ton connect|qr|qr code|deep link|wallet connect)\b/.test(value)) return "tonconnect";
+  if (/\b(mnemonic|seed phrase|recovery phrase|12 words|24 words)\b/.test(value)) return "mnemonic";
+  if (/\b(private key|secret key|ton key|seed32|secret64)\b/.test(value)) return "private_key";
+  return undefined;
 }
 
 function parseTonPrivateKey(text: string | undefined): string | undefined {
@@ -1191,16 +1227,19 @@ function buildExecutionClientConfig(session: TransferSession | undefined, deps: 
     }
   }
 
-  const sessionTokenExpiresAt = session?.auth.emailAuthTokenExpiresAt
-    ? Date.parse(session.auth.emailAuthTokenExpiresAt)
+  const transientSessionToken = session?.auth.sessionToken || session?.auth.emailAuthToken;
+  const sessionTokenExpiresAt = session?.auth.sessionTokenExpiresAt
+    ? Date.parse(session.auth.sessionTokenExpiresAt)
+    : session?.auth.emailAuthTokenExpiresAt
+      ? Date.parse(session.auth.emailAuthTokenExpiresAt)
     : undefined;
 
-  if (session?.auth.mode === "email") {
+  if (session?.auth.mode === "email" || transientSessionToken) {
     return {
       ...config,
-      authMode: "email",
+      authMode: session?.auth.mode || config.authMode || "email",
       email: session.auth.emailAddress || config.email || getStoredEmailAddress(deps),
-      ...(session?.auth.emailAuthToken ? { sessionToken: session.auth.emailAuthToken } : {}),
+      ...(transientSessionToken ? { sessionToken: transientSessionToken } : {}),
       ...(sessionTokenExpiresAt ? { sessionTokenExpiresAt } : {}),
     };
   }
@@ -1787,17 +1826,16 @@ function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key" | "evm_sign
 }
 
 function buildInvalidTonMnemonicPrompt(tonAddress: string | undefined): string {
-  const followUp = tonAddress ? buildTonPrivateKeyPrompt(tonAddress) : buildTonAddressPrompt();
+  const followUp = tonAddress ? buildTonAuthMethodPrompt(tonAddress) : buildTonAddressPrompt();
   return [
-    "Please do not send a TON mnemonic here.",
-    "Mnemonic phrases can derive a different wallet version/address than the one your app used on UNIGOX.",
-    "For new TON setup here, send the raw TON address plus the TON private key / secret key for that exact wallet instead.",
+    "That doesn’t look like a valid TON mnemonic phrase yet.",
+    "Send the full mnemonic for the exact wallet address you confirmed, and I’ll match the supported TON wallet versions locally until one derives that address.",
     followUp,
   ].join(" ");
 }
 
 function buildInvalidTonPrivateKeyPrompt(tonAddress: string | undefined): string {
-  const followUp = tonAddress ? buildTonPrivateKeyPrompt(tonAddress) : buildTonAddressPrompt();
+  const followUp = tonAddress ? buildTonAuthMethodPrompt(tonAddress) : buildTonAddressPrompt();
   return [
     "That doesn’t look like a valid TON private key / secret key.",
     "I accept a TON key as 32-byte or 64-byte key material in hex or base64, with or without 0x.",
@@ -1845,7 +1883,26 @@ function buildTonAddressConfirmationPrompt(tonAddress: string): string {
   return [
     `I’ll use this exact raw TON address: ${tonAddress}.`,
     "Is this the correct wallet address for the wallet you used on UNIGOX, or should I use a different version / address?",
-    "After you send the TON key, I’ll check the supported TON wallet versions locally and keep the one that actually matches this exact address.",
+    "Once you confirm it, you can either send the mnemonic phrase for that wallet, send the TON private key / secret key, or use a fresh TonConnect QR / deep link. I’ll keep only the wallet version that actually matches this exact address.",
+  ].join(" ");
+}
+
+function buildTonAuthMethodPrompt(tonAddress: string): string {
+  return [
+    `Got the TON address: ${tonAddress}.`,
+    "How do you want me to complete TON login for this exact wallet?",
+    "1. Send the TON mnemonic phrase for this wallet",
+    "2. Send the TON private key / secret key for this wallet",
+    "3. Say 'TonConnect QR' and I’ll generate a fresh live TonConnect deep link for this login",
+    "For the mnemonic/private-key paths, I’ll derive the supported TON wallet versions locally and keep the one that matches this exact address.",
+  ].join(" ");
+}
+
+function buildTonMnemonicPrompt(tonAddress: string): string {
+  return [
+    buildEvmKeySecurityWarning("ton_mnemonic"),
+    `Got the TON address: ${tonAddress}.`,
+    "Now send the TON mnemonic phrase for that same wallet and I’ll match the supported TON wallet versions locally until one derives this exact address, then I’ll log in from the agent side.",
   ].join(" ");
 }
 
@@ -1853,9 +1910,35 @@ function buildTonPrivateKeyPrompt(tonAddress: string): string {
   return [
     buildEvmKeySecurityWarning("ton_private_key"),
     `Got the TON address: ${tonAddress}.`,
-    "Now send the TON private key / secret key for that same wallet and I’ll verify the TON login here from the agent side.",
-    "Do not send a mnemonic phrase here.",
+    "Now send the TON private key / secret key for that same wallet and I’ll match the supported TON wallet versions locally until one derives this exact address, then I’ll verify TON login here from the agent side.",
   ].join(" ");
+}
+
+function buildTonConnectPrompt(params: { universalLink: string; expiresAt?: string; tonAddress?: string }): string {
+  const expiresIn = params.expiresAt
+    ? Math.max(1, Math.round((Date.parse(params.expiresAt) - Date.now()) / 60000))
+    : undefined;
+  return [
+    "Your fresh TonConnect login link is ready.",
+    params.tonAddress ? `I’ll only accept the connection if the wallet comes back as this address: ${params.tonAddress}.` : undefined,
+    params.universalLink,
+    "Open that link in the TON wallet you use on UNIGOX. If you’re on another device, scan a QR generated from this exact link.",
+    "Use this live link or a QR generated from it now. An old screenshot of a previous QR will not work as a reusable login credential.",
+    expiresIn ? `This live request should stay valid for about ${expiresIn} minutes.` : undefined,
+    "After you approve it in the wallet, reply with: connected",
+  ].filter(Boolean).join(" ");
+}
+
+function buildTonConnectStillWaitingPrompt(params: { universalLink: string; expiresAt?: string }): string {
+  const expiresIn = params.expiresAt
+    ? Math.max(1, Math.round((Date.parse(params.expiresAt) - Date.now()) / 60000))
+    : undefined;
+  return [
+    "I’m still waiting for the TonConnect approval from the wallet.",
+    params.universalLink,
+    expiresIn ? `This live request should still be valid for about ${expiresIn} minutes.` : undefined,
+    "Approve it in the wallet, then reply: connected",
+  ].filter(Boolean).join(" ");
 }
 
 function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
@@ -1991,8 +2074,10 @@ async function maybeRefreshStoredAuthState(
     "awaiting_evm_signing_key",
     "awaiting_ton_address",
     "awaiting_ton_address_confirmation",
+    "awaiting_ton_auth_method",
     "awaiting_ton_private_key",
     "awaiting_ton_mnemonic",
+    "awaiting_tonconnect_completion",
     "awaiting_secret_cleanup_confirmation",
   ].includes(session.stage)) {
     session.status = "active";
@@ -2035,7 +2120,13 @@ async function normalizeSecretInput(
     return parseTonPrivateKey(secret);
   }
   if (kind === "ton_mnemonic") {
-    return parseTonMnemonic(secret);
+    const mnemonic = parseTonMnemonic(secret);
+    if (!mnemonic) return undefined;
+    try {
+      return await mnemonicValidate(mnemonic.split(/\s+/)) ? mnemonic : undefined;
+    } catch {
+      return undefined;
+    }
   }
   return parseEvmPrivateKey(secret);
 }
@@ -2049,7 +2140,7 @@ function restoreStageForSecretKind(session: TransferSession, kind: SecretKind): 
     session.stage = "awaiting_evm_signing_key";
     return;
   }
-  session.stage = "awaiting_ton_private_key";
+  session.stage = kind === "ton_mnemonic" ? "awaiting_ton_mnemonic" : "awaiting_ton_private_key";
 }
 
 async function finalizeEvmLoginKey(
@@ -2105,6 +2196,244 @@ async function finalizeEvmSigningKey(
     resumed.events = [...prefixEvents, ...resumed.events];
   }
   return resumed;
+}
+
+async function finalizeTonMnemonic(
+  session: TransferSession,
+  mnemonic: string,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  session.auth.pendingSecret = undefined;
+  const verification = await verifyTonLoginInput({ mnemonic, tonAddress: session.auth.tonAddress }, deps);
+  if (!verification.success) {
+    session.stage = "awaiting_ton_mnemonic";
+    const failure = `That TON mnemonic didn't verify against the exact TON address used on UNIGOX. Please double-check the mnemonic phrase and the exact wallet address, then try again.${verification.message ? ` (${verification.message})` : ""}`;
+    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: failure,
+    }]);
+  }
+
+  if (session.auth.tonAddress) {
+    await deps.persistTonAddress?.(session.auth.tonAddress);
+  }
+  if (verification.tonWalletVersion) {
+    session.auth.tonWalletVersion = verification.tonWalletVersion;
+    await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
+  }
+  await deps.persistTonMnemonic?.(mnemonic);
+
+  session.auth.available = true;
+  session.auth.mode = "ton";
+  session.auth.choice = "ton";
+  session.auth.username = verification.username || session.auth.username;
+  if (!session.auth.username) {
+    await maybeHydrateAuthIdentity(session, deps);
+  }
+
+  if (!session.auth.evmSigningKeyAvailable) {
+    session.stage = "awaiting_evm_signing_key";
+    const followUp = ["TON login works.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+    return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: followUp,
+    }]);
+  }
+
+  session.status = "active";
+  session.stage = "resolving";
+  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
+  if (prefixEvents.length) {
+    resumed.events = [...prefixEvents, ...resumed.events];
+  }
+  return resumed;
+}
+
+async function startTonConnectLoginFlow(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  if (!deps.startTonConnectLogin) {
+    const prompt = "This skill runtime cannot generate a live TonConnect login link yet. Send the TON mnemonic phrase or TON private key / secret key for that same wallet instead.";
+    session.stage = "awaiting_ton_auth_method";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    const started = await deps.startTonConnectLogin();
+    session.auth.tonConnect = {
+      universalLink: started.universalLink,
+      manifestUrl: started.manifestUrl,
+      expiresAt: started.expiresAt,
+      payloadToken: started.payloadToken,
+    };
+    session.stage = "awaiting_tonconnect_completion";
+    session.status = "blocked";
+    const prompt = buildTonConnectPrompt({
+      universalLink: started.universalLink,
+      expiresAt: started.expiresAt,
+      tonAddress: session.auth.tonAddress,
+    });
+    return reply(withUpdate(session, deps), prompt, ["connected", "status", "send TON mnemonic", "send TON private key"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  } catch (error) {
+    const prompt = `I couldn't start a fresh TonConnect login right now.${error instanceof Error ? ` (${error.message})` : ""}`;
+    session.stage = "awaiting_ton_auth_method";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+}
+
+function buildTonConnectVerificationClient(deps: TransferFlowDeps): UnigoxClient {
+  let frontendUrl: string | undefined;
+  let email: string | undefined;
+  let evmSigningPrivateKey: string | undefined;
+  if (deps.clientConfig) {
+    frontendUrl = deps.clientConfig.frontendUrl;
+    email = deps.clientConfig.email;
+    evmSigningPrivateKey = deps.clientConfig.evmSigningPrivateKey || deps.clientConfig.privateKey;
+  } else {
+    try {
+      const config = loadUnigoxConfigFromEnv();
+      frontendUrl = config.frontendUrl;
+      email = config.email;
+      evmSigningPrivateKey = config.evmSigningPrivateKey || config.privateKey;
+    } catch {
+      // Default frontend URL is fine.
+    }
+  }
+
+  return new UnigoxClient({
+    ...(frontendUrl ? { frontendUrl } : {}),
+    ...(email ? { email } : {}),
+    ...(evmSigningPrivateKey ? { evmSigningPrivateKey } : {}),
+  });
+}
+
+async function finalizeTonConnectLogin(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = []
+): Promise<TransferFlowResult> {
+  const active = session.auth.tonConnect;
+  if (!active?.payloadToken || !active.universalLink) {
+    session.stage = "awaiting_ton_auth_method";
+    session.status = "blocked";
+    const prompt = buildTonAuthMethodPrompt(session.auth.tonAddress!);
+    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  if (!deps.checkTonConnectLogin) {
+    const prompt = "This skill runtime cannot check TonConnect approval yet. Use the mnemonic or TON private-key path instead.";
+    session.stage = "awaiting_ton_auth_method";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  const checked = await deps.checkTonConnectLogin();
+  if (checked.status === "pending") {
+    const prompt = buildTonConnectStillWaitingPrompt({
+      universalLink: active.universalLink,
+      expiresAt: active.expiresAt,
+    });
+    session.stage = "awaiting_tonconnect_completion";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["connected", "status"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  if (checked.status === "error" || !checked.walletAddress || !checked.network || !checked.proof) {
+    const prompt = `TonConnect did not complete cleanly yet.${checked.status === "error" && checked.message ? ` (${checked.message})` : ""} If needed, I can generate a fresh live link.`;
+    session.stage = "awaiting_tonconnect_completion";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["connected", "status", "TonConnect QR"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  if (session.auth.tonAddress && checked.walletAddress !== session.auth.tonAddress) {
+    await deps.clearTonConnectLogin?.();
+    session.auth.tonConnect = undefined;
+    session.stage = "awaiting_ton_address";
+    session.status = "blocked";
+    const prompt = [
+      `The connected wallet came back as ${checked.walletAddress}, not ${session.auth.tonAddress}.`,
+      "That means this TonConnect approval was for a different wallet or address version.",
+      "Send the exact raw TON address you want me to use, then I can generate a fresh TonConnect QR or use the mnemonic/private-key path for that wallet.",
+    ].join(" ");
+    return reply(withUpdate(session, deps), prompt, ["use a different TON address", "TonConnect QR"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    const client = buildTonConnectVerificationClient(deps);
+    const token = await client.loginWithTonConnect({
+      address: checked.walletAddress,
+      network: checked.network,
+      ...(checked.publicKey ? { public_key: checked.publicKey } : {}),
+      proof: checked.proof,
+      payloadToken: active.payloadToken,
+    });
+
+    await deps.clearTonConnectLogin?.();
+    session.auth.tonConnect = undefined;
+    session.auth.available = true;
+    session.auth.mode = "ton";
+    session.auth.choice = "ton";
+    session.auth.checked = true;
+    session.auth.tonAddress = checked.walletAddress;
+    session.auth.sessionToken = token;
+    session.auth.sessionTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
+    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
+
+    if (!session.auth.evmSigningKeyAvailable) {
+      session.stage = "awaiting_evm_signing_key";
+      session.status = "blocked";
+      const followUp = ["TON login works via TonConnect.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+      return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: followUp,
+      }]);
+    }
+
+    session.status = "active";
+    session.stage = "resolving";
+    const resumed = await advanceTransferFlow(session, { text: "" }, { ...deps, client });
+    if (prefixEvents.length) {
+      resumed.events = [...prefixEvents, ...resumed.events];
+    }
+    return resumed;
+  } catch (error) {
+    const prompt = `TonConnect approval came back, but UNIGOX login still failed.${error instanceof Error ? ` (${error.message})` : ""}`;
+    session.stage = "awaiting_tonconnect_completion";
+    session.status = "blocked";
+    return reply(withUpdate(session, deps), prompt, ["connected", "TonConnect QR"], [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
 }
 
 async function finalizeTonPrivateKey(
@@ -2242,6 +2571,8 @@ async function finalizeEmailOtpVerification(
     session.auth.emailAddress = emailAddress;
     session.auth.emailAuthToken = token;
     session.auth.emailAuthTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
+    session.auth.sessionToken = token;
+    session.auth.sessionTokenExpiresAt = session.auth.emailAuthTokenExpiresAt;
     session.auth.checked = true;
     session.status = "active";
     session.stage = "resolving";
@@ -2318,13 +2649,7 @@ async function maybeHandleAuthOnboardingTurn(
       return finalizeTonPrivateKey(session, normalizedSecret, deps);
     }
     if (pendingSecret.kind === "ton_mnemonic") {
-      session.auth.pendingSecret = undefined;
-      session.stage = "awaiting_ton_private_key";
-      const prompt = buildInvalidTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
+      return finalizeTonMnemonic(session, normalizedSecret, deps);
     }
     return finalizeEvmSigningKey(session, normalizedSecret, deps);
   }
@@ -2491,9 +2816,9 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     if (AFFIRMATIVE_RE.test(responseText) || /correct|this address is correct|use this address/i.test(responseText)) {
-      session.stage = "awaiting_ton_private_key";
-      const prompt = buildTonPrivateKeyPrompt(session.auth.tonAddress!);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
+      session.stage = "awaiting_ton_auth_method";
+      const prompt = buildTonAuthMethodPrompt(session.auth.tonAddress!);
+      return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
         type: "blocked_missing_auth",
         message: prompt,
       }]);
@@ -2515,7 +2840,7 @@ async function maybeHandleAuthOnboardingTurn(
     }]);
   }
 
-  if (session.stage === "awaiting_ton_private_key" || session.stage === "awaiting_ton_mnemonic") {
+  if (session.stage === "awaiting_ton_auth_method") {
     session.status = "blocked";
     const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
     if (!tonAddress) {
@@ -2527,11 +2852,125 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
+    const explicitMethod = chooseTonCredentialMethod(responseText);
+    if (explicitMethod === "tonconnect") {
+      return startTonConnectLoginFlow(session, deps);
+    }
+
+    const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
+    if (mnemonic) {
+      const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
+      if (secretHandling.needsManualCleanup) {
+        const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+        return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+          type: "secret_cleanup_required",
+          message: prompt,
+        }]);
+      }
+
+      const events = secretHandling.deleted
+        ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." } as TransferFlowEvent]
+        : [];
+      return finalizeTonMnemonic(session, mnemonic, deps, events);
+    }
+
+    const tonPrivateKey = await normalizeSecretInput("ton_private_key", responseText);
+    if (tonPrivateKey) {
+      const secretHandling = await maybeHandleSensitiveInput(session, "ton_private_key", tonPrivateKey, turn, deps);
+      if (secretHandling.needsManualCleanup) {
+        const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+        return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+          type: "secret_cleanup_required",
+          message: prompt,
+        }]);
+      }
+
+      const events = secretHandling.deleted
+        ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." } as TransferFlowEvent]
+        : [];
+      return finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+    }
+
+    if (explicitMethod === "mnemonic") {
+      session.stage = "awaiting_ton_mnemonic";
+      const prompt = buildTonMnemonicPrompt(tonAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (explicitMethod === "private_key") {
+      session.stage = "awaiting_ton_private_key";
+      const prompt = buildTonPrivateKeyPrompt(tonAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const prompt = buildTonAuthMethodPrompt(tonAddress);
+    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  if (session.stage === "awaiting_ton_mnemonic") {
+    session.status = "blocked";
+    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
+    if (!tonAddress) {
+      session.stage = "awaiting_ton_address";
+      const prompt = buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
+    if (!mnemonic) {
+      const prompt = buildInvalidTonMnemonicPrompt(tonAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
+    if (secretHandling.needsManualCleanup) {
+      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
+      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
+        type: "secret_cleanup_required",
+        message: prompt,
+      }]);
+    }
+
+    const events = secretHandling.deleted
+      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." } as TransferFlowEvent]
+      : [];
+    return finalizeTonMnemonic(session, mnemonic, deps, events);
+  }
+
+  if (session.stage === "awaiting_ton_private_key") {
+    session.status = "blocked";
+    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
+    if (!tonAddress) {
+      session.stage = "awaiting_ton_address";
+      const prompt = buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (chooseTonCredentialMethod(responseText) === "tonconnect") {
+      return startTonConnectLoginFlow(session, deps);
+    }
+
     const tonPrivateKey = await normalizeSecretInput("ton_private_key", responseText);
     if (!tonPrivateKey) {
-      const prompt = parseTonMnemonic(responseText)
-        ? buildInvalidTonMnemonicPrompt(tonAddress)
-        : buildInvalidTonPrivateKeyPrompt(tonAddress);
+      const prompt = buildInvalidTonPrivateKeyPrompt(tonAddress);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2551,6 +2990,14 @@ async function maybeHandleAuthOnboardingTurn(
       ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." } as TransferFlowEvent]
       : [];
     return finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+  }
+
+  if (session.stage === "awaiting_tonconnect_completion") {
+    session.status = "blocked";
+    if (chooseTonCredentialMethod(responseText) === "tonconnect") {
+      return startTonConnectLoginFlow(session, deps);
+    }
+    return finalizeTonConnectLogin(session, deps);
   }
 
   if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
@@ -5045,7 +5492,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method", "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
