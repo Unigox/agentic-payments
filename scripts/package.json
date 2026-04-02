@@ -20,8 +20,5 @@
     "ethers": "^6.16.0",
     "tweetnacl": "^1.0.3",
     "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "esbuild": "^0.25.9"
   }
 }

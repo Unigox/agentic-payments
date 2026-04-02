@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUNDLE_BUILD_DIR="${ROOT_DIR}/adapters/anthropic/.mcpb-build"
-SERVER_DIR="${BUNDLE_BUILD_DIR}/server"
+SCRIPTS_BUILD_DIR="${BUNDLE_BUILD_DIR}/scripts"
 OUTPUT_FILE="${ROOT_DIR}/adapters/anthropic/installed.mcpb"
 MANIFEST_SOURCE="${ROOT_DIR}/adapters/anthropic/manifest.json"
 
@@ -18,20 +18,16 @@ if [[ ! -f "${SCRIPT_DIR}/package.json" ]]; then
   exit 1
 fi
 
-npm install --prefix "${SCRIPT_DIR}" --no-fund --no-audit >&2
-
 rm -rf "${BUNDLE_BUILD_DIR}"
-mkdir -p "${SERVER_DIR}" \
+mkdir -p "${SCRIPTS_BUILD_DIR}" \
   "${BUNDLE_BUILD_DIR}/workflows/sessions" \
   "${BUNDLE_BUILD_DIR}/workflows/tonconnect"
 
-"${SCRIPT_DIR}/node_modules/.bin/esbuild" \
-  "${SCRIPT_DIR}/send-money-mcp-server.ts" \
-  --bundle \
-  --platform=node \
-  --format=esm \
-  --target=node20 \
-  --outfile="${SERVER_DIR}/index.js"
+cp "${SCRIPT_DIR}/package.json" "${SCRIPTS_BUILD_DIR}/package.json"
+cp "${SCRIPT_DIR}/package-lock.json" "${SCRIPTS_BUILD_DIR}/package-lock.json"
+find "${SCRIPT_DIR}" -maxdepth 1 -type f -name '*.ts' ! -name '*.test.ts' -exec cp {} "${SCRIPTS_BUILD_DIR}/" \;
+
+npm ci --prefix "${SCRIPTS_BUILD_DIR}" --omit=dev --no-fund --no-audit >&2
 
 cp "${MANIFEST_SOURCE}" "${BUNDLE_BUILD_DIR}/manifest.json"
 cp "${ROOT_DIR}/contacts.json" "${BUNDLE_BUILD_DIR}/contacts.json"
