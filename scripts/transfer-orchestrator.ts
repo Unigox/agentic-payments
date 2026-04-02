@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Address } from "@ton/ton";
+import { Wallet } from "ethers";
 
 import UnigoxClient, {
   getPaymentMethodsForCurrency as defaultGetPaymentMethodsForCurrency,
@@ -654,6 +655,22 @@ function parseTonMnemonic(text: string | undefined): string | undefined {
   if (words.length < 12 || words.length > 24) return undefined;
   if (!words.every((entry) => /^[a-z]+$/i.test(entry))) return undefined;
   return words.join(" ");
+}
+
+function parseEvmPrivateKey(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+
+  const match = value.match(/\b(?:0x)?[0-9a-fA-F]{64}\b/);
+  if (!match) return undefined;
+
+  const normalized = match[0].startsWith("0x") ? match[0] : `0x${match[0]}`;
+  try {
+    new Wallet(normalized);
+    return normalized;
+  } catch {
+    return undefined;
+  }
 }
 
 const DETAIL_LABELS: Record<string, string> = {
@@ -1707,6 +1724,14 @@ function buildEvmLoginKeyPrompt(): string {
   ].join(" ");
 }
 
+function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string): string {
+  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username);
+  return [
+    "That doesn’t look like a valid EVM private key.",
+    followUp,
+  ].join(" ");
+}
+
 function buildEvmSigningKeyPrompt(username: string | undefined): string {
   return [
     buildUsernameReminder(username),
@@ -1908,6 +1933,26 @@ async function maybeHandleSensitiveInput(
     needsManualCleanup: true,
     note: result?.note,
   };
+}
+
+function normalizeSecretInput(
+  kind: SecretKind,
+  secret: string,
+): string | undefined {
+  if (kind === "ton_mnemonic") return parseTonMnemonic(secret);
+  return parseEvmPrivateKey(secret);
+}
+
+function restoreStageForSecretKind(session: TransferSession, kind: SecretKind): void {
+  if (kind === "evm_login_key") {
+    session.stage = "awaiting_evm_login_key";
+    return;
+  }
+  if (kind === "evm_signing_key") {
+    session.stage = "awaiting_evm_signing_key";
+    return;
+  }
+  session.stage = "awaiting_ton_mnemonic";
 }
 
 async function finalizeEvmLoginKey(
@@ -2150,13 +2195,28 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
+    const normalizedSecret = normalizeSecretInput(pendingSecret.kind, pendingSecret.value);
+    if (!normalizedSecret) {
+      session.auth.pendingSecret = undefined;
+      restoreStageForSecretKind(session, pendingSecret.kind);
+      const prompt = pendingSecret.kind === "evm_login_key"
+        ? buildInvalidEvmKeyPrompt("evm_login_key")
+        : pendingSecret.kind === "evm_signing_key"
+          ? buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username)
+          : buildTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
     if (pendingSecret.kind === "evm_login_key") {
-      return finalizeEvmLoginKey(session, pendingSecret.value, deps);
+      return finalizeEvmLoginKey(session, normalizedSecret, deps);
     }
     if (pendingSecret.kind === "ton_mnemonic") {
-      return finalizeTonMnemonic(session, pendingSecret.value, deps);
+      return finalizeTonMnemonic(session, normalizedSecret, deps);
     }
-    return finalizeEvmSigningKey(session, pendingSecret.value, deps);
+    return finalizeEvmSigningKey(session, normalizedSecret, deps);
   }
 
   if (session.stage === "awaiting_evm_wallet_signin") {
@@ -2260,7 +2320,16 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
-    const secretHandling = await maybeHandleSensitiveInput(session, "evm_login_key", responseText, turn, deps);
+    const loginKey = parseEvmPrivateKey(responseText);
+    if (!loginKey) {
+      const prompt = buildInvalidEvmKeyPrompt("evm_login_key");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const secretHandling = await maybeHandleSensitiveInput(session, "evm_login_key", loginKey, turn, deps);
     if (secretHandling.needsManualCleanup) {
       const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
       return reply(withUpdate(session, deps), prompt, ["deleted"], [{
@@ -2272,7 +2341,7 @@ async function maybeHandleAuthOnboardingTurn(
     const events = secretHandling.deleted
       ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the login-key message from chat." } as TransferFlowEvent]
       : [];
-    return finalizeEvmLoginKey(session, responseText, deps, events);
+    return finalizeEvmLoginKey(session, loginKey, deps, events);
   }
 
   if (session.stage === "awaiting_ton_address") {
@@ -2343,7 +2412,16 @@ async function maybeHandleAuthOnboardingTurn(
       }]);
     }
 
-    const secretHandling = await maybeHandleSensitiveInput(session, "evm_signing_key", responseText, turn, deps);
+    const signingKey = parseEvmPrivateKey(responseText);
+    if (!signingKey) {
+      const prompt = buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const secretHandling = await maybeHandleSensitiveInput(session, "evm_signing_key", signingKey, turn, deps);
     if (secretHandling.needsManualCleanup) {
       const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
       return reply(withUpdate(session, deps), prompt, ["deleted"], [{
@@ -2355,7 +2433,7 @@ async function maybeHandleAuthOnboardingTurn(
     const events = secretHandling.deleted
       ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the signing-key message from chat." } as TransferFlowEvent]
       : [];
-    return finalizeEvmSigningKey(session, responseText, deps, events);
+    return finalizeEvmSigningKey(session, signingKey, deps, events);
   }
 
   return undefined;

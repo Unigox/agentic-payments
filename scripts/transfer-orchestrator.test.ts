@@ -25,6 +25,10 @@ import type {
 } from "./unigox-client.ts";
 import type { TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
 
+const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
+const VALID_SIGNING_KEY = "0x2222222222222222222222222222222222222222222222222222222222222222";
+const ANOTHER_VALID_KEY = "0x3333333333333333333333333333333333333333333333333333333333333333";
+
 function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { lastUpdated: "" } }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-flow-"));
   const file = path.join(dir, "contacts.json");
@@ -3257,7 +3261,7 @@ test("failed EVM login verification stays on the login-key step and does not ask
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "evm", deps);
   res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, "0xbadlogin", deps);
+  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
   assert.match(res.reply, /delete the message/i);
 
@@ -3273,7 +3277,7 @@ test("successful EVM login verification asks for the separate signing key and th
   const persisted = { login: [] as string[], signing: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === "0xgoodlogin" }),
+    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === VALID_LOGIN_KEY }),
     persistEvmLoginKey: async (loginKey) => {
       persisted.login.push(loginKey);
     },
@@ -3285,7 +3289,7 @@ test("successful EVM login verification asks for the separate signing key and th
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "evm", deps);
   res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, "0xgoodlogin", deps);
+  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
 
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
   assert.match(res.reply, /delete the message/i);
@@ -3297,16 +3301,81 @@ test("successful EVM login verification asks for the separate signing key and th
   assert.match(res.reply, /@grape404/i);
   assert.match(res.reply, /separate UNIGOX EVM signing key/i);
   assert.match(res.reply, /must NOT be your main wallet/i);
-  assert.deepEqual(persisted.login, ["0xgoodlogin"]);
+  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 
-  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  res = await advanceTransferFlow(res.session, VALID_SIGNING_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
   assert.match(res.reply, /UNIGOX-exported signing key/i);
 
   res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
+  assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
   assert.equal(res.session.stage, "awaiting_payment_method");
   assert.match(res.reply, /Which payout method should mom receive in EUR/i);
+});
+
+test("invalid text at the signing-key step is rejected instead of being stored as a private key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { signing: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
+    persistEvmSigningKey: async (signingKey) => {
+      persisted.signing.push(signingKey);
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
+  assert.deepEqual(persisted.signing, []);
+  assert.equal(res.session.auth.pendingSecret, undefined);
+});
+
+test("invalid text at the login-key step is rejected before secret-cleanup handling", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "evm", deps);
+  res = await advanceTransferFlow(res.session, "done", deps);
+  assert.equal(res.session.stage, "awaiting_evm_login_key");
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_evm_login_key");
+  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
+  assert.doesNotMatch(res.reply, /delete the message/i);
+  assert.equal(res.session.auth.pendingSecret, undefined);
+});
+
+test("invalid pending signing key is rejected at cleanup confirmation instead of being persisted", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const persisted = { signing: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
+    persistEvmSigningKey: async (signingKey) => {
+      persisted.signing.push(signingKey);
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res.session.stage = "awaiting_secret_cleanup_confirmation";
+  res.session.auth.pendingSecret = {
+    kind: "evm_signing_key",
+    value: "deleted",
+  };
+
+  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
+  assert.deepEqual(persisted.signing, []);
+  assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
 
@@ -3316,7 +3385,7 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
   const persisted = { login: [] as string[], signing: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === "0xgoodlogin", username: "autodelete" }),
+    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === VALID_LOGIN_KEY, username: "autodelete" }),
     persistEvmLoginKey: async (loginKey) => {
       persisted.login.push(loginKey);
     },
@@ -3329,16 +3398,16 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "evm", deps);
   res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, "0xgoodlogin", deps);
+  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
-  assert.deepEqual(persisted.login, ["0xgoodlogin"]);
+  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 
-  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  res = await advanceTransferFlow(res.session, VALID_SIGNING_KEY, deps);
   assert.equal(res.session.stage, "awaiting_payment_method");
   assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
-  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
+  assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
 });
 
 test("successful TON login verification persists TON auth and then asks for the EVM signing key", async () => {
@@ -3387,11 +3456,11 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
   assert.deepEqual(persisted.tonMnemonic, [tonMnemonic]);
 
-  res = await advanceTransferFlow(res.session, "0xgoodsigning", deps);
+  res = await advanceTransferFlow(res.session, ANOTHER_VALID_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
 
   res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.deepEqual(persisted.signing, ["0xgoodsigning"]);
+  assert.deepEqual(persisted.signing, [ANOTHER_VALID_KEY]);
   assert.equal(res.session.stage, "awaiting_payment_method");
 });
 
