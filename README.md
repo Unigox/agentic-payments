@@ -66,6 +66,43 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 ### 4. Install the skill
 Add Agentic Payments to your OpenClaw agent.
 
+## Adapter Compatibility
+
+This project can stay in one repo.
+
+The portability rule is:
+- one shared transfer engine
+- one canonical machine interface
+- thin runtime adapters on top
+
+Current layout:
+- shared transfer engine: `scripts/transfer-orchestrator.ts`
+- canonical session-aware runner: `scripts/run-transfer-turn.ts`
+- canonical portable tool contract: `scripts/send-money-tool.ts`
+- OpenClaw adapter: `SKILL.md`
+- OpenAI tool definition: `adapters/openai/send-money-tool.json`
+- Anthropic tool definition: `adapters/anthropic/send-money-tool.json`
+
+For OpenAI and Anthropic, the safest integration is to call the same `send_money_turn` tool with:
+- `text`
+- `session_key`
+- optional `reset`
+
+The host application should keep the same `session_key` across turns so the send flow can resume correctly instead of restarting.
+
+The engine remains responsible for:
+- auth state
+- saved recipient resolution
+- quotes
+- KYC
+- payout detail collection
+- settlement state
+
+The adapter remains responsible for:
+- tool transport
+- button / quick-reply rendering
+- host-specific tool plumbing
+
 ### 5. Initialize the agent
 On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then show the isolated-wallet warning, then ask which login wallet key you used and verify login with it, surface your current UNIGOX username, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. After the user pastes either EVM key, the flow tries to delete that message if the runtime supports it; otherwise it pauses and asks the user to delete the message themselves before continuing. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. For real transfer runs, the skill now blocks early on a missing exported signing key even after email OTP or TON login, so the user gets the export / beta-access explanation before recipient, quote, or trade execution instead of at the last secure step. After that it helps with payment methods and your first contacts. On later runs, the flow now checks stored auth first; if the saved login/signing credentials are already usable, it skips the auth-path questions, surfaces the current UNIGOX username and wallet balance immediately, and continues with the transfer. More details in the setup guide.
 

@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "name": "send_money_turn",
+  "description": "Advance one conversational turn of the UNIGOX send-money flow. Reuse the same session_key across turns so recipient resolution, auth, KYC, quotes, and settlement state continue correctly.",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The latest user message for the send-money flow, including follow-ups like recipient names, amounts, yes/no confirmations, payout details, KYC details, or receipt confirmations."
+      },
+      "session_key": {
+        "type": "string",
+        "description": "A stable per-chat or per-user conversation key. Reuse the same value across turns so the transfer session resumes instead of restarting."
+      },
+      "reset": {
+        "type": "boolean",
+        "description": "When true, ignore any saved session state for this session_key and start a fresh send-money flow."
+      }
+    },
+    "required": ["text", "session_key"]
+  },
+  "strict": true
+}
