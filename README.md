@@ -155,8 +155,30 @@ Key files:
 - local MCP server wrapper: `scripts/send-money-mcp-server.sh`
 - MCP server entrypoint: `scripts/send-money-mcp-server.ts`
 - Claude Desktop example config: `adapters/anthropic/claude-desktop.mcp.example.json`
+- Claude Desktop bundle manifest: `adapters/anthropic/manifest.json`
+- committed drag-and-drop installer bundle: `adapters/anthropic/installed.mcpb`
 
 The wrapper keeps dependency bootstrap local to the machine running the skill. Wallet secrets, `.env`, and transfer session state stay on that same device.
+
+### Claude Desktop install
+
+The preferred Anthropic install path is a committed local desktop bundle in this repo:
+
+- `adapters/anthropic/installed.mcpb`
+
+On macOS, after cloning or downloading the repo, install it with:
+
+```bash
+open /absolute/path/to/agentic-payments/adapters/anthropic/installed.mcpb
+```
+
+That should hand the bundle to Claude Desktop and open the extension install prompt.
+
+To rebuild the bundle from source on the same commit:
+
+```bash
+npm run build:anthropic-bundle --prefix scripts
+```
 
 ### 5. Initialize the agent
 On first run, the skill walks you through setup by first asking which wallet connection path it should use for UNIGOX sign-in — **EVM** or **TON**. If you choose **EVM**, the onboarding sequence is now: first confirm you have already signed in on unigox.com with that wallet, then show the isolated-wallet warning, then ask which login wallet key you used and verify login with it, surface your current UNIGOX username, and only after that ask for the separate UNIGOX-exported signing key needed for signed actions inside UNIGOX. After the user pastes either EVM key, the flow tries to delete that message if the runtime supports it; otherwise it pauses and asks the user to delete the message themselves before continuing. If you choose **TON**, the onboarding sequence now asks for the exact raw TON address first, confirms that it is the correct wallet address/version, and then lets you finish login in either of two ways: send the mnemonic / TON private key for that same wallet so the agent can derive supported wallet versions locally until one matches, or use a fresh live TonConnect deep link / QR for that exact address. The matched derivation is stored as `UNIGOX_TON_WALLET_VERSION` for later re-auth. If neither wallet path is ready yet, it can temporarily fall back to email OTP for onboarding or recovery, then optionally link the wallet path you chose. For real transfer runs, the skill now blocks early on a missing exported signing key even after email OTP or TON login, so the user gets the export / beta-access explanation before recipient, quote, or trade execution instead of at the last secure step. After that it helps with payment methods and your first contacts. On later runs, the flow now checks stored auth first; if the saved login/signing credentials are already usable, it skips the auth-path questions, surfaces the current UNIGOX username and wallet balance immediately, and continues with the transfer. More details in the setup guide.

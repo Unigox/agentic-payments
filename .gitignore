@@ -1,3 +1,4 @@
 node_modules/
 workflows/sessions/
 .env
+adapters/anthropic/.mcpb-build/

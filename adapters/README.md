@@ -68,3 +68,9 @@ Anthropic distribution rule:
 - keep Anthropic local-first
 - prefer a drag-and-drop Claude Desktop `.mcpb` bundle built from this repo over asking end users to wire MCP manually
 - do not introduce a separate Anthropic-only flow engine
+
+Current Anthropic bundle path:
+- `adapters/anthropic/installed.mcpb`
+
+Rebuild command:
+- `npm run build:anthropic-bundle --prefix scripts`

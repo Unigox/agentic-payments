@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-latest.schema.json",
+  "manifest_version": "0.3",
+  "name": "agentic-payments-local",
+  "display_name": "Agentic Payments",
+  "version": "0.1.0",
+  "description": "Local UNIGOX send-money tool for Claude Desktop.",
+  "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same send_money_turn contract used by the other runtime adapters.",
+  "author": {
+    "name": "UNIGOX",
+    "email": "hello@unigox.com",
+    "url": "https://www.unigox.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grape404/agentic-payments"
+  },
+  "homepage": "https://github.com/grape404/agentic-payments",
+  "documentation": "https://github.com/grape404/agentic-payments#readme",
+  "support": "mailto:hello@unigox.com",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "send_money_turn",
+      "description": "Advance one conversational turn of the UNIGOX send-money flow using local on-device session state."
+    }
+  ],
+  "keywords": [
+    "payments",
+    "unigox",
+    "claude",
+    "anthropic",
+    "mcp",
+    "local"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=20"
+    }
+  }
+}
