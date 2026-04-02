@@ -4,7 +4,7 @@
 
 Run this flow when no replayable wallet sign-in path is configured yet:
 - no `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
-- no `UNIGOX_TON_MNEMONIC`
+- no `UNIGOX_TON_PRIVATE_KEY` (legacy `UNIGOX_TON_MNEMONIC` still counts for older installs)
 
 Also check separately whether the signed-action key exists as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`).
 
@@ -72,18 +72,20 @@ Important implementation note:
 
 ### If they choose TON wallet auth
 
-> I need your TON wallet mnemonic so I can locally generate the same TON proof your wallet would sign. In most cases I can derive the address, but if your wallet uses a different contract version, I may also need the raw TON address from the wallet app.
+> For TON, send me the **exact raw TON address** shown by the wallet you used on UNIGOX first.
 >
-> Paste the mnemonic and raw address when you're ready. I store them locally on this machine, nowhere else.
+> I’ll echo it back and ask you to confirm whether that exact address/version is the right one before I ask for the TON private key / secret key.
+>
+> Do **not** send a mnemonic phrase in chat for new TON setup. The agent should use the exact address as the source of truth and the TON private key only for proof signing.
 
 When the user provides TON credentials:
 - Save to `.env` as:
   - `UNIGOX_AUTH_MODE=ton`
-  - `UNIGOX_TON_MNEMONIC=...`
-  - `UNIGOX_TON_ADDRESS=0:...` (optional but recommended)
+  - `UNIGOX_TON_PRIVATE_KEY=...`
+  - `UNIGOX_TON_ADDRESS=0:...`
   - `UNIGOX_TON_NETWORK=-239` unless they explicitly use testnet
 - Call `login()` to verify TON auth works
-- If login fails: ask whether the raw address is correct and mention the wallet may not be using the default V4 derived address
+- If login fails: ask whether the raw TON address is the exact wallet address/version used on UNIGOX
 - If login succeeds: proceed to Step 3
 - If they want the agent to finish signed EVM actions too, separately ask for `UNIGOX_EVM_SIGNING_PRIVATE_KEY` after TON login succeeds
 
@@ -115,9 +117,11 @@ Once they provide the email:
    - then ask the user to manually export the separate UNIGOX signing key from unigox.com settings and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
    - proceed to Step 3 only after that second step is acknowledged
 7. If TON:
-   - collect TON mnemonic/address
+   - collect the exact raw TON address first
+   - confirm it is the correct wallet address/version
+   - then collect the TON private key / secret key
    - call `linkTonWallet()`
-   - save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_MNEMONIC`, optional `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`
+   - save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_PRIVATE_KEY`, `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`
    - proceed to Step 3
 8. If they want to stay email-only for now:
    - save `UNIGOX_EMAIL`
@@ -146,13 +150,13 @@ When the user provides the login key:
 
 ### If they choose TON wallet
 
-> Sign up / log in on unigox.com with your TON wallet first, then give me the TON mnemonic plus the raw TON address from the wallet app.
+> Sign up / log in on unigox.com with your TON wallet first, then give me the exact raw TON address from the wallet app.
 >
-> I’ll use that wallet only to generate the TON proof for login. Everything after the JWT stays on the normal UNIGOX APIs.
+> I’ll confirm that exact address/version with you, then ask for the TON private key / secret key for that same wallet. I’ll use that key only to generate the TON proof for login. Everything after the JWT stays on the normal UNIGOX APIs.
 
 When the user provides TON credentials:
 - Save `UNIGOX_AUTH_MODE=ton`
-- Save `UNIGOX_TON_MNEMONIC`
+- Save `UNIGOX_TON_PRIVATE_KEY`
 - Save `UNIGOX_TON_ADDRESS` if they provide it
 - Call `login()` to verify TON auth works
 - Proceed to Step 3
@@ -225,10 +229,15 @@ When the agent restarts and finds only legacy `UNIGOX_PRIVATE_KEY` in `.env`:
 - Attempt silent login with it
 - Recommend migrating to split keys if the user actually uses separate login vs exported signing credentials
 
-When the agent restarts and finds `UNIGOX_TON_MNEMONIC` in `.env`:
+When the agent restarts and finds `UNIGOX_TON_PRIVATE_KEY` in `.env`:
 - Log in silently using TON auth
 - At the start of the next send flow, surface the current UNIGOX username and current wallet balance instead of restarting onboarding
 - If login fails, check `UNIGOX_TON_ADDRESS` and re-run onboarding if needed, again asking which wallet connection path the user wants: EVM or TON
+
+When the agent restarts and finds legacy `UNIGOX_TON_MNEMONIC` in `.env`:
+- Keep supporting that older install for backward compatibility
+- Do not ask for mnemonic phrases again in new chat onboarding
+- Prefer migrating the machine to `UNIGOX_TON_PRIVATE_KEY` plus `UNIGOX_TON_ADDRESS` when the user reconfigures TON auth
 
 When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
 - First ask which wallet connection path the user wants for UNIGOX sign-in: EVM wallet connection or TON wallet connection
@@ -244,7 +253,7 @@ Don't dump these all at once. Mention naturally during setup and periodically af
 
 - "Quick reminder: this is a spending wallet. If your balance is getting high, consider moving some out."
 - "Use a newly created / isolated wallet for UNIGOX agent setup. Never use your main wallet for this flow."
-- "Your login wallet key, signing key, or TON mnemonic is on this machine. Keep your machine secure."
+- "Your login wallet key, signing key, or TON private key is on this machine. Keep your machine secure."
 
 ## High Balance Warning
 

@@ -93,7 +93,7 @@ Expected pattern:
 
 On first use, check if the environment is configured. Read `references/onboarding.md` and follow it step by step.
 
-**Quick check**: before asking any onboarding question, look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_MNEMONIC` for TON. Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If stored auth is already usable, skip auth-path and key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance at the start of the send flow. Only ask auth questions for the missing piece (for example the exported signing key). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
+**Quick check**: before asking any onboarding question, look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_PRIVATE_KEY` for TON (`UNIGOX_TON_MNEMONIC` is legacy env-only fallback for older installs). Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If stored auth is already usable, skip auth-path and key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance at the start of the send flow. Only ask auth questions for the missing piece (for example the exported signing key). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
 
 The onboarding flow:
 1. Explain what this skill does and the security model
@@ -108,13 +108,14 @@ The onboarding flow:
 10. Explain clearly why it is needed: login auth only gets a UNIGOX session; secure in-app actions like funding trade escrow, confirming receipt, and releasing escrow still require the separate exported signing key
 11. If the user cannot find the export option in UNIGOX settings, explain that this is a beta feature, their account likely still needs agentic-payments access enabled, and tell them to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it
 12. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — EVM, TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
-13. For TON, collect the raw TON address first, then the TON mnemonic, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
-14. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
-15. Optionally link the other wallet path later if the user wants flexibility
-16. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
-17. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
-18. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
-19. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
+13. For TON, collect the raw TON address first, echo it back and confirm that it is the correct wallet address/version, then collect the TON private key / secret key for that same wallet, apply the same secret-cleanup rule, verify TON login, and store the TON auth locally for later turns
+14. Do not accept TON mnemonic phrases in new chat onboarding. They can derive a different wallet version/address than the one the wallet app actually used on UNIGOX
+15. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
+16. Optionally link the other wallet path later if the user wants flexibility
+17. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+18. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+19. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
+20. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
 **Never skip onboarding warnings.** See `references/onboarding.md` for exact messaging.
 
@@ -197,7 +198,7 @@ Only execute after explicit user confirmation.
 Use the UNIGOX client module. See `references/integration.md` for code patterns.
 
 ```
-1. On flow start, check stored auth first (`UNIGOX_EVM_LOGIN_PRIVATE_KEY`, `UNIGOX_EVM_SIGNING_PRIVATE_KEY` / `UNIGOX_PRIVATE_KEY`, `UNIGOX_TON_MNEMONIC`, `UNIGOX_EMAIL`) instead of defaulting to onboarding.
+1. On flow start, check stored auth first (`UNIGOX_EVM_LOGIN_PRIVATE_KEY`, `UNIGOX_EVM_SIGNING_PRIVATE_KEY` / `UNIGOX_PRIVATE_KEY`, `UNIGOX_TON_PRIVATE_KEY`, legacy `UNIGOX_TON_MNEMONIC`, `UNIGOX_EMAIL`) instead of defaulting to onboarding.
 2. If login is needed and no replayable wallet path is configured, ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?"
 3. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen wallet path
 4. For EVM, first confirm the user has already signed in on unigox.com with that wallet, then verify login with `UNIGOX_EVM_LOGIN_PRIVATE_KEY`, and only after that require the separate exported signing key before transfer execution
@@ -236,8 +237,9 @@ Preferred auth environment variables:
 - `UNIGOX_EVM_SIGNING_PRIVATE_KEY` — separate UNIGOX-exported EVM key used for signed actions
 - `UNIGOX_PRIVATE_KEY` — legacy alias for `UNIGOX_EVM_SIGNING_PRIVATE_KEY` and legacy single-key fallback
 - `UNIGOX_AUTH_MODE=ton`
-- `UNIGOX_TON_MNEMONIC` — TON mnemonic used only for TON login / linking
-- `UNIGOX_TON_ADDRESS` — optional raw TON address override when the derived V4 address does not match the wallet
+- `UNIGOX_TON_PRIVATE_KEY` — TON private key / secret key for agent-side TON proof signing in new installs
+- `UNIGOX_TON_MNEMONIC` — legacy env-only TON fallback for older installs
+- `UNIGOX_TON_ADDRESS` — raw TON address to use as the wallet source of truth for TON login
 - `UNIGOX_TON_NETWORK` — defaults to `-239` (mainnet)
 - `UNIGOX_EMAIL` — email OTP onboarding / fallback
 
@@ -247,7 +249,7 @@ Preferred auth environment variables:
 3. Check `~/.openclaw/.env`
 4. If none found → run onboarding
 
-**Never store the private key or TON mnemonic in contacts.json, SKILL.md, or any tracked file.**
+**Never store the private key, TON private key, or TON mnemonic in contacts.json, SKILL.md, or any tracked file.**
 
 ## Rules
 

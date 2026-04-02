@@ -19,7 +19,7 @@ import type {
   WalletBalance,
 } from "./unigox-client.ts";
 
-const VALID_TON_MNEMONIC = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
+const VALID_TON_PRIVATE_KEY = "4444444444444444444444444444444444444444444444444444444444444444";
 
 function makeWalletBalance(usdt = 71, usdc = 1): WalletBalance {
   return {
@@ -278,7 +278,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-ton-"));
   const envPath = path.join(stateDir, ".env");
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-  const tonMnemonic = VALID_TON_MNEMONIC;
+  const tonPrivateKey = VALID_TON_PRIVATE_KEY;
 
   await withEnv(
     {
@@ -290,8 +290,8 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
     async () => {
     const deps = {
       authState: { hasReplayableAuth: false, authMode: undefined, emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-      verifyTonLogin: async ({ mnemonic, tonAddress: normalizedAddress }: { mnemonic: string; tonAddress?: string }) => ({
-        success: mnemonic === tonMnemonic && Boolean(normalizedAddress?.startsWith("0:")),
+      verifyTonLogin: async ({ tonPrivateKey: normalizedKey, tonAddress: normalizedAddress }: { tonPrivateKey?: string; tonAddress?: string }) => ({
+        success: normalizedKey === tonPrivateKey && Boolean(normalizedAddress?.startsWith("0:")),
         username: "tonuser",
       }),
       handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
@@ -319,21 +319,29 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
     });
 
     const result = await runTransferTurn({
-      text: tonMnemonic,
+      text: "this address is correct",
       sessionKey: "telegram:main",
       stateDir,
       deps,
     });
 
-    assert.equal(result.session.auth.mode, "ton");
-    assert.equal(result.session.auth.available, true);
-    assert.ok(["awaiting_evm_signing_key", "awaiting_payment_method"].includes(result.session.stage));
+    const finalResult = await runTransferTurn({
+      text: tonPrivateKey,
+      sessionKey: "telegram:main",
+      stateDir,
+      deps,
+    });
+
+    assert.equal(result.session.stage, "awaiting_ton_private_key");
+    assert.equal(finalResult.session.auth.mode, "ton");
+    assert.equal(finalResult.session.auth.available, true);
+    assert.ok(["awaiting_evm_signing_key", "awaiting_payment_method"].includes(finalResult.session.stage));
   }
   );
 
   const envBody = fs.readFileSync(envPath, "utf-8");
   assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
-  assert.match(envBody, /UNIGOX_TON_MNEMONIC=hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution/);
+  assert.match(envBody, /UNIGOX_TON_PRIVATE_KEY=4444444444444444444444444444444444444444444444444444444444444444/);
   assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
 });

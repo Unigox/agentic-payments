@@ -145,6 +145,13 @@ function buildDefaultRunnerDeps(): TransferFlowDeps {
         UNIGOX_EVM_SIGNING_PRIVATE_KEY: signingKey,
       });
     },
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_AUTH_MODE: "ton",
+        UNIGOX_TON_PRIVATE_KEY: tonPrivateKey,
+        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
+      });
+    },
     persistTonMnemonic: async (mnemonic) => {
       upsertEnvAssignments(envPath, {
         UNIGOX_AUTH_MODE: "ton",

@@ -28,6 +28,7 @@ function loadEnvValue(key: string): string | undefined {
 function loadUnigoxConfig(): UnigoxClientConfig {
   const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
   const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
+  const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
   const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
   const email = loadEnvValue("UNIGOX_EMAIL");
 
@@ -40,10 +41,11 @@ function loadUnigoxConfig(): UnigoxClientConfig {
     };
   }
 
-  if (tonMnemonic) {
+  if (tonPrivateKey || tonMnemonic) {
     return {
       authMode: loadEnvValue("UNIGOX_AUTH_MODE") === "ton" ? "ton" : "auto",
-      tonMnemonic,
+      ...(tonPrivateKey && { tonPrivateKey }),
+      ...(tonMnemonic && { tonMnemonic }),
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
       ...(email && { email }),
@@ -105,7 +107,7 @@ Important: the current integration does **not** expose a backend/client API to e
 ```typescript
 const client = new UnigoxClient({
   email: process.env.UNIGOX_EMAIL,
-  tonMnemonic: process.env.UNIGOX_TON_MNEMONIC,
+  tonPrivateKey: process.env.UNIGOX_TON_PRIVATE_KEY,
   tonAddress: process.env.UNIGOX_TON_ADDRESS,
 });
 

@@ -107,6 +107,7 @@ export interface UnigoxClientConfig {
   evmSigningPrivateKey?: string;
   email?: string;
   frontendUrl?: string;
+  tonPrivateKey?: string;
   tonMnemonic?: string | string[];
   tonAddress?: string;
   tonNetwork?: string;
@@ -452,6 +453,13 @@ interface TonWalletAccount {
   derivedAddress: string;
 }
 
+export interface ParsedTonPrivateKey {
+  normalized: string;
+  secretKey: Uint8Array;
+  publicKey: Uint8Array;
+  source: "seed32" | "secret64";
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 async function jsonFetch(url: string, opts: RequestInit = {}): Promise<any> {
@@ -470,6 +478,53 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms));
 }
 
+function decodeBase64Like(value: string): Buffer | undefined {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.length % 4;
+  const padded = padding ? normalized.padEnd(normalized.length + (4 - padding), "=") : normalized;
+  if (!/^[A-Za-z0-9+/=]+$/.test(padded)) return undefined;
+  try {
+    return Buffer.from(padded, "base64");
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseTonPrivateKeyInput(secret?: string): ParsedTonPrivateKey | undefined {
+  const trimmed = secret?.trim();
+  if (!trimmed) return undefined;
+
+  let bytes: Buffer | undefined;
+  const hex = trimmed.replace(/^0x/i, "");
+  if ((hex.length === 64 || hex.length === 128) && /^[0-9a-fA-F]+$/.test(hex)) {
+    bytes = Buffer.from(hex, "hex");
+  } else {
+    const decoded = decodeBase64Like(trimmed.replace(/\s+/g, ""));
+    if (decoded && (decoded.length === 32 || decoded.length === 64)) {
+      bytes = decoded;
+    }
+  }
+
+  if (!bytes) return undefined;
+
+  try {
+    const keyPair = bytes.length === 32
+      ? nacl.sign.keyPair.fromSeed(bytes)
+      : bytes.length === 64
+        ? nacl.sign.keyPair.fromSecretKey(bytes)
+        : undefined;
+    if (!keyPair) return undefined;
+    return {
+      normalized: bytes.toString("hex"),
+      secretKey: keyPair.secretKey,
+      publicKey: keyPair.publicKey,
+      source: bytes.length === 32 ? "seed32" : "secret64",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Client ──────────────────────────────────────────────────────────
 
 export class UnigoxClient {
@@ -478,6 +533,7 @@ export class UnigoxClient {
   private email: string | null;
   private frontendUrl: string;
   private authMode: AuthMode;
+  private tonPrivateKey: ParsedTonPrivateKey | null;
   private tonMnemonicWords: string[] | null;
   private tonAddressOverride: string | null;
   private tonNetwork: string;
@@ -490,7 +546,7 @@ export class UnigoxClient {
     const loginPrivateKey = config.evmLoginPrivateKey || config.privateKey;
     const signingPrivateKey = config.evmSigningPrivateKey || config.privateKey;
 
-    if (!loginPrivateKey && !config.email && !config.tonMnemonic) {
+    if (!loginPrivateKey && !config.email && !config.tonPrivateKey && !config.tonMnemonic) {
       throw new Error(`UNIGOX auth is not configured. ${getUnigoxWalletConnectionPrompt()}`);
     }
 
@@ -499,6 +555,7 @@ export class UnigoxClient {
     this.email = config.email || null;
     this.frontendUrl = config.frontendUrl || DEFAULT_FRONTEND_URL;
     this.authMode = config.authMode || "auto";
+    this.tonPrivateKey = parseTonPrivateKeyInput(config.tonPrivateKey) || null;
     this.tonMnemonicWords = this.parseTonMnemonic(config.tonMnemonic);
     this.tonAddressOverride = config.tonAddress ? this.normalizeTonAddress(config.tonAddress) : null;
     this.tonNetwork = config.tonNetwork || "-239";
@@ -559,7 +616,7 @@ export class UnigoxClient {
     }
 
     if (this.authMode === "ton") {
-      if (!this.tonMnemonicWords) throw new Error("authMode=ton requires tonMnemonic");
+      if (!this.tonPrivateKey && !this.tonMnemonicWords) throw new Error("authMode=ton requires tonPrivateKey or tonMnemonic");
       return "ton";
     }
 
@@ -569,7 +626,7 @@ export class UnigoxClient {
     }
 
     if (this.loginWallet) return "evm";
-    if (this.tonMnemonicWords) return "ton";
+    if (this.tonPrivateKey || this.tonMnemonicWords) return "ton";
     if (this.email) return "email";
 
     throw new Error(`Unable to resolve UNIGOX auth mode. ${getUnigoxWalletConnectionPrompt()}`);
@@ -577,9 +634,13 @@ export class UnigoxClient {
 
   private async ensureTonWalletAccount(): Promise<TonWalletAccount> {
     if (this.tonWalletAccount) return this.tonWalletAccount;
-    if (!this.tonMnemonicWords) throw new Error("TON auth requires tonMnemonic");
+    if (!this.tonPrivateKey && !this.tonMnemonicWords) {
+      throw new Error("TON auth requires tonPrivateKey or legacy tonMnemonic");
+    }
 
-    const keyPair = await mnemonicToWalletKey(this.tonMnemonicWords);
+    const keyPair = this.tonPrivateKey
+      ? { publicKey: this.tonPrivateKey.publicKey, secretKey: this.tonPrivateKey.secretKey }
+      : await mnemonicToWalletKey(this.tonMnemonicWords!);
     const workchain = this.tonAddressOverride ? Address.parse(this.tonAddressOverride).workChain : 0;
     const derivedAddress = WalletContractV4.create({ workchain, publicKey: keyPair.publicKey }).address.toRawString().toLowerCase();
     const address = this.tonAddressOverride || derivedAddress;

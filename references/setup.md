@@ -57,8 +57,8 @@ If the user only has the old single-key setup (`UNIGOX_PRIVATE_KEY`), the client
 
 ```env
 UNIGOX_AUTH_MODE=ton
-UNIGOX_TON_MNEMONIC="word1 word2 ... word24"
-UNIGOX_TON_ADDRESS=0:...   # optional override if derived V4 address differs
+UNIGOX_TON_PRIVATE_KEY=... # 32-byte or 64-byte TON key material, hex or base64
+UNIGOX_TON_ADDRESS=0:...   # exact wallet address to use as the TON source of truth
 UNIGOX_TON_NETWORK=-239    # optional, defaults to mainnet
 # optional, if EVM signed actions are also needed later:
 UNIGOX_EVM_SIGNING_PRIVATE_KEY=0x...
@@ -70,6 +70,8 @@ This mode uses the frontend TON routes:
 - `POST /api/ton-link`
 
 TON auth is only for JWT acquisition and optional wallet linking. After the JWT is obtained, the rest of the client keeps using the same account/trade APIs as before.
+
+Legacy note: `UNIGOX_TON_MNEMONIC` is still supported for older installs, but new onboarding should prefer `UNIGOX_TON_PRIVATE_KEY` plus the exact raw TON address.
 
 ### 4. Email OTP onboarding
 

@@ -29,6 +29,7 @@ const VALID_LOGIN_KEY = "0x11111111111111111111111111111111111111111111111111111
 const VALID_SIGNING_KEY = "0x2222222222222222222222222222222222222222222222222222222222222222";
 const ANOTHER_VALID_KEY = "0x3333333333333333333333333333333333333333333333333333333333333333";
 const VALID_TON_MNEMONIC = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
+const VALID_TON_PRIVATE_KEY = "4444444444444444444444444444444444444444444444444444444444444444";
 
 function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { lastUpdated: "" } }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-flow-"));
@@ -3169,6 +3170,7 @@ test("detectAuthState recognizes split EVM login and signing keys", () => {
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
     UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
     UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: undefined,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_EMAIL: "agent@example.com",
   }, () => detectAuthState());
@@ -3179,17 +3181,52 @@ test("detectAuthState recognizes split EVM login and signing keys", () => {
   assert.equal(result.emailFallbackAvailable, true);
 });
 
+test("detectAuthState recognizes TON private-key auth without requiring mnemonic env", () => {
+  const result = withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: "agent@example.com",
+  }, () => detectAuthState());
+
+  assert.equal(result.hasReplayableAuth, true);
+  assert.equal(result.authMode, "ton");
+  assert.equal(result.evmSigningKeyAvailable, true);
+  assert.equal(result.emailFallbackAvailable, true);
+});
+
 test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are available", () => {
   const result = withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
     UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
     UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: undefined,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_EMAIL: "agent@example.com",
   }, () => loadUnigoxConfigFromEnv());
 
   assert.equal(result.authMode, "evm");
   assert.equal(result.evmLoginPrivateKey, "0xlogin");
+  assert.equal(result.evmSigningPrivateKey, "0xsign");
+  assert.equal(result.email, "agent@example.com");
+});
+
+test("loadUnigoxConfigFromEnv prefers TON private-key auth when present", () => {
+  const result = withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_TON_ADDRESS: "0:abcd",
+    UNIGOX_EMAIL: "agent@example.com",
+  }, () => loadUnigoxConfigFromEnv());
+
+  assert.equal(result.authMode, "ton");
+  assert.equal(result.tonPrivateKey, VALID_TON_PRIVATE_KEY);
+  assert.equal(result.tonAddress, "0:abcd");
   assert.equal(result.evmSigningPrivateKey, "0xsign");
   assert.equal(result.email, "agent@example.com");
 });
@@ -3630,21 +3667,21 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
   assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
 });
 
-test("successful TON login verification persists TON auth and then asks for the EVM signing key", async () => {
+test("successful TON login verification persists TON address and private key, then asks for the EVM signing key", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const persisted = { tonAddress: [] as string[], tonMnemonic: [] as string[], signing: [] as string[] };
+  const persisted = { tonAddress: [] as string[], tonPrivateKey: [] as string[], signing: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
-      success: mnemonic === VALID_TON_MNEMONIC && tonAddress?.includes("0:"),
+    verifyTonLogin: async ({ tonPrivateKey, tonAddress }) => ({
+      success: tonPrivateKey === VALID_TON_PRIVATE_KEY && tonAddress?.includes("0:"),
       username: "tonuser",
     }),
     persistTonAddress: async (tonAddress) => {
       persisted.tonAddress.push(tonAddress);
     },
-    persistTonMnemonic: async (mnemonic) => {
-      persisted.tonMnemonic.push(mnemonic);
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      persisted.tonPrivateKey.push(tonPrivateKey);
     },
     persistEvmSigningKey: async (signingKey) => {
       persisted.signing.push(signingKey);
@@ -3652,7 +3689,6 @@ test("successful TON login verification persists TON auth and then asks for the 
   });
 
   const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-  const tonMnemonic = VALID_TON_MNEMONIC;
 
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "ton", deps);
@@ -3660,10 +3696,14 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.match(res.reply, /raw TON address/i);
 
   res = await advanceTransferFlow(res.session, tonAddress, deps);
-  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
-  assert.match(res.reply, /TON mnemonic/i);
+  assert.equal(res.session.stage, "awaiting_ton_address_confirmation");
+  assert.match(res.reply, /I’ll use this exact raw TON address/i);
 
-  res = await advanceTransferFlow(res.session, tonMnemonic, deps);
+  res = await advanceTransferFlow(res.session, "this address is correct", deps);
+  assert.equal(res.session.stage, "awaiting_ton_private_key");
+  assert.match(res.reply, /TON private key/i);
+
+  res = await advanceTransferFlow(res.session, VALID_TON_PRIVATE_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
   assert.match(res.reply, /delete the message/i);
 
@@ -3677,7 +3717,7 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.match(res.reply, /@tonuser/i);
   assert.equal(persisted.tonAddress.length, 1);
   assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
-  assert.deepEqual(persisted.tonMnemonic, [tonMnemonic]);
+  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
 
   res = await advanceTransferFlow(res.session, ANOTHER_VALID_KEY, deps);
   assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
@@ -3687,7 +3727,7 @@ test("successful TON login verification persists TON auth and then asks for the 
   assert.equal(res.session.stage, "awaiting_payment_method");
 });
 
-test("invalid TON mnemonic text is rejected before secret-cleanup handling", async () => {
+test("mnemonic text is rejected during new TON onboarding and the flow asks for a private key instead", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
   const deps = makeDeps(file, client, {
@@ -3699,23 +3739,24 @@ test("invalid TON mnemonic text is rejected before secret-cleanup handling", asy
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "ton", deps);
   res = await advanceTransferFlow(res.session, tonAddress, deps);
-  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
+  res = await advanceTransferFlow(res.session, "this address is correct", deps);
+  assert.equal(res.session.stage, "awaiting_ton_private_key");
 
-  res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
-  assert.match(res.reply, /doesn’t look like a valid TON mnemonic/i);
+  res = await advanceTransferFlow(res.session, VALID_TON_MNEMONIC, deps);
+  assert.equal(res.session.stage, "awaiting_ton_private_key");
+  assert.match(res.reply, /Please do not send a TON mnemonic here/i);
   assert.doesNotMatch(res.reply, /delete the message/i);
   assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
-test("invalid pending TON mnemonic is rejected at cleanup confirmation instead of being persisted", async () => {
+test("legacy pending TON mnemonic is discarded at cleanup confirmation and the flow asks for a private key instead", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const persisted = { tonMnemonic: [] as string[] };
+  const persisted = { tonPrivateKey: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    persistTonMnemonic: async (mnemonic) => {
-      persisted.tonMnemonic.push(mnemonic);
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      persisted.tonPrivateKey.push(tonPrivateKey);
     },
   });
 
@@ -3728,9 +3769,9 @@ test("invalid pending TON mnemonic is rejected at cleanup confirmation instead o
   };
 
   res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_ton_mnemonic");
-  assert.match(res.reply, /doesn’t look like a valid TON mnemonic/i);
-  assert.deepEqual(persisted.tonMnemonic, []);
+  assert.equal(res.session.stage, "awaiting_ton_private_key");
+  assert.match(res.reply, /Please do not send a TON mnemonic here/i);
+  assert.deepEqual(persisted.tonPrivateKey, []);
   assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
