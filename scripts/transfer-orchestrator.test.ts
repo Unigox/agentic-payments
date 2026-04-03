@@ -3720,6 +3720,9 @@ test("successful TON login verification persists TON address and private key, th
   assert.match(res.reply, /TON login works/i);
   assert.match(res.reply, /UNIGOX EVM signing key/i);
   assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
+  assert.match(res.reply, /TonConnect QR/i);
+  assert.match(res.reply, /tc:\/\//i);
+  assert.match(res.reply, /mobile or desktop wallet/i);
   assert.match(res.reply, /early beta access for agentic payments/i);
   assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
   assert.match(res.reply, /@tonuser/i);
@@ -3774,6 +3777,8 @@ test("successful TON mnemonic verification persists the exact TON address and ma
   res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /TON login works/i);
+  assert.match(res.reply, /TonConnect QR/i);
+  assert.match(res.reply, /tc:\/\//i);
   assert.equal(res.session.auth.tonWalletVersion, "v4");
   assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
@@ -3811,6 +3816,7 @@ test("legacy pending TON mnemonic still finalizes correctly after cleanup confir
   res = await advanceTransferFlow(res.session, "deleted", deps);
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /TON login works/i);
+  assert.match(res.reply, /mobile or desktop wallet/i);
   assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
   assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
   assert.equal(res.session.auth.pendingSecret, undefined);
