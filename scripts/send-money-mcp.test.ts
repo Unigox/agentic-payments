@@ -8,8 +8,9 @@ import {
   sendMoneyMcpInputShape,
 } from "./send-money-mcp.ts";
 
-test("send_money MCP input schema requires text and session_key", () => {
+test("send_money MCP input schema accepts text or image_path plus session_key", () => {
   assert.equal(sendMoneyMcpInputShape.text.parse("send 50 EUR").trim(), "send 50 EUR");
+  assert.equal(sendMoneyMcpInputShape.image_path.parse("/tmp/unigox-qr.png"), "/tmp/unigox-qr.png");
   assert.equal(sendMoneyMcpInputShape.session_key.parse("claude-test"), "claude-test");
   assert.equal(sendMoneyMcpInputShape.reset.parse(true), true);
   assert.equal(SEND_MONEY_TOOL_NAME, "send_money_turn");

@@ -255,6 +255,53 @@ test("runner resumes an active KYC session when the user sends combined legal-na
   assert.match(second.reply, /https:\/\/verify\.example\/kyc-session/i);
 });
 
+test("runner can continue an active missing-signing-key step from a TonConnect QR screenshot path", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-tonconnect-qr-"));
+  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
+  const deps = {
+    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    client: {
+      getProfile: async () => ({ username: "skill" }),
+      getWalletBalance: async () => makeWalletBalance(),
+      listPaymentDetails: async () => [makeRemotePaymentDetail()],
+      listInitiatorTrades: async () => [],
+    },
+    getPaymentMethodsForCurrency: async () => makeCurrencyData(),
+    getPaymentMethodFieldConfig: async () => makeFieldConfig(),
+    decodeTonConnectQr: async (imagePath: string) => {
+      assert.equal(imagePath, "/tmp/unigox-qr.png");
+      return tcLink;
+    },
+    approveTonConnectLink: async (link: string) => {
+      assert.equal(link, tcLink);
+      return {
+        bridgeUrl: "https://bridge.tonapi.io/bridge",
+        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
+        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+      };
+    },
+  };
+
+  const first = await runTransferTurn({
+    text: "send 50 EUR to Aleksandr",
+    sessionKey: "telegram:main",
+    stateDir,
+    deps,
+  });
+
+  assert.equal(first.session.stage, "awaiting_evm_signing_key");
+
+  const second = await runTransferTurn({
+    imagePath: "/tmp/unigox-qr.png",
+    sessionKey: "telegram:main",
+    stateDir,
+    deps,
+  });
+
+  assert.equal(second.session.stage, "awaiting_evm_signing_key");
+  assert.match(second.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
+});
+
 test("formatTransferRunnerOutput appends options as bullets", () => {
   const output = formatTransferRunnerOutput({
     session: {} as any,

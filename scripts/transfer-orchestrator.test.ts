@@ -3993,3 +3993,51 @@ test("missing signing key step explains that a fresh tc:// link still needs loca
   assert.match(res.reply, /still need TON key material for that exact wallet on this machine first/i);
   assert.match(res.reply, /send the TON mnemonic phrase or TON private key/i);
 });
+
+test("missing signing key step accepts a fresh UNIGOX QR screenshot path and decodes it into the same browser-login handoff", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const approvedLinks: string[] = [];
+  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    decodeTonConnectQr: async (imagePath) => {
+      assert.equal(imagePath, "/tmp/unigox-qr.png");
+      return tcLink;
+    },
+    approveTonConnectLink: async (universalLink) => {
+      approvedLinks.push(universalLink);
+      return {
+        bridgeUrl: "https://bridge.tonapi.io/bridge",
+        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
+        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+        tonProofPayload: "proof-hash",
+      };
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-qr.png" }, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
+  assert.deepEqual(approvedLinks, [tcLink]);
+});
+
+test("missing signing key step tells the user when a QR screenshot did not contain a valid TonConnect request", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    decodeTonConnectQr: async () => undefined,
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-qr.png" }, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /couldn’t read a valid fresh UNIGOX TonConnect QR from that image/i);
+  assert.match(res.reply, /paste the fresh tc:\/\/ link directly/i);
+});

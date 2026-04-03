@@ -17,6 +17,7 @@ All adapters should call the same logical tool:
 - `name`: `send_money_turn`
 - input:
   - `text`: latest user turn
+  - `image_path`: optional absolute local path to a fresh TonConnect QR screenshot
   - `session_key`: stable per-user or per-chat key reused across turns
   - `reset`: optional hard reset
 

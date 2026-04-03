@@ -15,8 +15,14 @@ export const SEND_MONEY_MCP_SERVER_VERSION = "1.0.0";
 export const sendMoneyMcpInputShape = {
   text: z
     .string()
-    .min(1, "text is required")
+    .min(1, "text must not be empty")
+    .optional()
     .describe("The latest user message for the send-money flow."),
+  image_path: z
+    .string()
+    .min(1, "image_path must not be empty")
+    .optional()
+    .describe("Optional absolute local path to a fresh TonConnect QR screenshot from the UNIGOX browser."),
   session_key: z
     .string()
     .min(1, "session_key is required")

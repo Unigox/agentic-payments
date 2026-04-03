@@ -54,7 +54,7 @@ Those are the two replayable wallet sign-in paths. Email remains useful, but as 
 - **TON wallet auth** — there are now two first-class TON login paths:
   - **agent-side derivation**: the user gives the exact raw TON address plus either the wallet mnemonic phrase or the TON private key / secret key for that same wallet. The agent treats the raw address as the source of truth, tries the supported TON wallet versions until one matches that exact address, and stores the matched derivation as `UNIGOX_TON_WALLET_VERSION` for later runs.
   - **fresh TonConnect link / QR**: the agent creates a fresh live TonConnect deep link that the user opens in the wallet. If needed, the user can scan a QR generated from that exact live link on another device. Old screenshots of earlier QR codes are not reusable login credentials.
-- **Browser login helper from a fresh `tc://` link** — if the user is already on `unigox.com` and the site is showing a fresh TonConnect login link in `tc://...` form, the skill can consume that live link and approve it locally with the stored TON key for the exact wallet. This is meant to help the user finish the UNIGOX website login so they can reach settings and export the separate signing key. It is not QR-image decoding; it is specifically the copyable `tc://` link path.
+- **Browser login helper from a fresh `tc://` link or fresh QR screenshot** — if the user is already on `unigox.com` and the site is showing a fresh TonConnect login request, the skill can consume either the copyable `tc://...` link or a fresh local QR screenshot, then approve that live browser-login request locally with the stored TON key for the exact wallet. This is meant to help the user finish the UNIGOX website login so they can reach settings and export the separate signing key. The screenshot path only works when the adapter/runtime can supply a local image path to the runner.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
 - When the only remaining blocker is the exported UNIGOX signing key, explain the practical browser-login paths the user can use to get into unigox.com settings and export it: scan a fresh UNIGOX TonConnect QR in the wallet, copy the fresh `tc://` TonConnect link into the wallet if the site shows that instead of a QR, or log in on unigox.com directly from the user's mobile or desktop wallet.
 - If the user does not see the signing-key export option yet, explain that this is a beta feature and the account likely still needs agentic-payments access enabled. The next step is to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it, then retry the export.
@@ -90,6 +90,7 @@ Current layout:
 
 For OpenAI and Anthropic, the safest integration is to call the same `send_money_turn` tool with:
 - `text`
+- optional `image_path`
 - `session_key`
 - optional `reset`
 

@@ -16,6 +16,7 @@ import {
   clearTonConnectSession,
   startTonConnectSession,
 } from "./tonconnect-session.ts";
+import { decodeTonConnectUniversalLinkFromImagePath } from "./qr-decode.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,7 +26,8 @@ const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconne
 const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
 
 export interface TransferRunnerOptions {
-  text: string;
+  text?: string;
+  imagePath?: string;
   sessionKey?: string;
   stateDir?: string;
   deps?: TransferFlowDeps;
@@ -35,6 +37,7 @@ export interface TransferRunnerOptions {
 interface ParsedCliArgs {
   text?: string;
   textFile?: string;
+  imagePath?: string;
   sessionKey?: string;
   stateDir?: string;
   json?: boolean;
@@ -52,6 +55,10 @@ function parseArgs(argv: string[]): ParsedCliArgs {
         break;
       case "--text-file":
         parsed.textFile = argv[i + 1] || "";
+        i += 1;
+        break;
+      case "--image-path":
+        parsed.imagePath = argv[i + 1] || "";
         i += 1;
         break;
       case "--session-key":
@@ -218,6 +225,7 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
       const client = buildTonConnectClient();
       return client.approveTonConnectBrowserLogin(universalLink);
     },
+    decodeTonConnectQr: async (imagePath) => decodeTonConnectUniversalLinkFromImagePath(imagePath),
   };
 }
 
@@ -283,15 +291,21 @@ export async function runTransferTurn(options: TransferRunnerOptions): Promise<T
   ensureStateDir(stateDir);
   const statePath = resolveSessionStatePath(sessionKey, stateDir);
   const existingSession = options.reset ? undefined : loadSessionState(statePath);
-  const startFresh = shouldStartFreshSession(existingSession, options.text, options.reset);
+  const text = options.text?.trim();
+  const imagePath = options.imagePath?.trim();
+  const turn = {
+    ...(text ? { text } : {}),
+    ...(imagePath ? { imagePath } : {}),
+  };
+  const startFresh = shouldStartFreshSession(existingSession, text || "", options.reset);
 
   const deps: TransferFlowDeps = {
     ...buildDefaultRunnerDeps(sessionKey),
     ...(options.deps || {}),
   };
   const result = startFresh
-    ? await startTransferFlow(options.text, deps)
-    : await advanceTransferFlow(existingSession!, options.text, deps);
+    ? await startTransferFlow(turn, deps)
+    : await advanceTransferFlow(existingSession!, turn, deps);
 
   if (shouldDeleteSessionState(result.session)) {
     fs.rmSync(statePath, { force: true });
@@ -308,15 +322,17 @@ async function main(): Promise<void> {
   const text = (args.textFile
     ? fs.readFileSync(args.textFile, "utf-8")
     : args.text) || stdinText;
+  const imagePath = args.imagePath?.trim();
 
-  if (!text?.trim()) {
-    console.error("send-money runner requires turn text via --text, --text-file, or stdin.");
+  if (!text?.trim() && !imagePath) {
+    console.error("send-money runner requires turn text via --text, --text-file, or stdin, or a local QR screenshot via --image-path.");
     process.exitCode = 1;
     return;
   }
 
   const result = await runTransferTurn({
-    text: text.trim(),
+    ...(text?.trim() ? { text: text.trim() } : {}),
+    ...(imagePath ? { imagePath } : {}),
     sessionKey: args.sessionKey,
     stateDir: args.stateDir,
     reset: args.reset,

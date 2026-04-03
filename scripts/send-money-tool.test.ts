@@ -42,3 +42,10 @@ test("runSendMoneyToolTurn requires a stable session_key", async () => {
     /session_key/i
   );
 });
+
+test("runSendMoneyToolTurn requires either text or image_path", async () => {
+  await assert.rejects(
+    () => runSendMoneyToolTurn({ session_key: "chat-1" }),
+    /text or image_path/i
+  );
+});

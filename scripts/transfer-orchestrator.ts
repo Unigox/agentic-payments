@@ -119,6 +119,7 @@ export type TransferStage =
 
 export interface TransferTurn {
   text?: string;
+  imagePath?: string;
   option?: string;
   fields?: Record<string, string>;
 }
@@ -247,6 +248,7 @@ export interface TransferFlowDeps {
     manifestUrl: string;
     tonProofPayload?: string;
   }>;
+  decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
@@ -1980,6 +1982,7 @@ function buildTonConnectPrompt(params: { universalLink: string; expiresAt?: stri
 function buildTonConnectBrowserApprovalPrompt(): string {
   return [
     "If UNIGOX is already showing you a fresh tc:// TonConnect link in the browser, you can paste that link here too.",
+    "You can also send a fresh screenshot of the visible TonConnect QR and I’ll decode the tc:// request locally on this machine.",
     "I’ll use the TON key on this machine to approve that live browser-login request so the UNIGOX page can finish logging you in without a manual wallet scan.",
   ].join(" ");
 }
@@ -2005,6 +2008,14 @@ function buildTonConnectBrowserApprovalFailurePrompt(message?: string): string {
     "I couldn’t approve that UNIGOX TonConnect browser-login link yet.",
     message ? `Reason: ${message}` : undefined,
     "Make sure it is a fresh tc:// link from unigox.com, not an older expired one.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildTonConnectQrDecodeFailurePrompt(message?: string): string {
+  return [
+    "I couldn’t read a valid fresh UNIGOX TonConnect QR from that image yet.",
+    message ? `Reason: ${message}` : undefined,
+    "Send a fresh screenshot with the QR clearly visible, or paste the fresh tc:// link directly.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2402,11 +2413,39 @@ function buildTonConnectVerificationClient(deps: TransferFlowDeps): UnigoxClient
 
 async function tryApproveProvidedTonConnectBrowserLink(
   session: TransferSession,
-  responseText: string,
+  turn: TransferTurn,
   deps: TransferFlowDeps,
   prefixEvents: TransferFlowEvent[] = [],
 ): Promise<TransferFlowResult | undefined> {
-  const link = parseTonConnectUniversalLinkInput(responseText);
+  let link = parseTonConnectUniversalLinkInput(turn.text);
+  if (!link && turn.imagePath) {
+    if (!deps.decodeTonConnectQr) {
+      const prompt = "This skill runtime cannot decode a TonConnect QR screenshot yet. Paste the fresh tc:// link directly or open the QR in your wallet instead.";
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    try {
+      link = await deps.decodeTonConnectQr(turn.imagePath);
+    } catch (error) {
+      const prompt = buildTonConnectQrDecodeFailurePrompt(error instanceof Error ? error.message : undefined);
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (!link) {
+      const prompt = buildTonConnectQrDecodeFailurePrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+  }
+
   if (!link) return undefined;
 
   if (!deps.approveTonConnectLink) {
@@ -3123,7 +3162,7 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
-    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, responseText, deps);
+    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
     if (tonConnectBrowserLogin) {
       return tonConnectBrowserLogin;
     }
