@@ -135,6 +135,7 @@ export interface TransferFlowEvent {
     | "trade_price_change_cancelled"
     | "escrow_funding_submitted"
     | "trade_pending"
+    | "browser_login_handoff"
     | "blocked_missing_auth"
     | "blocked_insufficient_balance"
     | "blocked_no_vendor_match"
@@ -240,6 +241,12 @@ export interface TransferFlowDeps {
     message?: string;
   }>;
   clearTonConnectLogin?: () => Promise<void> | void;
+  approveTonConnectLink?: (universalLink: string) => Promise<{
+    bridgeUrl: string;
+    walletAddress: string;
+    manifestUrl: string;
+    tonProofPayload?: string;
+  }>;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
@@ -684,6 +691,13 @@ function parseTonAddressInput(text: string | undefined): { raw: string; display:
 
 function parseTonAddress(text: string | undefined): string | undefined {
   return parseTonAddressInput(text)?.raw;
+}
+
+function parseTonConnectUniversalLinkInput(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  const match = value.match(/tc:\/\/\?[^\s]+/i);
+  return match?.[0];
 }
 
 function parseTonMnemonic(text: string | undefined): string | undefined {
@@ -1880,6 +1894,7 @@ function buildEvmSigningKeyPrompt(username: string | undefined): string {
     "Why: wallet login, TON login, or email OTP only gets me signed in. Secure in-app actions like funding trade escrow, confirming fiat received, or releasing escrow require that separate exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
     "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.",
+    buildTonConnectBrowserApprovalPrompt(),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely for those signed actions.",
   ].filter(Boolean).join(" ");
@@ -1893,6 +1908,7 @@ function buildMissingSigningKeyPrompt(username: string | undefined): string {
     "Why: sign-in alone is enough for quotes and some setup, but secure actions like funding trade escrow, confirming fiat received, or releasing escrow still require the exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
     "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.",
+    buildTonConnectBrowserApprovalPrompt(),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely across turns.",
   ].filter(Boolean).join(" ");
@@ -1958,6 +1974,37 @@ function buildTonConnectPrompt(params: { universalLink: string; expiresAt?: stri
     "Use this live link or a QR generated from it now. An old screenshot of a previous QR will not work as a reusable login credential.",
     expiresIn ? `This live request should stay valid for about ${expiresIn} minutes.` : undefined,
     "After you approve it in the wallet, reply with: connected",
+  ].filter(Boolean).join(" ");
+}
+
+function buildTonConnectBrowserApprovalPrompt(): string {
+  return [
+    "If UNIGOX is already showing you a fresh tc:// TonConnect link in the browser, you can paste that link here too.",
+    "I’ll use the TON key on this machine to approve that live browser-login request so the UNIGOX page can finish logging you in without a manual wallet scan.",
+  ].join(" ");
+}
+
+function buildTonConnectBrowserApprovalSuccessPrompt(): string {
+  return [
+    "I approved that fresh UNIGOX TonConnect browser-login request locally with the TON key for this wallet.",
+    "If the page is still open on that live request, it should finish logging you in within a moment.",
+    "Once you are in UNIGOX settings, export the agentic-payments / signing key and paste it here.",
+    "If the page does not move, refresh UNIGOX and generate a fresh link because these requests expire quickly.",
+  ].join(" ");
+}
+
+function buildTonConnectBrowserApprovalMissingTonKeyPrompt(): string {
+  return [
+    "I can consume a fresh UNIGOX tc:// TonConnect link here, but I still need TON key material for that exact wallet on this machine first.",
+    "Send the TON mnemonic phrase or TON private key / secret key for that wallet, then paste the fresh tc:// link again.",
+  ].join(" ");
+}
+
+function buildTonConnectBrowserApprovalFailurePrompt(message?: string): string {
+  return [
+    "I couldn’t approve that UNIGOX TonConnect browser-login link yet.",
+    message ? `Reason: ${message}` : undefined,
+    "Make sure it is a fresh tc:// link from unigox.com, not an older expired one.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2351,6 +2398,42 @@ function buildTonConnectVerificationClient(deps: TransferFlowDeps): UnigoxClient
     ...(email ? { email } : {}),
     ...(evmSigningPrivateKey ? { evmSigningPrivateKey } : {}),
   });
+}
+
+async function tryApproveProvidedTonConnectBrowserLink(
+  session: TransferSession,
+  responseText: string,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = [],
+): Promise<TransferFlowResult | undefined> {
+  const link = parseTonConnectUniversalLinkInput(responseText);
+  if (!link) return undefined;
+
+  if (!deps.approveTonConnectLink) {
+    const prompt = "This skill runtime cannot consume a fresh tc:// TonConnect link yet. Open it in your wallet directly or paste the exported signing key here instead.";
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    await deps.approveTonConnectLink(link);
+    const prompt = buildTonConnectBrowserApprovalSuccessPrompt();
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "browser_login_handoff",
+      message: prompt,
+    }]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : undefined;
+    const prompt = /TON auth requires|tonPrivateKey|tonMnemonic|does not derive the exact TON address/i.test(message || "")
+      ? buildTonConnectBrowserApprovalMissingTonKeyPrompt()
+      : buildTonConnectBrowserApprovalFailurePrompt(message);
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
 }
 
 async function finalizeTonConnectLogin(
@@ -3040,6 +3123,11 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
+    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, responseText, deps);
+    if (tonConnectBrowserLogin) {
+      return tonConnectBrowserLogin;
+    }
+
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
       const prompt = buildMissingSigningKeyPrompt(session.auth.username);
       return reply(withUpdate(session, deps), prompt, undefined, [{

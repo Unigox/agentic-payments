@@ -214,6 +214,10 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
       ...(frontendUrl ? { frontendUrl } : {}),
       stateDir: DEFAULT_TONCONNECT_STATE_DIR,
     }),
+    approveTonConnectLink: async (universalLink) => {
+      const client = buildTonConnectClient();
+      return client.approveTonConnectBrowserLogin(universalLink);
+    },
   };
 }
 

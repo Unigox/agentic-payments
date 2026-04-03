@@ -43,6 +43,7 @@ import {
 } from "@ton/ton";
 import nacl from "tweetnacl";
 import { Wallet, ethers } from "ethers";
+import { approveTonConnectUniversalLinkWithWallet, parseTonConnectUniversalLink } from "./tonconnect-session.ts";
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -1097,6 +1098,43 @@ export class UnigoxClient {
     return this.finalizeAccountLogin(loginRes.id_token as string, {
       linkedTonAddress: this.normalizeTonAddress(payload.address),
     });
+  }
+
+  async approveTonConnectBrowserLogin(universalLink: string): Promise<{
+    bridgeUrl: string;
+    walletAddress: string;
+    manifestUrl: string;
+    tonProofPayload?: string;
+  }> {
+    const parsed = parseTonConnectUniversalLink(universalLink);
+    const frontendHost = new URL(this.frontendUrl).host;
+    const manifestHost = new URL(parsed.manifestUrl).host;
+    if (manifestHost !== frontendHost) {
+      throw new Error(`This TonConnect link targets ${manifestHost}, not ${frontendHost}.`);
+    }
+
+    const tonWallet = await this.ensureTonWalletAccount();
+    const tonProof = parsed.tonProofPayload
+      ? {
+          ...this.buildTonProof(tonWallet.address, parsed.tonProofPayload, tonWallet.secretKey),
+        }
+      : undefined;
+
+    const approved = await approveTonConnectUniversalLinkWithWallet({
+      universalLink,
+      walletAddress: tonWallet.address,
+      network: tonWallet.network,
+      publicKey: tonWallet.publicKey,
+      stateInit: tonWallet.stateInit,
+      ...(tonProof ? { tonProof } : {}),
+    });
+
+    return {
+      bridgeUrl: approved.bridgeUrl,
+      walletAddress: tonWallet.address,
+      manifestUrl: approved.manifestUrl,
+      tonProofPayload: approved.tonProofPayload,
+    };
   }
 
   private async loginOnce(): Promise<string> {

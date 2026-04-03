@@ -3,11 +3,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { Base64, SessionCrypto, hexToByteArray } from "@tonconnect/protocol";
 import TonConnect, {
   isWalletInfoRemote,
   type IStorage,
   type TonConnectError,
   type TonProofItemReplySuccess,
+  type ConnectRequest,
+  type ConnectEventSuccess,
   type Wallet,
   type WalletConnectionSourceHTTP,
 } from "@tonconnect/sdk";
@@ -19,6 +22,15 @@ const SKILL_DIR = path.join(__dirname, "..");
 const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconnect");
 const DEFAULT_FRONTEND_URL = "https://www.unigox.com";
 const TONCONNECT_OPENING_DEADLINE_MS = 15 * 60 * 1000;
+const DEFAULT_WALLET_BRIDGE_URL = "https://bridge.tonapi.io/bridge";
+const DEFAULT_WALLET_DEVICE_INFO: ConnectEventSuccess["payload"]["device"] = {
+  appName: "agentic-payments",
+  appVersion: "1.0.0",
+  maxProtocolVersion: 2,
+  features: [],
+  platform: "browser",
+};
+const DEFAULT_EVENT_ID = 0;
 
 export interface TonConnectSessionStartResult {
   universalLink: string;
@@ -55,6 +67,44 @@ export type TonConnectSessionStatusResult =
   | TonConnectSessionStatusPending
   | TonConnectSessionStatusConnected
   | TonConnectSessionStatusError;
+
+export interface ParsedTonConnectLink {
+  dappSessionId: string;
+  traceId?: string;
+  request: ConnectRequest;
+  manifestUrl: string;
+  tonProofPayload?: string;
+}
+
+export interface TonConnectWalletApprovalParams {
+  universalLink: string;
+  walletAddress: string;
+  network: string;
+  publicKey: string;
+  stateInit: string;
+  tonProof?: {
+    timestamp: number;
+    domain: { lengthBytes: number; value: string };
+    payload: string;
+    signature: string;
+  };
+  bridgeUrl?: string;
+  device?: ConnectEventSuccess["payload"]["device"];
+}
+
+export interface TonConnectWalletApprovalResult {
+  bridgeUrl: string;
+  dappSessionId: string;
+  walletSessionId: string;
+  manifestUrl: string;
+  tonProofPayload?: string;
+}
+
+class MemoryTonConnectStorage implements IStorage {
+  async setItem(): Promise<void> {}
+  async getItem(): Promise<string | null> { return null; }
+  async removeItem(): Promise<void> {}
+}
 
 class FileTonConnectStorage implements IStorage {
   private readonly rootDir: string;
@@ -119,6 +169,10 @@ function createConnector(params: {
   return new TonConnect({ manifestUrl, storage });
 }
 
+function createWalletsListConnector(manifestUrl: string): TonConnect {
+  return new TonConnect({ manifestUrl, storage: new MemoryTonConnectStorage() });
+}
+
 function toUniqueUnifiedSources(wallets: Awaited<ReturnType<TonConnect["getWallets"]>>): Pick<WalletConnectionSourceHTTP, "bridgeUrl">[] {
   const seen = new Set<string>();
   const sources: Pick<WalletConnectionSourceHTTP, "bridgeUrl">[] = [];
@@ -137,6 +191,147 @@ function hasTonProof(wallet: Wallet | null | undefined): wallet is Wallet & { co
 
 function normalizeWalletAddress(address: string): string {
   return Address.parse(address).toRawString().toLowerCase();
+}
+
+export function parseTonConnectUniversalLink(link: string): ParsedTonConnectLink {
+  const trimmed = link.trim();
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    throw new Error("That does not look like a valid TonConnect link.");
+  }
+
+  if (parsedUrl.protocol !== "tc:") {
+    throw new Error("I only accept a fresh tc:// TonConnect link for this browser-login flow.");
+  }
+
+  const dappSessionId = parsedUrl.searchParams.get("id") || "";
+  if (!/^[0-9a-fA-F]{64}$/.test(dappSessionId)) {
+    throw new Error("That TonConnect link is missing a valid dapp session id.");
+  }
+
+  const encodedRequest = parsedUrl.searchParams.get("r");
+  if (!encodedRequest) {
+    throw new Error("That TonConnect link is missing the connection request payload.");
+  }
+
+  let request: ConnectRequest;
+  try {
+    request = JSON.parse(encodedRequest) as ConnectRequest;
+  } catch {
+    throw new Error("That TonConnect link contains an unreadable connection request.");
+  }
+
+  if (!request?.manifestUrl || !Array.isArray(request.items)) {
+    throw new Error("That TonConnect link is missing the expected manifest or request items.");
+  }
+
+  const tonProofPayload = request.items.find((item) => item.name === "ton_proof" && "payload" in item)?.payload;
+  return {
+    dappSessionId: dappSessionId.toLowerCase(),
+    traceId: parsedUrl.searchParams.get("trace_id") || undefined,
+    request,
+    manifestUrl: request.manifestUrl,
+    tonProofPayload,
+  };
+}
+
+async function resolveRemoteTonConnectBridgeUrl(manifestUrl: string): Promise<string> {
+  try {
+    const connector = createWalletsListConnector(manifestUrl);
+    const wallets = await connector.getWallets();
+    const remoteWallets = wallets.filter(isWalletInfoRemote);
+    const tonkeeper = remoteWallets.find((wallet) => wallet.appName === "tonkeeper" && wallet.bridgeUrl);
+    if (tonkeeper?.bridgeUrl) return tonkeeper.bridgeUrl;
+    const first = remoteWallets.find((wallet) => wallet.bridgeUrl);
+    if (first?.bridgeUrl) return first.bridgeUrl;
+  } catch {
+    // Fall back to the best-known bridge URL below.
+  }
+  return DEFAULT_WALLET_BRIDGE_URL;
+}
+
+export async function approveTonConnectUniversalLinkWithWallet(
+  params: TonConnectWalletApprovalParams,
+  options?: {
+    fetchImpl?: typeof fetch;
+    resolveBridgeUrl?: (manifestUrl: string) => Promise<string>;
+  },
+): Promise<TonConnectWalletApprovalResult> {
+  const parsed = parseTonConnectUniversalLink(params.universalLink);
+  const walletAddress = normalizeWalletAddress(params.walletAddress);
+  const requestedNetwork = parsed.request.items.find((item) => item.name === "ton_addr" && "network" in item)?.network;
+  if (requestedNetwork && requestedNetwork !== params.network) {
+    throw new Error(`This TonConnect request expects network ${requestedNetwork}, not ${params.network}.`);
+  }
+
+  const bridgeUrl = params.bridgeUrl
+    || await (options?.resolveBridgeUrl || resolveRemoteTonConnectBridgeUrl)(parsed.manifestUrl);
+  const walletSession = new SessionCrypto();
+
+  const items: ConnectEventSuccess["payload"]["items"] = [
+    {
+      name: "ton_addr",
+      address: walletAddress,
+      network: params.network,
+      publicKey: params.publicKey,
+      walletStateInit: params.stateInit,
+    },
+  ];
+
+  if (parsed.tonProofPayload) {
+    if (!params.tonProof) {
+      throw new Error("This TonConnect request requires ton_proof, but no TON proof was provided.");
+    }
+    if (params.tonProof.payload !== parsed.tonProofPayload) {
+      throw new Error("The TON proof payload does not match the request from the TonConnect link.");
+    }
+    items.push({
+      name: "ton_proof",
+      proof: params.tonProof,
+    });
+  }
+
+  const connectEvent: ConnectEventSuccess = {
+    event: "connect",
+    id: DEFAULT_EVENT_ID,
+    payload: {
+      items,
+      device: params.device || DEFAULT_WALLET_DEVICE_INFO,
+    },
+  };
+
+  const encrypted = walletSession.encrypt(JSON.stringify(connectEvent), hexToByteArray(parsed.dappSessionId));
+  const postUrl = new URL("message", `${bridgeUrl.replace(/\/+$/, "")}/`);
+  postUrl.searchParams.set("client_id", walletSession.sessionId);
+  postUrl.searchParams.set("to", parsed.dappSessionId);
+  postUrl.searchParams.set("ttl", "300");
+  postUrl.searchParams.set("topic", "connect");
+  if (parsed.traceId) {
+    postUrl.searchParams.set("trace_id", parsed.traceId);
+  }
+
+  const fetchImpl = options?.fetchImpl || fetch;
+  const response = await fetchImpl(postUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "text/plain;charset=UTF-8",
+    },
+    body: Base64.encode(encrypted),
+  });
+
+  if (!response.ok) {
+    throw new Error(`TonConnect bridge approval failed with HTTP ${response.status}.`);
+  }
+
+  return {
+    bridgeUrl,
+    dappSessionId: parsed.dappSessionId,
+    walletSessionId: walletSession.sessionId,
+    manifestUrl: parsed.manifestUrl,
+    tonProofPayload: parsed.tonProofPayload,
+  };
 }
 
 async function waitForConnectedWallet(
