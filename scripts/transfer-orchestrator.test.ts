@@ -3699,11 +3699,13 @@ test("successful TON login verification persists TON address and private key, th
   let res = await startTransferFlow("send 50 EUR to mom", deps);
   res = await advanceTransferFlow(res.session, "ton", deps);
   assert.equal(res.session.stage, "awaiting_ton_address");
-  assert.match(res.reply, /raw TON address/i);
+  assert.match(res.reply, /TON address shown by the wallet/i);
 
   res = await advanceTransferFlow(res.session, tonAddress, deps);
   assert.equal(res.session.stage, "awaiting_ton_address_confirmation");
-  assert.match(res.reply, /I’ll use this exact raw TON address/i);
+  assert.match(res.reply, /I’ll use this exact TON address/i);
+  assert.ok(res.reply.includes(tonAddress));
+  assert.equal(res.session.auth.tonAddressDisplay, tonAddress);
 
   res = await advanceTransferFlow(res.session, "this address is correct", deps);
   assert.equal(res.session.stage, "awaiting_ton_auth_method");
@@ -3886,7 +3888,41 @@ test("TonConnect refuses a wallet approval if it comes back for a different TON 
 
   assert.equal(res.session.stage, "awaiting_ton_address");
   assert.match(res.reply, /different wallet or address version/i);
-  assert.match(res.reply, /Send the exact raw TON address/i);
+  assert.match(res.reply, /Send the exact TON address/i);
+});
+
+test("natural TON auth-choice phrasing is accepted without forcing the exact button label", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Lets do TON", deps);
+  assert.equal(res.session.stage, "awaiting_ton_address");
+  assert.match(res.reply, /TON address shown by the wallet/i);
+});
+
+test("raw 0: TON address form is accepted and preserved in the confirmation prompt", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  const rawTonAddress = "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e";
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "ton", deps);
+  res = await advanceTransferFlow(res.session, rawTonAddress, deps);
+
+  assert.equal(res.session.stage, "awaiting_ton_address_confirmation");
+  assert.ok(res.reply.includes(rawTonAddress));
+  assert.equal(res.session.auth.tonAddressDisplay, rawTonAddress);
+  assert.equal(res.session.auth.tonAddress, rawTonAddress);
 });
 
 test("stored TON auth without a signing key prompts for the UNIGOX signing key instead of failing later", async () => {

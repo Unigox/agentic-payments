@@ -401,6 +401,7 @@ export interface TransferSession {
     emailAuthTokenExpiresAt?: string;
     evmSigningKeyAvailable?: boolean;
     tonAddress?: string;
+    tonAddressDisplay?: string;
     tonWalletVersion?: TonWalletVersion;
     sessionToken?: string;
     sessionTokenExpiresAt?: string;
@@ -662,20 +663,27 @@ function parseOtpCode(text: string | undefined): string | undefined {
   return inline?.[1];
 }
 
-function parseTonAddress(text: string | undefined): string | undefined {
+function parseTonAddressInput(text: string | undefined): { raw: string; display: string } | undefined {
   const value = cleanText(text);
   if (!value) return undefined;
 
-  const candidates = value.match(/[A-Za-z0-9_-]{48,80}/g) || [];
+  const candidates = value.match(/(?:[A-Za-z0-9_-]{48,80}|[A-Za-z0-9_-]?:[0-9a-fA-F]{64})/g) || [];
   for (const candidate of candidates) {
     try {
-      return Address.parse(candidate).toRawString().toLowerCase();
+      return {
+        raw: Address.parse(candidate).toRawString().toLowerCase(),
+        display: candidate,
+      };
     } catch {
       // keep scanning
     }
   }
 
   return undefined;
+}
+
+function parseTonAddress(text: string | undefined): string | undefined {
+  return parseTonAddressInput(text)?.raw;
 }
 
 function parseTonMnemonic(text: string | undefined): string | undefined {
@@ -726,6 +734,33 @@ function looksLikeEvmAddress(text: string | undefined): boolean {
   const value = cleanText(text);
   if (!value) return false;
   return /\b(?:0x)?[0-9a-fA-F]{40}\b/.test(value);
+}
+
+function parseAuthChoice(value: string): AuthChoice | undefined {
+  const normalized = cleanText(value)?.toLowerCase();
+  if (!normalized) return undefined;
+
+  if (/^(evm|evm wallet|evm wallet connection|wallet connection evm)$/.test(normalized)) {
+    return "evm";
+  }
+  if (/^(ton|ton wallet|ton wallet connection|wallet connection ton)$/.test(normalized)) {
+    return "ton";
+  }
+  if (/^(email|otp|email otp)$/.test(normalized)) {
+    return "email";
+  }
+
+  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:evm|evm wallet(?: connection)?)\b/.test(normalized)) {
+    return "evm";
+  }
+  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:ton|ton wallet(?: connection)?)\b/.test(normalized)) {
+    return "ton";
+  }
+  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:email|email otp|otp)\b/.test(normalized)) {
+    return "email";
+  }
+
+  return undefined;
 }
 
 const DETAIL_LABELS: Record<string, string> = {
@@ -893,13 +928,7 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/^(cancel|stop|nevermind|never mind)$/i.test(value)) {
     hints.cancel = true;
   }
-  if (/^(evm|evm wallet|evm wallet connection|wallet connection evm)$/i.test(value)) {
-    hints.authChoice = "evm";
-  } else if (/^(ton|ton wallet|ton wallet connection|wallet connection ton)$/i.test(value)) {
-    hints.authChoice = "ton";
-  } else if (/^(email|otp|email otp)$/i.test(value)) {
-    hints.authChoice = "email";
-  }
+  hints.authChoice = parseAuthChoice(value);
   if (CONFIRM_RE.test(value)) {
     hints.confirm = true;
   }
@@ -1874,14 +1903,15 @@ function getStoredTonAddress(deps: TransferFlowDeps): string | undefined {
 function buildTonAddressPrompt(): string {
   return [
     "I can do TON login here.",
-    "First send the raw TON address for the wallet you use on UNIGOX.",
+    "First send the TON address shown by the wallet you use on UNIGOX.",
+    "You can paste either the normal wallet address form or the raw 0:... form.",
     "I’ll use that exact address as the source of truth so I do not guess the wrong wallet version.",
   ].join(" ");
 }
 
 function buildTonAddressConfirmationPrompt(tonAddress: string): string {
   return [
-    `I’ll use this exact raw TON address: ${tonAddress}.`,
+    `I’ll use this exact TON address: ${tonAddress}.`,
     "Is this the correct wallet address for the wallet you used on UNIGOX, or should I use a different version / address?",
     "Once you confirm it, you can either send the mnemonic phrase for that wallet, send the TON private key / secret key, or use a fresh TonConnect QR / deep link. I’ll keep only the wallet version that actually matches this exact address.",
   ].join(" ");
@@ -2330,7 +2360,7 @@ async function finalizeTonConnectLogin(
   if (!active?.payloadToken || !active.universalLink) {
     session.stage = "awaiting_ton_auth_method";
     session.status = "blocked";
-    const prompt = buildTonAuthMethodPrompt(session.auth.tonAddress!);
+    const prompt = buildTonAuthMethodPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
     return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [...prefixEvents, {
       type: "blocked_missing_auth",
       message: prompt,
@@ -2379,7 +2409,7 @@ async function finalizeTonConnectLogin(
     const prompt = [
       `The connected wallet came back as ${checked.walletAddress}, not ${session.auth.tonAddress}.`,
       "That means this TonConnect approval was for a different wallet or address version.",
-      "Send the exact raw TON address you want me to use, then I can generate a fresh TonConnect QR or use the mnemonic/private-key path for that wallet.",
+      "Send the exact TON address you want me to use, then I can generate a fresh TonConnect QR or use the mnemonic/private-key path for that wallet.",
     ].join(" ");
     return reply(withUpdate(session, deps), prompt, ["use a different TON address", "TonConnect QR"], [...prefixEvents, {
       type: "blocked_missing_auth",
@@ -2662,8 +2692,9 @@ async function maybeHandleAuthOnboardingTurn(
       if (hintedChoice === "ton") {
         const storedTonAddress = getStoredTonAddress(deps);
         session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+        session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
         session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(storedTonAddress) : buildTonAddressPrompt();
+        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
         return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
           type: "blocked_missing_auth",
           message: followUp,
@@ -2783,7 +2814,9 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_ton_address") {
     session.status = "blocked";
-    const tonAddress = parseTonAddress(responseText) || session.auth.tonAddress || getStoredTonAddress(deps);
+    const parsedTonAddress = parseTonAddressInput(responseText);
+    const tonAddress = parsedTonAddress?.raw || session.auth.tonAddress || getStoredTonAddress(deps);
+    const tonAddressDisplay = parsedTonAddress?.display || session.auth.tonAddressDisplay || tonAddress;
     if (!tonAddress) {
       const prompt = buildTonAddressPrompt();
       return reply(withUpdate(session, deps), prompt, undefined, [{
@@ -2795,8 +2828,9 @@ async function maybeHandleAuthOnboardingTurn(
     session.auth.choice = "ton";
     session.auth.mode = "ton";
     session.auth.tonAddress = tonAddress;
+    session.auth.tonAddressDisplay = tonAddressDisplay;
     session.stage = "awaiting_ton_address_confirmation";
-    const prompt = buildTonAddressConfirmationPrompt(tonAddress);
+    const prompt = buildTonAddressConfirmationPrompt(tonAddressDisplay);
     return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
       type: "blocked_missing_auth",
       message: prompt,
@@ -2805,10 +2839,11 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_ton_address_confirmation") {
     session.status = "blocked";
-    const replacementAddress = parseTonAddress(responseText);
-    if (replacementAddress && replacementAddress !== session.auth.tonAddress) {
-      session.auth.tonAddress = replacementAddress;
-      const prompt = buildTonAddressConfirmationPrompt(replacementAddress);
+    const replacementAddress = parseTonAddressInput(responseText);
+    if (replacementAddress && replacementAddress.raw !== session.auth.tonAddress) {
+      session.auth.tonAddress = replacementAddress.raw;
+      session.auth.tonAddressDisplay = replacementAddress.display;
+      const prompt = buildTonAddressConfirmationPrompt(replacementAddress.display);
       return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2817,7 +2852,7 @@ async function maybeHandleAuthOnboardingTurn(
 
     if (AFFIRMATIVE_RE.test(responseText) || /correct|this address is correct|use this address/i.test(responseText)) {
       session.stage = "awaiting_ton_auth_method";
-      const prompt = buildTonAuthMethodPrompt(session.auth.tonAddress!);
+      const prompt = buildTonAuthMethodPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
       return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2826,14 +2861,14 @@ async function maybeHandleAuthOnboardingTurn(
 
     if (NO_RE.test(responseText) || /different|change|another/i.test(responseText)) {
       session.stage = "awaiting_ton_address";
-      const prompt = "Okay. Send the exact raw TON address shown by the wallet you used on UNIGOX, and I’ll use that exact address instead.";
+      const prompt = "Okay. Send the exact TON address shown by the wallet you used on UNIGOX, and I’ll use that exact address instead.";
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
       }]);
     }
 
-    const prompt = buildTonAddressConfirmationPrompt(session.auth.tonAddress!);
+    const prompt = buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
     return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
       type: "blocked_missing_auth",
       message: prompt,
@@ -2843,6 +2878,7 @@ async function maybeHandleAuthOnboardingTurn(
   if (session.stage === "awaiting_ton_auth_method") {
     session.status = "blocked";
     const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
+    const tonAddressDisplay = session.auth.tonAddressDisplay || tonAddress;
     if (!tonAddress) {
       session.stage = "awaiting_ton_address";
       const prompt = buildTonAddressPrompt();
@@ -2893,7 +2929,7 @@ async function maybeHandleAuthOnboardingTurn(
 
     if (explicitMethod === "mnemonic") {
       session.stage = "awaiting_ton_mnemonic";
-      const prompt = buildTonMnemonicPrompt(tonAddress);
+      const prompt = buildTonMnemonicPrompt(tonAddressDisplay);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -2902,14 +2938,14 @@ async function maybeHandleAuthOnboardingTurn(
 
     if (explicitMethod === "private_key") {
       session.stage = "awaiting_ton_private_key";
-      const prompt = buildTonPrivateKeyPrompt(tonAddress);
+      const prompt = buildTonPrivateKeyPrompt(tonAddressDisplay);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
       }]);
     }
 
-    const prompt = buildTonAuthMethodPrompt(tonAddress);
+    const prompt = buildTonAuthMethodPrompt(tonAddressDisplay);
     return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
       type: "blocked_missing_auth",
       message: prompt,
@@ -5658,7 +5694,8 @@ export async function advanceTransferFlow(
       if (hints.authChoice === "ton") {
         const storedTonAddress = getStoredTonAddress(deps);
         session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(storedTonAddress) : buildTonAddressPrompt();
+        session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
+        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
         session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
         return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
           type: "blocked_missing_auth",
