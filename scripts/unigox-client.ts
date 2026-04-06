@@ -134,7 +134,7 @@ export function generateDedicatedEvmLoginWallet(): { address: string; privateKey
 
 export async function generateDedicatedTonLoginWallet(
   preferredVersion?: TonWalletVersion
-): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }> {
+): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic: string }> {
   const mnemonicWords = await mnemonicNew(24);
   const keyPair = await mnemonicToWalletKey(mnemonicWords);
   const { matched, candidates } = resolveTonWalletCandidate({
@@ -152,6 +152,7 @@ export async function generateDedicatedTonLoginWallet(
     address: matched.address,
     privateKey: Buffer.from(keyPair.secretKey).toString("hex"),
     walletVersion: matched.version,
+    mnemonic: mnemonicWords.join(" "),
   };
 }
 
@@ -1027,7 +1028,7 @@ export class UnigoxClient {
     return { address: newWallet.address, privateKey: newWallet.privateKey };
   }
 
-  async generateAndLinkTonWallet(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }> {
+  async generateAndLinkTonWallet(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic: string }> {
     const primaryToken = this.requireFreshToken("generated TON wallet linking");
     const mnemonicWords = await mnemonicNew(24);
     const keyPair = await mnemonicToWalletKey(mnemonicWords);
@@ -1086,6 +1087,7 @@ export class UnigoxClient {
       address: matched.address,
       privateKey: normalizedPrivateKey,
       walletVersion: matched.version,
+      mnemonic: mnemonicWords.join(" "),
     };
   }
 

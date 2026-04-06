@@ -23,7 +23,7 @@ import type {
   UserProfile,
   WalletBalance,
 } from "./unigox-client.ts";
-import type { TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
+import type { LoginWalletExportRequest, TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
 
 const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const VALID_SIGNING_KEY = "0x2222222222222222222222222222222222222222222222222222222222222222";
@@ -659,7 +659,7 @@ function makeClient(options: {
   verifyEmailOtpError?: string;
   verifyEmailOtpToken?: string;
   generatedEvmWallet?: { address: string; privateKey: string };
-  generatedTonWallet?: { address: string; privateKey: string; walletVersion: "v4" | "v5r1" };
+  generatedTonWallet?: { address: string; privateKey: string; walletVersion: "v4" | "v5r1"; mnemonic?: string };
 } = {}): TransferExecutionClient & {
   calls: string[];
   lastCreateTradeRequestParams?: {
@@ -3967,6 +3967,92 @@ test("generated TON wallet choice creates the wallet directly without asking for
   assert.deepEqual(persisted.tonAddress, ["0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
   assert.deepEqual(persisted.authChoice, ["generated_ton"]);
+});
+
+test("generated TON wallet can be exported into a local wallet file without exposing the secret in chat", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "tonstarter" });
+  const exported: LoginWalletExportRequest[] = [];
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    generateDedicatedTonWallet: async () => ({
+      address: "0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      privateKey: VALID_TON_PRIVATE_KEY,
+      walletVersion: "v4",
+      mnemonic: VALID_TON_MNEMONIC,
+    }),
+    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      process.env.UNIGOX_TON_PRIVATE_KEY = tonPrivateKey;
+    },
+    persistTonMnemonic: async (mnemonic) => {
+      process.env.UNIGOX_TON_MNEMONIC = mnemonic;
+    },
+    persistTonAddress: async (tonAddress) => {
+      process.env.UNIGOX_TON_ADDRESS = tonAddress;
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      process.env.UNIGOX_TON_WALLET_VERSION = tonWalletVersion;
+    },
+    persistAuthChoice: async (choice) => {
+      process.env.UNIGOX_LOGIN_WALLET_ORIGIN = choice;
+    },
+    exportLoginWalletFile: async (wallet) => {
+      exported.push(wallet);
+      return {
+        walletType: wallet.walletType,
+        origin: wallet.origin,
+        filePath: "/tmp/generated-ton-wallet.json",
+        address: wallet.address,
+        walletVersion: wallet.walletVersion,
+        includesMnemonic: Boolean(wallet.mnemonic),
+      };
+    },
+  });
+
+  await withEnv({
+    UNIGOX_TON_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_TON_ADDRESS: undefined,
+    UNIGOX_TON_WALLET_VERSION: undefined,
+    UNIGOX_LOGIN_WALLET_ORIGIN: undefined,
+  }, async () => {
+    let res = await startTransferFlow("send 20 EUR to mom", deps);
+    res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
+    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+    res = await advanceTransferFlow(res.session, "export this wallet", deps);
+    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+    assert.match(res.reply, /wrote your dedicated TON login wallet to a local file/i);
+    assert.match(res.reply, /\/tmp\/generated-ton-wallet\.json/i);
+    assert.match(res.reply, /not the separate UNIGOX-exported EVM signing key/i);
+    assert.ok(res.events.some((event) => event.type === "wallet_exported"));
+  });
+
+  assert.equal(exported.length, 1);
+  assert.equal(exported[0].walletType, "ton");
+  assert.equal(exported[0].origin, "generated_ton");
+  assert.equal(exported[0].privateKey, VALID_TON_PRIVATE_KEY);
+  assert.equal(exported[0].mnemonic, VALID_TON_MNEMONIC);
+  assert.equal(exported[0].address, "0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+  assert.equal(exported[0].walletVersion, "v4");
+});
+
+test("manual wallet auth cannot be auto-exported as a generated wallet backup", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "manualuser" });
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+  });
+
+  await withEnv({
+    UNIGOX_LOGIN_WALLET_ORIGIN: "ton",
+    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
+  }, async () => {
+    const res = await startTransferFlow("export this wallet", deps);
+    assert.match(res.reply, /only auto-export a generated login wallet/i);
+    assert.equal(res.events.some((event) => event.type === "wallet_exported"), false);
+  });
 });
 
 test("generated TON wallet choice overrides a stale email-address step instead of asking for email again", async () => {

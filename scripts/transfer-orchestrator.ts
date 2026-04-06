@@ -73,6 +73,7 @@ const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 type AuthChoice = "evm" | "ton" | "email" | "generated_evm" | "generated_ton";
 type SecretKind = "evm_login_key" | "evm_signing_key" | "ton_private_key" | "ton_mnemonic";
 type TopUpMethod = "internal_username" | "external_deposit";
+type WalletExportType = "evm" | "ton";
 
 export type TransferGoal = "transfer" | "save_contact_only";
 export type TransferStage =
@@ -155,9 +156,29 @@ export interface TransferFlowEvent {
     | "receipt_not_received"
     | "settlement_placeholder_deferred"
     | "settlement_completed"
-    | "settlement_refunded_or_cancelled";
+    | "settlement_refunded_or_cancelled"
+    | "wallet_exported";
   message: string;
   data?: Record<string, unknown>;
+}
+
+export interface LoginWalletExportRequest {
+  walletType: WalletExportType;
+  origin: "generated_evm" | "generated_ton";
+  privateKey?: string;
+  mnemonic?: string;
+  address?: string;
+  walletVersion?: TonWalletVersion;
+  username?: string;
+}
+
+export interface LoginWalletExportResult {
+  walletType: WalletExportType;
+  origin: "generated_evm" | "generated_ton";
+  filePath: string;
+  address?: string;
+  walletVersion?: TonWalletVersion;
+  includesMnemonic?: boolean;
 }
 
 export interface TransferExecutionClient {
@@ -168,7 +189,7 @@ export interface TransferExecutionClient {
   requestEmailOTP?(): Promise<void>;
   verifyEmailOTP?(code: string): Promise<string>;
   generateAndLinkWallet?(): Promise<{ address: string; privateKey: string }>;
-  generateAndLinkTonWallet?(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }>;
+  generateAndLinkTonWallet?(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic?: string }>;
   listPaymentDetails?(): Promise<PaymentDetail[]>;
   listInitiatorTrades?(filter?: "action_required" | "waiting_other_party" | "history"): Promise<InitiatorTradeSummary[]>;
   ensurePaymentDetail(params: {
@@ -257,7 +278,7 @@ export interface TransferFlowDeps {
   }>;
   decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
   generateDedicatedEvmWallet?: () => Promise<{ address: string; privateKey: string }>;
-  generateDedicatedTonWallet?: () => Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }>;
+  generateDedicatedTonWallet?: () => Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic?: string }>;
   persistEmailAddress?: (emailAddress: string) => Promise<void> | void;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
@@ -266,6 +287,7 @@ export interface TransferFlowDeps {
   persistTonAddress?: (tonAddress: string) => Promise<void> | void;
   persistTonWalletVersion?: (tonWalletVersion: TonWalletVersion) => Promise<void> | void;
   persistAuthChoice?: (choice: AuthChoice) => Promise<void> | void;
+  exportLoginWalletFile?: (wallet: LoginWalletExportRequest) => Promise<LoginWalletExportResult> | LoginWalletExportResult;
   handleSensitiveInput?: (params: {
     kind: SecretKind;
     secret: string;
@@ -495,6 +517,15 @@ interface ParsedHints {
   cancel?: boolean;
   saveContactDecision?: "yes" | "no";
   confirm?: boolean;
+}
+
+interface WalletExportIntent {
+  walletType?: WalletExportType;
+}
+
+interface StoredGeneratedWalletExport extends LoginWalletExportRequest {
+  walletType: WalletExportType;
+  origin: "generated_evm" | "generated_ton";
 }
 
 const CURRENCY_SYNONYMS: Record<string, string> = {
@@ -942,6 +973,32 @@ function parseAuthChoice(value: string): AuthChoice | undefined {
   return undefined;
 }
 
+function parseWalletExportIntent(text: string | undefined): WalletExportIntent | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+
+  const normalized = value.toLowerCase();
+  if (/\b(signing key|unigox-exported|agentic-payments\s*\/\s*signing key|export option|intercom|hello@unigox\.com)\b/.test(normalized)) {
+    return undefined;
+  }
+
+  const mentionsExport = /\b(export|backup|download|write|save|send|give)\b/.test(normalized);
+  const mentionsWalletMaterial = /\b(wallet|login wallet|wallet file|key file|private key|backup file|portable backup)\b/.test(normalized);
+  const mentionsElsewhereUse = /\b(continue using this wallet elsewhere|use this wallet elsewhere|use elsewhere)\b/.test(normalized);
+
+  if (!((mentionsExport && mentionsWalletMaterial) || mentionsElsewhereUse)) {
+    return undefined;
+  }
+
+  const walletType = /\bton\b/.test(normalized)
+    ? "ton"
+    : /\b(evm|ethereum|eth)\b/.test(normalized)
+      ? "evm"
+      : undefined;
+
+  return { walletType };
+}
+
 const DETAIL_LABELS: Record<string, string> = {
   full_name: "Full name",
   iban: "IBAN",
@@ -1378,6 +1435,53 @@ export function detectAuthState(): AuthState {
     authMode: email ? "email" : undefined,
     emailFallbackAvailable: !!email,
     evmSigningKeyAvailable: false,
+  };
+}
+
+function getGeneratedWalletChoice(session: TransferSession): "generated_evm" | "generated_ton" | undefined {
+  const choice = session.auth.choice || normalizeStoredAuthChoice(loadEnvValue("UNIGOX_LOGIN_WALLET_ORIGIN"));
+  return choice === "generated_evm" || choice === "generated_ton" ? choice : undefined;
+}
+
+function resolveStoredGeneratedWalletExport(
+  session: TransferSession,
+  requestedType?: WalletExportType,
+): StoredGeneratedWalletExport | undefined {
+  const choice = getGeneratedWalletChoice(session);
+  if (!choice) return undefined;
+  if (requestedType === "evm" && choice !== "generated_evm") return undefined;
+  if (requestedType === "ton" && choice !== "generated_ton") return undefined;
+
+  if (choice === "generated_evm") {
+    const privateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
+    if (!privateKey) return undefined;
+    const address = (() => {
+      try {
+        return new Wallet(privateKey).address;
+      } catch {
+        return undefined;
+      }
+    })();
+    return {
+      walletType: "evm",
+      origin: "generated_evm",
+      privateKey,
+      address,
+      username: session.auth.username,
+    };
+  }
+
+  const privateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
+  const mnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
+  if (!privateKey && !mnemonic) return undefined;
+  return {
+    walletType: "ton",
+    origin: "generated_ton",
+    privateKey,
+    mnemonic,
+    address: loadEnvValue("UNIGOX_TON_ADDRESS") || session.auth.tonAddress,
+    walletVersion: (loadEnvValue("UNIGOX_TON_WALLET_VERSION") as TonWalletVersion | undefined) || session.auth.tonWalletVersion,
+    username: session.auth.username,
   };
 }
 
@@ -2296,10 +2400,15 @@ function buildGeneratedWalletFailurePrompt(kind: "generated_evm" | "generated_to
   ].filter(Boolean).join(" ");
 }
 
+function buildGeneratedWalletExportHint(): string {
+  return "If you want a portable backup of this login wallet, say 'export this wallet' and I’ll write a local wallet file for you.";
+}
+
 function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): string {
   return [
     "I generated a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
+    buildGeneratedWalletExportHint(),
     buildEvmSigningKeyPromptForChoice(username, "generated_evm"),
   ].filter(Boolean).join(" ");
 }
@@ -2308,7 +2417,42 @@ function buildGeneratedTonWalletReadyPrompt(username: string | undefined): strin
   return [
     "I generated a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
+    buildGeneratedWalletExportHint(),
     buildEvmSigningKeyPromptForChoice(username, "generated_ton"),
+  ].filter(Boolean).join(" ");
+}
+
+function buildWalletExportUnavailablePrompt(session: TransferSession, requestedType?: WalletExportType): string {
+  const requestedLabel = requestedType === "ton"
+    ? "TON"
+    : requestedType === "evm"
+      ? "EVM"
+      : "generated";
+  const currentChoice = session.auth.choice || normalizeStoredAuthChoice(loadEnvValue("UNIGOX_LOGIN_WALLET_ORIGIN"));
+
+  if (!currentChoice || (currentChoice !== "generated_evm" && currentChoice !== "generated_ton")) {
+    return [
+      `I can only auto-export a ${requestedLabel} login wallet if I generated that dedicated wallet locally on this device.`,
+      "If you connected an existing wallet manually, keep using your own wallet backup / export flow there instead.",
+    ].join(" ");
+  }
+
+  const currentLabel = currentChoice === "generated_ton" ? "TON" : "EVM";
+  return `I only have a generated ${currentLabel} login wallet available to export on this device right now.`;
+}
+
+function buildWalletExportSuccessPrompt(session: TransferSession, exported: LoginWalletExportResult): string {
+  const walletLabel = exported.walletType === "ton" ? "TON" : "EVM";
+  return [
+    `I wrote your dedicated ${walletLabel} login wallet to a local file: ${exported.filePath}`,
+    exported.address ? `Wallet address: ${exported.address}.` : undefined,
+    exported.walletType === "ton" && exported.walletVersion ? `Wallet version: ${exported.walletVersion}.` : undefined,
+    exported.includesMnemonic ? "The file includes both the private key material and the TON mnemonic for this generated wallet." : "The file contains the login wallet secret material in plain text.",
+    "Treat that file like a wallet backup: move it into secure storage, then delete the local copy when you no longer need it.",
+    "This exports the local login wallet only. It is not the separate UNIGOX-exported EVM signing key used for secure actions.",
+    !session.auth.evmSigningKeyAvailable
+      ? "Next: I still need the separate UNIGOX-exported EVM signing key from your account settings before I can complete secure send-money actions."
+      : undefined,
   ].filter(Boolean).join(" ");
 }
 
@@ -2642,6 +2786,42 @@ async function startTonConnectLoginFlow(
       message: prompt,
     }]);
   }
+}
+
+async function maybeHandleGeneratedWalletExportTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps,
+): Promise<TransferFlowResult | undefined> {
+  const exportIntent = parseWalletExportIntent(turn.text);
+  if (!exportIntent) return undefined;
+
+  const exportable = resolveStoredGeneratedWalletExport(session, exportIntent.walletType);
+  if (!exportable) {
+    return reply(withUpdate(session, deps), buildWalletExportUnavailablePrompt(session, exportIntent.walletType));
+  }
+
+  if (!deps.exportLoginWalletFile) {
+    return reply(
+      withUpdate(session, deps),
+      "This runtime can keep using the generated login wallet locally, but it cannot write an export file yet.",
+    );
+  }
+
+  const exported = await deps.exportLoginWalletFile(exportable);
+  const prompt = buildWalletExportSuccessPrompt(session, exported);
+  return reply(withUpdate(session, deps), prompt, undefined, [{
+    type: "wallet_exported",
+    message: prompt,
+    data: {
+      filePath: exported.filePath,
+      walletType: exported.walletType,
+      origin: exported.origin,
+      address: exported.address,
+      walletVersion: exported.walletVersion,
+      includesMnemonic: exported.includesMnemonic === true,
+    },
+  }]);
 }
 
 function buildTonConnectVerificationClient(deps: TransferFlowDeps): UnigoxClient {
@@ -2983,6 +3163,9 @@ async function finalizeGeneratedTonWalletSetup(
     }
 
     await deps.persistTonPrivateKey?.(generated.privateKey);
+    if (generated.mnemonic) {
+      await deps.persistTonMnemonic?.(generated.mnemonic);
+    }
     await deps.persistTonAddress?.(generated.address);
     await deps.persistTonWalletVersion?.(session.auth.tonWalletVersion || generated.walletVersion);
     await deps.persistAuthChoice?.("generated_ton");
@@ -6674,6 +6857,9 @@ export async function advanceTransferFlow(
   }
 
   await maybeRefreshStoredAuthState(session, deps);
+
+  const generatedWalletExportReply = await maybeHandleGeneratedWalletExportTurn(session, normalizedTurn, deps);
+  if (generatedWalletExportReply) return generatedWalletExportReply;
 
   if (!handledSavedRecipientDecision) {
     const outstandingReminderReply = await maybeHandleOutstandingTradeReminderTurn(session, normalizedTurn, deps);

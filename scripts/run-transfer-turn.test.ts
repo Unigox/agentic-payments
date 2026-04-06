@@ -460,3 +460,49 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
   assert.match(envBody, /UNIGOX_LOGIN_WALLET_ORIGIN=ton/);
 });
+
+test("runner writes a generated TON wallet export file when asked", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-export-"));
+  const exportDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-export-"));
+  const mnemonic = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
+
+  await withEnv(
+    {
+      SEND_MONEY_EXPORT_DIR: exportDir,
+      UNIGOX_LOGIN_WALLET_ORIGIN: "generated_ton",
+      UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
+      UNIGOX_TON_MNEMONIC: mnemonic,
+      UNIGOX_TON_ADDRESS: "0:9d7ff9b839333a63db09a70cd19ed3c277f6889f3108cce528a628306ae8c737",
+      UNIGOX_TON_WALLET_VERSION: "v4",
+      UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+      UNIGOX_PRIVATE_KEY: undefined,
+    },
+    async () => {
+      const result = await runTransferTurn({
+        text: "export this wallet",
+        sessionKey: "telegram:export",
+        stateDir,
+        deps: {
+          authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+          client: {} as any,
+        },
+      });
+
+      assert.match(result.reply, /dedicated TON login wallet/i);
+      assert.match(result.reply, /local file:/i);
+
+      const files = fs.readdirSync(exportDir);
+      assert.equal(files.length, 1);
+      const exportPath = path.join(exportDir, files[0]);
+      assert.match(result.reply, new RegExp(exportPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+      const parsed = JSON.parse(fs.readFileSync(exportPath, "utf-8"));
+      assert.equal(parsed.wallet_type, "ton");
+      assert.equal(parsed.origin, "generated_ton");
+      assert.equal(parsed.private_key, VALID_TON_PRIVATE_KEY);
+      assert.equal(parsed.mnemonic, mnemonic);
+      assert.equal(parsed.address, "0:9d7ff9b839333a63db09a70cd19ed3c277f6889f3108cce528a628306ae8c737");
+      assert.equal(parsed.wallet_version, "v4");
+    }
+  );
+});

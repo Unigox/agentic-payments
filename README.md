@@ -49,6 +49,7 @@ There are now two expert paths and two beginner-friendly generated paths. Email 
 
 - **EVM login key** — the private key for the wallet you already use to sign in on UNIGOX. Do not ask for it until the user confirms they have already signed in on unigox.com with that wallet.
 - **Generated EVM login wallet** — the skill can create a dedicated local EVM login wallet with cryptographic randomness and persist it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY` so the user never has to paste the login key manually. Email OTP is optional, not required, for this path.
+- **Generated-wallet export** — if the skill created the dedicated EVM or TON login wallet locally, the user can later say `export this wallet` and the runner will write a local wallet-backup file for the owner instead of dumping the secret back into chat. By default that file lands in `~/Downloads/Agentic Payments/` when available, or falls back to the local workflow export directory. This export is only for the locally generated login wallet, not the separate UNIGOX-exported signing key.
 - **UNIGOX-exported EVM signing key** — a separate internal wallet key exported from unigox.com settings. This is the key the skill needs for signed actions like receipt confirmation / escrow release, escrow withdrawals, and bridge-outs. Save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (`UNIGOX_PRIVATE_KEY` still works as a legacy alias).
 - **Before requesting either EVM key, show a hard warning**: 🚨 use a **NEWLY CREATED / ISOLATED wallet only** for UNIGOX / agent use, and **never** the user's main wallet.
 - **After a user pastes either EVM key, the safest flow is required**: try to delete the key-containing message if the runtime/channel supports it; otherwise stop and tell the user to delete that message themselves before continuing.
@@ -56,6 +57,7 @@ There are now two expert paths and two beginner-friendly generated paths. Email 
   - **agent-side derivation**: the user gives the exact raw TON address plus either the wallet mnemonic phrase or the TON private key / secret key for that same wallet. The agent treats the raw address as the source of truth, tries the supported TON wallet versions until one matches that exact address, and stores the matched derivation as `UNIGOX_TON_WALLET_VERSION` for later runs.
   - **fresh TonConnect link / QR**: the agent creates a fresh live TonConnect deep link that the user opens in the wallet. If needed, the user can scan a QR generated from that exact live link on another device. Old screenshots of earlier QR codes are not reusable login credentials.
 - **Generated TON login wallet** — the skill can create a dedicated TON wallet locally with cryptographic randomness and persist `UNIGOX_TON_PRIVATE_KEY`, `UNIGOX_TON_ADDRESS`, and `UNIGOX_TON_WALLET_VERSION` so the user does not have to paste TON login secrets manually. Email OTP is optional, not required, for this path.
+- **Generated TON portability** — generated TON wallet exports include the stored key material and, when available, the generated mnemonic plus the matched wallet version so the owner can keep using that wallet elsewhere.
 - **Browser login helper from a fresh `tc://` link or fresh QR screenshot** — if the user is already on `unigox.com` and the site is showing a fresh TonConnect login request, the skill can consume either the copyable `tc://...` link or a fresh local QR screenshot, then approve that live browser-login request locally with the stored TON key for the exact wallet. This is meant to help the user finish the UNIGOX website login so they can reach settings and export the separate signing key. The screenshot path only works when the adapter/runtime can supply a local image path to the runner.
 - **Agent email** — useful for onboarding and recovery when neither wallet path is ready yet. You can later link either an EVM wallet or a TON wallet.
 - When the only remaining blocker is the exported UNIGOX signing key, explain the practical browser-login paths the user can use to get into unigox.com settings and export it: scan a fresh UNIGOX TonConnect QR in the wallet, copy the fresh `tc://` TonConnect link into the wallet if the site shows that instead of a QR, or log in on unigox.com directly from the user's mobile or desktop wallet. If the skill generated the TON wallet locally, change that guidance: the user should send the fresh QR or `tc://` link back to the agent, and the agent should approve the browser login locally with the stored TON key instead of telling the user to scan it in another wallet app.
@@ -105,6 +107,7 @@ The engine remains responsible for:
 - KYC
 - payout detail collection
 - settlement state
+- generated-wallet export to a local file
 
 The adapter remains responsible for:
 - tool transport
@@ -122,6 +125,7 @@ The shared runner should remain the authority for:
 - whether the current transfer already requires KYC
 - whether voluntary early KYC can start now
 - the live verification link / next KYC step
+- generated-wallet export requests like `export this wallet`
 
 ## Cross-Platform Compatibility Contract
 
@@ -227,6 +231,7 @@ Claude-facing tool split:
 - `start_send_money`: start or continue a transfer flow
 - `sign_in_unigox`: auth setup, wallet connection, TonConnect approval, signing-key setup
 - `create_wallet`: create a dedicated EVM or TON wallet locally
+- `export_wallet`: export a generated EVM or TON login wallet into a local file for the owner
 - `check_kyc`: explain the KYC threshold, start KYC, or repeat the live KYC link
 - `save_payment_details`: save or update recipient payout details for later
 

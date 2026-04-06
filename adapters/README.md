@@ -51,7 +51,7 @@ Everything above is intended to stay local to each tester's machine. This repo d
 
 Anthropic-specific tool split:
 - `send_money_turn` remains the canonical catch-all tool contract
-- Claude Desktop additionally exposes thin entry tools for `start_send_money`, `sign_in_unigox`, `create_wallet`, `check_kyc`, and `save_payment_details`
+- Claude Desktop additionally exposes thin entry tools for `start_send_money`, `sign_in_unigox`, `create_wallet`, `export_wallet`, `check_kyc`, and `save_payment_details`
 - those Anthropic entry tools must stay as wrappers around the same shared runner, not separate payment engines
 
 ## Host integration rule
@@ -94,6 +94,7 @@ Claude trigger rule:
 - the README should always include action-first example prompts such as `I want to send money using Agentic Payments` and `I have the Agentic Payments connector and I want to send money`
 - the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
 - KYC FAQ turns such as `Do I need to do KYC?`, `Can I do KYC earlier?`, `I wanna do KYC on the platform`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
+- generated-wallet backup prompts like `export this wallet` or `backup my generated wallet` should route into the shared runner and write a local file instead of echoing secrets into chat
 
 Codex distribution rule:
 - keep Codex local-first too

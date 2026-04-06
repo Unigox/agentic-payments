@@ -18,6 +18,7 @@ export const SIGN_IN_UNIGOX_TOOL_NAME = "sign_in_unigox";
 export const CREATE_WALLET_TOOL_NAME = "create_wallet";
 export const CHECK_KYC_TOOL_NAME = "check_kyc";
 export const SAVE_PAYMENT_DETAILS_TOOL_NAME = "save_payment_details";
+export const EXPORT_WALLET_TOOL_NAME = "export_wallet";
 
 const sessionKeyShape = z
   .string()
@@ -91,6 +92,16 @@ export const savePaymentDetailsMcpInputShape = {
   reset: resetShape,
 };
 
+export const exportWalletMcpInputShape = {
+  wallet_type: z
+    .enum(["evm", "ton"])
+    .optional()
+    .describe("Optional explicit generated wallet type to export. Omit this to export the currently active generated login wallet."),
+  text: textShape.describe("Optional generated-wallet export instruction. If omitted, a default local wallet-export request is synthesized."),
+  session_key: sessionKeyShape,
+  reset: resetShape,
+};
+
 export interface AnthropicMcpToolDescriptor {
   name: string;
   title: string;
@@ -127,6 +138,11 @@ export const ANTHROPIC_MCP_TOOL_DESCRIPTORS: AnthropicMcpToolDescriptor[] = [
     name: SAVE_PAYMENT_DETAILS_TOOL_NAME,
     title: "Save Payment Details",
     description: "Save or update recipient payout details for later use. Use for adding a recipient, saving payment details, or updating a saved payout route without immediately placing a transfer.",
+  },
+  {
+    name: EXPORT_WALLET_TOOL_NAME,
+    title: "Export Generated Wallet",
+    description: "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'backup my generated wallet', or 'send me the wallet file'.",
   },
 ];
 
@@ -169,6 +185,12 @@ function buildKycFallback(action: "status" | "start" | "link" | undefined): stri
     default:
       return "Do I need to do KYC?";
   }
+}
+
+function buildExportWalletFallback(walletType: "evm" | "ton" | undefined): string {
+  if (walletType === "evm") return "Export my generated EVM wallet";
+  if (walletType === "ton") return "Export my generated TON wallet";
+  return "Export this wallet";
 }
 
 export function formatSendMoneyMcpResult(result: TransferFlowResult): string {
@@ -268,6 +290,20 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
     },
     async (input) => runAndFormat(
       buildBaseToolInput(input, "I want to save a recipient for later."),
+      deps
+    )
+  );
+
+  const exportWalletTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === EXPORT_WALLET_TOOL_NAME)!;
+  server.registerTool(
+    exportWalletTool.name,
+    {
+      title: exportWalletTool.title,
+      description: exportWalletTool.description,
+      inputSchema: exportWalletMcpInputShape,
+    },
+    async (input) => runAndFormat(
+      buildBaseToolInput(input, buildExportWalletFallback(input.wallet_type)),
       deps
     )
   );

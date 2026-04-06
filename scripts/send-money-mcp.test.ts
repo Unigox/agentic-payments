@@ -9,6 +9,7 @@ import {
   ANTHROPIC_MCP_TOOL_DESCRIPTORS,
   createWalletMcpInputShape,
   CHECK_KYC_TOOL_NAME,
+  EXPORT_WALLET_TOOL_NAME,
   SAVE_PAYMENT_DETAILS_TOOL_NAME,
   sendMoneyMcpInputShape,
   signInUnigoxMcpInputShape,
@@ -18,6 +19,7 @@ import {
   SIGN_IN_UNIGOX_TOOL_NAME,
   CREATE_WALLET_TOOL_NAME,
   formatSendMoneyMcpResult,
+  exportWalletMcpInputShape,
   savePaymentDetailsMcpInputShape,
 } from "./send-money-mcp.ts";
 import { SEND_MONEY_TOOL_NAME } from "./send-money-tool.ts";
@@ -41,11 +43,13 @@ test("Anthropic alias tool schemas accept the expected inputs", () => {
   assert.equal(createWalletMcpInputShape.wallet_type.parse("ton"), "ton");
   assert.equal(checkKycMcpInputShape.action.parse("link"), "link");
   assert.equal(savePaymentDetailsMcpInputShape.text.parse("Save Aleksandr for later").trim(), "Save Aleksandr for later");
+  assert.equal(exportWalletMcpInputShape.wallet_type.parse("evm"), "evm");
   assert.equal(START_SEND_MONEY_TOOL_NAME, "start_send_money");
   assert.equal(SIGN_IN_UNIGOX_TOOL_NAME, "sign_in_unigox");
   assert.equal(CREATE_WALLET_TOOL_NAME, "create_wallet");
   assert.equal(CHECK_KYC_TOOL_NAME, "check_kyc");
   assert.equal(SAVE_PAYMENT_DETAILS_TOOL_NAME, "save_payment_details");
+  assert.equal(EXPORT_WALLET_TOOL_NAME, "export_wallet");
 });
 
 test("send_money MCP result formatter includes quick-reply options when available", () => {

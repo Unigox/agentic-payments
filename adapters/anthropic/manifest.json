@@ -3,9 +3,9 @@
   "manifest_version": "0.3",
   "name": "agentic-payments-local",
   "display_name": "Agentic Payments",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Local Agentic Payments / UNIGOX send-money connector for Claude Desktop.",
-  "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same shared runner used by the other runtime adapters. The Claude extension now exposes multiple entry tools for clearer routing: start a payment, sign in, create a wallet, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. These tools all dispatch into the same underlying state machine instead of forking payment logic.",
+  "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same shared runner used by the other runtime adapters. The Claude extension now exposes multiple entry tools for clearer routing: start a payment, sign in, create a wallet, export a generated wallet backup, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. These tools all dispatch into the same underlying state machine instead of forking payment logic.",
   "author": {
     "name": "UNIGOX",
     "email": "hello@unigox.com",
@@ -53,6 +53,10 @@
     {
       "name": "save_payment_details",
       "description": "Save or update recipient payout details for later use without immediately placing a transfer."
+    },
+    {
+      "name": "export_wallet",
+      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere."
     }
   ],
   "keywords": [

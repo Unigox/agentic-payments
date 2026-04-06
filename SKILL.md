@@ -41,6 +41,8 @@ If the user says anything equivalent to:
   - `Give me the KYC link`
   - `Do I need to do KYC?`
   - `Can I do KYC earlier?`
+  - `export this wallet`
+  - `backup my generated wallet`
   - `Tallinn`
   - `13511`
   - `Oismae tee 140`
@@ -118,12 +120,13 @@ The onboarding flow:
 11. When asking the user to fetch that signing key from unigox.com, explain the practical browser-login paths too: they can scan a fresh UNIGOX TonConnect QR in the wallet, paste a fresh `tc://` TonConnect link here, send a fresh local screenshot of the visible UNIGOX TonConnect QR when the runtime can pass an image path to the runner, or log in to unigox.com directly from their mobile or desktop wallet. Exception: if the skill generated the TON wallet locally, do not tell the user to scan that QR in a separate wallet app. Tell them to send the fresh QR or `tc://` link back to the agent so the agent can approve the browser login with the stored TON key on this machine.
 12. If the user cannot find the export option in UNIGOX settings, explain that this is a beta feature, their account likely still needs agentic-payments access enabled, and tell them to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it
 13. If the user chooses a generated wallet path directly, create the dedicated EVM or TON login wallet locally with cryptographic randomness, persist it on the machine, verify that login works, and explain that the user no longer needs to paste the login key for that wallet manually
-14. If the user later reaches the email OTP recovery branch and then chooses a generated wallet path, create and link the dedicated EVM or TON login wallet from that authenticated email session, persist it on the machine, and explain that the user no longer needs to paste the login key for that wallet manually
-15. If the user chooses to stay on email OTP for now, explain that future re-auth may still need another OTP and then continue toward the exported signing-key explanation
-16. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — direct EVM, direct TON, generated EVM, generated TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
-16. For TON, collect the raw TON address first and confirm that it is the correct wallet address/version the user used on UNIGOX
-17. After the address is confirmed, offer three first-class TON login paths for that exact wallet: send the mnemonic phrase, send the TON private key / secret key, or request a fresh TonConnect QR / deep link
-18. For mnemonic/private-key flows, apply the same secret-cleanup rule, derive the supported TON wallet versions locally, ensure one of them matches the exact confirmed raw TON address, and persist the matched version locally as `UNIGOX_TON_WALLET_VERSION`
+14. If the skill created the login wallet locally and the user later says `export this wallet`, write a local wallet-backup file for the owner instead of echoing the secret back into chat. This export is for the generated login wallet only, not the separate UNIGOX-exported signing key
+15. If the user later reaches the email OTP recovery branch and then chooses a generated wallet path, create and link the dedicated EVM or TON login wallet from that authenticated email session, persist it on the machine, and explain that the user no longer needs to paste the login key for that wallet manually
+16. If the user chooses to stay on email OTP for now, explain that future re-auth may still need another OTP and then continue toward the exported signing-key explanation
+17. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — direct EVM, direct TON, generated EVM, generated TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
+18. For TON, collect the raw TON address first and confirm that it is the correct wallet address/version the user used on UNIGOX
+19. After the address is confirmed, offer three first-class TON login paths for that exact wallet: send the mnemonic phrase, send the TON private key / secret key, or request a fresh TonConnect QR / deep link
+20. For mnemonic/private-key flows, apply the same secret-cleanup rule, derive the supported TON wallet versions locally, ensure one of them matches the exact confirmed raw TON address, and persist the matched version locally as `UNIGOX_TON_WALLET_VERSION`
 19. For TonConnect, generate a fresh live deep link, accept the login only if the connected wallet comes back as the exact confirmed address, and explain that old QR screenshots are not reusable login credentials
 20. If the user is already on `unigox.com` and shares a fresh TonConnect browser-login request from the website while the missing exported signing key is the blocker, use the stored TON key to approve that live browser-login request locally so the UNIGOX page can finish logging in and the user can reach settings to export the signing key. Accept either a fresh pasted `tc://` link or, when the runtime can pass a local image path, a fresh screenshot of the visible TonConnect QR
 21. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   advanceTransferFlow,
+  type LoginWalletExportRequest,
   loadUnigoxConfigFromEnv,
   startTransferFlow,
   type TransferFlowDeps,
@@ -25,6 +26,7 @@ const SKILL_DIR = path.join(__dirname, "..");
 const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
 const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconnect");
 const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
+const DEFAULT_EXPORT_DIR = path.join(SKILL_DIR, "workflows", "exports");
 
 export interface TransferRunnerOptions {
   text?: string;
@@ -121,6 +123,22 @@ function resolveEnvFilePath(): string {
   return process.env.SEND_MONEY_ENV_PATH || DEFAULT_ENV_PATH;
 }
 
+function resolveWalletExportDir(): string {
+  const configured = process.env.SEND_MONEY_EXPORT_DIR?.trim();
+  if (configured) return configured;
+
+  const downloadsDir = path.join(osHomedir(), "Downloads");
+  if (fs.existsSync(downloadsDir) && fs.statSync(downloadsDir).isDirectory()) {
+    return path.join(downloadsDir, "Agentic Payments");
+  }
+
+  return DEFAULT_EXPORT_DIR;
+}
+
+function osHomedir(): string {
+  return process.env.HOME || process.env.USERPROFILE || SKILL_DIR;
+}
+
 function upsertEnvAssignments(filePath: string, assignments: Record<string, string>): void {
   const nextKeys = new Set(Object.keys(assignments));
   const existingLines = fs.existsSync(filePath)
@@ -147,6 +165,67 @@ function upsertEnvAssignments(filePath: string, assignments: Record<string, stri
   }
 }
 
+function formatExportTimestamp(date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getUTCFullYear(),
+    pad(date.getUTCMonth() + 1),
+    pad(date.getUTCDate()),
+    "T",
+    pad(date.getUTCHours()),
+    pad(date.getUTCMinutes()),
+    pad(date.getUTCSeconds()),
+    "Z",
+  ].join("");
+}
+
+function writeLoginWalletExportFile(dirPath: string, wallet: LoginWalletExportRequest) {
+  const timestamp = formatExportTimestamp();
+  const fileName = wallet.walletType === "ton"
+    ? `agentic-payments-generated-ton-wallet-${timestamp}.json`
+    : `agentic-payments-generated-evm-wallet-${timestamp}.json`;
+  const filePath = path.join(dirPath, fileName);
+  const body = {
+    type: "agentic_payments_login_wallet_export",
+    exported_at: new Date().toISOString(),
+    wallet_type: wallet.walletType,
+    origin: wallet.origin,
+    username: wallet.username,
+    address: wallet.address,
+    wallet_version: wallet.walletVersion,
+    private_key: wallet.privateKey,
+    mnemonic: wallet.mnemonic,
+    notes: [
+      "This file contains plain-text secret material for the locally generated UNIGOX login wallet.",
+      "This is not the separate UNIGOX-exported EVM signing key used for secure send-money actions.",
+      "Move this file into secure storage, then delete the local copy when you no longer need it.",
+    ],
+  };
+
+  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dirPath, 0o700);
+  } catch {
+    // Best effort across platforms.
+  }
+
+  fs.writeFileSync(filePath, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // Best effort across platforms.
+  }
+
+  return {
+    walletType: wallet.walletType,
+    origin: wallet.origin,
+    filePath,
+    address: wallet.address,
+    walletVersion: wallet.walletVersion,
+    includesMnemonic: Boolean(wallet.mnemonic),
+  };
+}
+
 function resolveFrontendUrl(): string | undefined {
   return process.env.UNIGOX_FRONTEND_URL || process.env.NEXT_PUBLIC_UNIGOX_FRONTEND_URL;
 }
@@ -168,6 +247,7 @@ function buildTonConnectClient(): UnigoxClient {
 function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
   const envPath = resolveEnvFilePath();
   const frontendUrl = resolveFrontendUrl();
+  const exportDir = resolveWalletExportDir();
   return {
     persistEmailAddress: async (emailAddress) => {
       upsertEnvAssignments(envPath, {
@@ -184,6 +264,7 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
         UNIGOX_LOGIN_WALLET_ORIGIN: choice,
       });
     },
+    exportLoginWalletFile: async (wallet) => writeLoginWalletExportFile(exportDir, wallet),
     persistEvmSigningKey: async (signingKey) => {
       upsertEnvAssignments(envPath, {
         UNIGOX_EVM_SIGNING_PRIVATE_KEY: signingKey,
