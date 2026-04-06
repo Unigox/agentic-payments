@@ -222,6 +222,16 @@ Key files:
 
 The wrapper keeps dependency bootstrap local to the machine running the skill. Wallet secrets, `.env`, and transfer session state stay on that same device.
 
+Claude-facing tool split:
+- `send_money_turn`: canonical catch-all turn runner
+- `start_send_money`: start or continue a transfer flow
+- `sign_in_unigox`: auth setup, wallet connection, TonConnect approval, signing-key setup
+- `create_wallet`: create a dedicated EVM or TON wallet locally
+- `check_kyc`: explain the KYC threshold, start KYC, or repeat the live KYC link
+- `save_payment_details`: save or update recipient payout details for later
+
+All of those Anthropic tools still dispatch into the same shared runner and state machine. They are a routing/discoverability layer, not separate payment implementations.
+
 ### Claude Desktop install
 
 The preferred Anthropic install path is a committed local desktop bundle in this repo:

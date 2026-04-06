@@ -49,6 +49,11 @@ Each adapter decides how to render them:
 
 Everything above is intended to stay local to each tester's machine. This repo does not assume a shared hosted MCP layer.
 
+Anthropic-specific tool split:
+- `send_money_turn` remains the canonical catch-all tool contract
+- Claude Desktop additionally exposes thin entry tools for `start_send_money`, `sign_in_unigox`, `create_wallet`, `check_kyc`, and `save_payment_details`
+- those Anthropic entry tools must stay as wrappers around the same shared runner, not separate payment engines
+
 ## Host integration rule
 
 Do not fork transfer logic per provider runtime.

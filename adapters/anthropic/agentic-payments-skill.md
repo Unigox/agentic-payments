@@ -1,6 +1,6 @@
 ---
 name: agentic-payments
-description: Use when the user wants to send money with UNIGOX or Agentic Payments, or mentions the local Agentic Payments connector/extension/plugin by name. If the local Agentic Payments extension is installed and the send_money_turn tool is available, call it immediately for natural requests like "I want to send money", "use Agentic Payments", or "I have the Agentic Payments connector" instead of falling back to generic connector search or a blanket payment refusal.
+description: Use when the user wants to send money with UNIGOX or Agentic Payments, or mentions the local Agentic Payments connector/extension/plugin by name. If the local Agentic Payments extension is installed and its local tools are available, route into the best matching tool immediately instead of falling back to generic connector search or a blanket payment refusal.
 ---
 
 # Agentic Payments Skill
@@ -9,9 +9,16 @@ Use this skill when the user wants to send money with UNIGOX or Agentic Payments
 
 ## Routing rule
 
-If the local `Agentic Payments` extension is installed and the `send_money_turn` tool is available:
+If the local `Agentic Payments` extension is installed and its local tools are available:
 
-- call `send_money_turn` immediately for natural requests like:
+- prefer the narrowest matching tool first:
+  - `start_send_money` for new transfer requests and normal send-money continuation
+  - `sign_in_unigox` for auth setup, wallet connection, TonConnect login approval, and signing-key setup
+  - `create_wallet` for dedicated EVM or TON wallet creation
+  - `check_kyc` for KYC threshold questions, early KYC questions, or live KYC-link requests
+  - `save_payment_details` for saving or updating recipient payout details for later
+  - `send_money_turn` as the canonical catch-all when more than one area is involved
+- call the matching tool immediately for natural requests like:
   - `I want to send money`
   - `I want to send money using Agentic Payments`
   - `use Agentic Payments`
@@ -19,6 +26,10 @@ If the local `Agentic Payments` extension is installed and the `send_money_turn`
   - `I have the Agentic Payments extension`
   - `send money to Aleksandr`
   - `continue my UNIGOX payment`
+  - `Do I need to do KYC?`
+  - `Can I do KYC earlier?`
+  - `Create a dedicated TON wallet`
+  - `Help me sign in to UNIGOX`
 - if the user mentions `Agentic Payments` and a local connector/extension/plugin is available, do not search the public registry first
 - do **not** answer with a generic connector search
 - do **not** answer with a blanket payment refusal
