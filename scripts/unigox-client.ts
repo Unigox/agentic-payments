@@ -112,7 +112,16 @@ export type AuthMode = "auto" | "evm" | "ton" | "email";
 type ResolvedAuthMode = Exclude<AuthMode, "auto">;
 
 export function getUnigoxWalletConnectionPrompt(): string {
-  return "Which UNIGOX sign-in path should I set up: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device? The dedicated-wallet paths generate a new isolated login wallet locally on this machine and do not require email OTP. If neither wallet path is ready yet, we can still use email OTP for onboarding or recovery.";
+  return [
+    "Which UNIGOX sign-in path should I set up?",
+    "1. EVM wallet connection",
+    "2. TON wallet connection",
+    "3. Create a dedicated EVM wallet on this device",
+    "4. Create a dedicated TON wallet on this device",
+    "5. Email OTP",
+    "The dedicated-wallet paths generate a new isolated login wallet locally on this machine and do not require email OTP first.",
+    "Email OTP is still available for onboarding or recovery if you want to use it.",
+  ].join(" ");
 }
 
 export function generateDedicatedEvmLoginWallet(): { address: string; privateKey: string } {

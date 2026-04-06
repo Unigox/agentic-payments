@@ -3338,6 +3338,7 @@ test("stored auth added after a session starts still skips onboarding on the nex
 
   assert.equal(res.session.stage, "awaiting_auth_choice");
   assert.match(res.reply, /Which UNIGOX sign-in path should I set up/i);
+  assert.match(res.reply, /5\.\s*Email OTP/i);
 
   res = await withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
