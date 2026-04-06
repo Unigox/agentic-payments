@@ -73,6 +73,7 @@ Anthropic distribution rule:
 - keep Anthropic local-first
 - prefer a drag-and-drop Claude Desktop `.mcpb` bundle built from this repo over asking end users to wire MCP manually
 - do not introduce a separate Anthropic-only flow engine
+- keep the Anthropic tool and extension descriptions explicit enough that Claude routes natural send-money requests into `send_money_turn` instead of generic connector search or a blanket financial-safety refusal when the local tool is available
 
 Current Anthropic bundle path:
 - `adapters/anthropic/installed.mcpb`
