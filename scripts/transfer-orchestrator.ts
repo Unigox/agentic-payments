@@ -3165,6 +3165,33 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_email_address") {
     session.status = "blocked";
+    if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
+      session.auth.choice = hintedChoice;
+      return hintedChoice === "generated_evm"
+        ? finalizeGeneratedEvmWalletSetup(session, deps)
+        : finalizeGeneratedTonWalletSetup(session, deps);
+    }
+    if (hintedChoice === "evm") {
+      session.auth.choice = "evm";
+      session.stage = "awaiting_evm_wallet_signin";
+      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
+      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (hintedChoice === "ton") {
+      session.auth.choice = "ton";
+      const storedTonAddress = getStoredTonAddress(deps);
+      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
+      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
+      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
     const emailAddress = parseEmailAddress(responseText) || session.auth.emailAddress || getStoredEmailAddress(deps);
     if (!emailAddress) {
       const prompt = buildEmailAddressPrompt();
@@ -3178,6 +3205,33 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_email_otp") {
     session.status = "blocked";
+    if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
+      session.auth.choice = hintedChoice;
+      return hintedChoice === "generated_evm"
+        ? finalizeGeneratedEvmWalletSetup(session, deps)
+        : finalizeGeneratedTonWalletSetup(session, deps);
+    }
+    if (hintedChoice === "evm") {
+      session.auth.choice = "evm";
+      session.stage = "awaiting_evm_wallet_signin";
+      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
+      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (hintedChoice === "ton") {
+      session.auth.choice = "ton";
+      const storedTonAddress = getStoredTonAddress(deps);
+      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
+      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
+      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
     const emailAddress = session.auth.emailAddress || getStoredEmailAddress(deps);
     if (!emailAddress) {
       session.stage = "awaiting_email_address";

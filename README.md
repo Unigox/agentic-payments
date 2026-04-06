@@ -215,6 +215,7 @@ The wrapper keeps dependency bootstrap local to the machine running the skill. W
 The preferred Anthropic install path is a committed local desktop bundle in this repo:
 
 - `adapters/anthropic/installed.mcpb`
+- `adapters/anthropic/agentic-payments-skill.md` (optional but recommended companion Claude Skill for more reliable natural-language routing)
 
 On macOS, after cloning or downloading the repo, install it with:
 
@@ -285,3 +286,10 @@ Reach out at **hello@unigox.com** to learn more.
 ## License
 
 MIT
+### Claude routing note
+
+Claude Desktop can still be conservative about natural finance prompts even when the local extension is healthy. If you want prompts like `I want to send money using Agentic Payments` to route more reliably without explicitly naming the tool, also upload the companion Claude Skill from:
+
+- `adapters/anthropic/agentic-payments-skill.md`
+
+That skill does not add a second flow engine. It only tells Claude when to call the same local `send_money_turn` tool that the extension already provides.

@@ -77,6 +77,8 @@ Anthropic distribution rule:
 
 Current Anthropic bundle path:
 - `adapters/anthropic/installed.mcpb`
+- optional companion Claude Skill for routing:
+  - `adapters/anthropic/agentic-payments-skill.md`
 
 Rebuild command:
 - `npm run build:anthropic-bundle --prefix scripts`

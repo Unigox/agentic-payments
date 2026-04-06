@@ -3592,6 +3592,45 @@ test("generated TON wallet choice creates the wallet directly without asking for
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
 });
 
+test("generated TON wallet choice overrides a stale email-address step instead of asking for email again", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "tonstarter" });
+  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    generateDedicatedTonWallet: async () => ({
+      address: "0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      privateKey: VALID_TON_PRIVATE_KEY,
+      walletVersion: "v4",
+    }),
+    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      persisted.tonPrivateKey.push(tonPrivateKey);
+    },
+    persistTonAddress: async (tonAddress) => {
+      persisted.tonAddress.push(tonAddress);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
+    },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "email OTP", deps);
+  assert.equal(res.session.stage, "awaiting_email_address");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet on this device", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "ton");
+  assert.equal(res.session.auth.choice, "generated_ton");
+  assert.doesNotMatch(res.reply, /What email address should I use/i);
+  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
+  assert.deepEqual(persisted.tonAddress, ["0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+});
+
 test("email OTP can still generate and link a dedicated TON wallet locally after OTP verification", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
