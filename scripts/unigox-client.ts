@@ -112,7 +112,38 @@ export type AuthMode = "auto" | "evm" | "ton" | "email";
 type ResolvedAuthMode = Exclude<AuthMode, "auto">;
 
 export function getUnigoxWalletConnectionPrompt(): string {
-  return "Which UNIGOX sign-in path should I set up: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device? If neither wallet path is ready yet, we can still use email OTP for onboarding or recovery.";
+  return "Which UNIGOX sign-in path should I set up: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device? The dedicated-wallet paths generate a new isolated login wallet locally on this machine and do not require email OTP. If neither wallet path is ready yet, we can still use email OTP for onboarding or recovery.";
+}
+
+export function generateDedicatedEvmLoginWallet(): { address: string; privateKey: string } {
+  const wallet = Wallet.createRandom();
+  return {
+    address: wallet.address,
+    privateKey: wallet.privateKey,
+  };
+}
+
+export async function generateDedicatedTonLoginWallet(
+  preferredVersion?: TonWalletVersion
+): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }> {
+  const mnemonicWords = await mnemonicNew(24);
+  const keyPair = await mnemonicToWalletKey(mnemonicWords);
+  const { matched, candidates } = resolveTonWalletCandidate({
+    publicKey: keyPair.publicKey,
+    workchain: 0,
+    preferredVersion,
+  });
+
+  if (!matched) {
+    const candidateSummary = candidates.map((candidate) => `${candidate.version}:${candidate.address}`).join(", ");
+    throw new Error(`Generated TON wallet derivation failed. Tried: ${candidateSummary || "none"}.`);
+  }
+
+  return {
+    address: matched.address,
+    privateKey: Buffer.from(keyPair.secretKey).toString("hex"),
+    walletVersion: matched.version,
+  };
 }
 
 export interface UnigoxClientConfig {

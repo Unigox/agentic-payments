@@ -7,6 +7,8 @@ import { Address } from "@ton/ton";
 import { Wallet } from "ethers";
 
 import UnigoxClient, {
+  generateDedicatedEvmLoginWallet,
+  generateDedicatedTonLoginWallet,
   getPaymentMethodsForCurrency as defaultGetPaymentMethodsForCurrency,
   getPaymentMethodFieldConfig as defaultGetPaymentMethodFieldConfig,
   parseTonPrivateKeyInput,
@@ -254,6 +256,8 @@ export interface TransferFlowDeps {
     tonProofPayload?: string;
   }>;
   decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
+  generateDedicatedEvmWallet?: () => Promise<{ address: string; privateKey: string }>;
+  generateDedicatedTonWallet?: () => Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }>;
   persistEmailAddress?: (emailAddress: string) => Promise<void> | void;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
@@ -2120,8 +2124,7 @@ function buildGeneratedWalletFailurePrompt(kind: "generated_evm" | "generated_to
 
 function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): string {
   return [
-    "Email OTP works.",
-    "I generated and linked a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
+    "I generated a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
     buildEvmSigningKeyPrompt(username),
   ].filter(Boolean).join(" ");
@@ -2129,8 +2132,7 @@ function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): strin
 
 function buildGeneratedTonWalletReadyPrompt(username: string | undefined): string {
   return [
-    "Email OTP works.",
-    "I generated and linked a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
+    "I generated a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
     buildEvmSigningKeyPrompt(username),
   ].filter(Boolean).join(" ");
@@ -2726,29 +2728,33 @@ async function finalizeTonPrivateKey(
 async function finalizeGeneratedEvmWalletSetup(
   session: TransferSession,
   deps: TransferFlowDeps,
-  client: TransferExecutionClient
+  client?: TransferExecutionClient
 ): Promise<TransferFlowResult> {
-  if (!client.generateAndLinkWallet) {
-    session.stage = "awaiting_wallet_setup_choice";
-    session.status = "blocked";
-    const prompt = buildGeneratedWalletFailurePrompt("generated_evm", "This runtime cannot generate EVM wallets automatically yet.");
-    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
+  const canLinkAfterEmail = Boolean(
+    client?.generateAndLinkWallet && (session.auth.emailAuthToken || session.auth.sessionToken || session.auth.mode === "email")
+  );
 
   try {
-    const generated = await client.generateAndLinkWallet();
+    const generated = canLinkAfterEmail
+      ? await client!.generateAndLinkWallet!()
+      : await (deps.generateDedicatedEvmWallet?.() ?? Promise.resolve(generateDedicatedEvmLoginWallet()));
+
+    if (!canLinkAfterEmail) {
+      const verification = await verifyEvmLoginKeyInput(generated.privateKey, deps);
+      if (!verification.success) {
+        throw new Error(verification.message || "Generated EVM wallet login could not be verified.");
+      }
+      session.auth.username = verification.username || session.auth.username;
+    }
+
     await deps.persistEvmLoginKey?.(generated.privateKey);
 
     session.auth.available = true;
     session.auth.mode = "evm";
     session.auth.choice = "generated_evm";
+    session.auth.checked = true;
     session.auth.evmSigningKeyAvailable = false;
-    if (!session.auth.username) {
-      await maybeHydrateAuthIdentity(session, { ...deps, client }, client);
-    }
+    await maybeHydrateStartupAuthStatus(session, deps, canLinkAfterEmail ? client : undefined);
 
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
@@ -2762,12 +2768,12 @@ async function finalizeGeneratedEvmWalletSetup(
 
     session.status = "active";
     session.stage = "resolving";
-    return advanceTransferFlow(session, { text: "" }, { ...deps, client });
+    return advanceTransferFlow(session, { text: "" }, canLinkAfterEmail ? { ...deps, client } : deps);
   } catch (error) {
-    session.stage = "awaiting_wallet_setup_choice";
+    session.stage = canLinkAfterEmail ? "awaiting_wallet_setup_choice" : "awaiting_auth_choice";
     session.status = "blocked";
     const prompt = buildGeneratedWalletFailurePrompt("generated_evm", error instanceof Error ? error.message : String(error));
-    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+    return reply(withUpdate(session, deps), prompt, canLinkAfterEmail ? [...POST_EMAIL_WALLET_SETUP_OPTIONS] : [...AUTH_CHOICE_OPTIONS], [{
       type: "blocked_missing_auth",
       message: prompt,
     }]);
@@ -2777,33 +2783,39 @@ async function finalizeGeneratedEvmWalletSetup(
 async function finalizeGeneratedTonWalletSetup(
   session: TransferSession,
   deps: TransferFlowDeps,
-  client: TransferExecutionClient
+  client?: TransferExecutionClient
 ): Promise<TransferFlowResult> {
-  if (!client.generateAndLinkTonWallet) {
-    session.stage = "awaiting_wallet_setup_choice";
-    session.status = "blocked";
-    const prompt = buildGeneratedWalletFailurePrompt("generated_ton", "This runtime cannot generate TON wallets automatically yet.");
-    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
+  const canLinkAfterEmail = Boolean(
+    client?.generateAndLinkTonWallet && (session.auth.emailAuthToken || session.auth.sessionToken || session.auth.mode === "email")
+  );
 
   try {
-    const generated = await client.generateAndLinkTonWallet();
+    const generated = canLinkAfterEmail
+      ? await client!.generateAndLinkTonWallet!()
+      : await (deps.generateDedicatedTonWallet?.() ?? generateDedicatedTonLoginWallet(session.auth.tonWalletVersion));
+
+    if (!canLinkAfterEmail) {
+      const verification = await verifyTonLoginInput({ tonPrivateKey: generated.privateKey, tonAddress: generated.address }, deps);
+      if (!verification.success) {
+        throw new Error(verification.message || "Generated TON wallet login could not be verified.");
+      }
+      session.auth.username = verification.username || session.auth.username;
+      session.auth.tonWalletVersion = verification.tonWalletVersion || generated.walletVersion;
+    }
+
     await deps.persistTonPrivateKey?.(generated.privateKey);
     await deps.persistTonAddress?.(generated.address);
-    await deps.persistTonWalletVersion?.(generated.walletVersion);
+    await deps.persistTonWalletVersion?.(session.auth.tonWalletVersion || generated.walletVersion);
 
     session.auth.available = true;
     session.auth.mode = "ton";
     session.auth.choice = "generated_ton";
+    session.auth.checked = true;
     session.auth.tonAddress = generated.address;
     session.auth.tonAddressDisplay = generated.address;
-    session.auth.tonWalletVersion = generated.walletVersion;
-    if (!session.auth.username) {
-      await maybeHydrateAuthIdentity(session, { ...deps, client }, client);
-    }
+    session.auth.tonWalletVersion = session.auth.tonWalletVersion || generated.walletVersion;
+    session.auth.evmSigningKeyAvailable = false;
+    await maybeHydrateStartupAuthStatus(session, deps, canLinkAfterEmail ? client : undefined);
 
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
@@ -2817,12 +2829,12 @@ async function finalizeGeneratedTonWalletSetup(
 
     session.status = "active";
     session.stage = "resolving";
-    return advanceTransferFlow(session, { text: "" }, { ...deps, client });
+    return advanceTransferFlow(session, { text: "" }, canLinkAfterEmail ? { ...deps, client } : deps);
   } catch (error) {
-    session.stage = "awaiting_wallet_setup_choice";
+    session.stage = canLinkAfterEmail ? "awaiting_wallet_setup_choice" : "awaiting_auth_choice";
     session.status = "blocked";
     const prompt = buildGeneratedWalletFailurePrompt("generated_ton", error instanceof Error ? error.message : String(error));
-    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+    return reply(withUpdate(session, deps), prompt, canLinkAfterEmail ? [...POST_EMAIL_WALLET_SETUP_OPTIONS] : [...AUTH_CHOICE_OPTIONS], [{
       type: "blocked_missing_auth",
       message: prompt,
     }]);
@@ -3116,16 +3128,9 @@ async function maybeHandleAuthOnboardingTurn(
       }
 
       if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
-        const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
-        if (storedEmail) {
-          return startEmailOtpFlow(session, deps, storedEmail);
-        }
-        session.stage = "awaiting_email_address";
-        const followUp = buildEmailAddressPrompt();
-        return reply(withUpdate(session, deps), followUp, undefined, [{
-          type: "blocked_missing_auth",
-          message: followUp,
-        }]);
+        return hintedChoice === "generated_evm"
+          ? finalizeGeneratedEvmWalletSetup(session, deps)
+          : finalizeGeneratedTonWalletSetup(session, deps);
       }
 
       const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
@@ -6136,17 +6141,9 @@ export async function advanceTransferFlow(
       }
 
       if (hints.authChoice === "generated_evm" || hints.authChoice === "generated_ton") {
-        const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
-        if (storedEmail) {
-          return startEmailOtpFlow(session, deps, storedEmail);
-        }
-
-        session.stage = "awaiting_email_address";
-        const followUp = buildEmailAddressPrompt();
-        return reply(withUpdate(session, deps), followUp, undefined, [{
-          type: "blocked_missing_auth",
-          message: followUp,
-        }]);
+        return hints.authChoice === "generated_evm"
+          ? finalizeGeneratedEvmWalletSetup(session, deps)
+          : finalizeGeneratedTonWalletSetup(session, deps);
       }
 
       const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);

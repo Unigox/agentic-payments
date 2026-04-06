@@ -3486,7 +3486,37 @@ test("configured recovery email skips the email-address step and still offers wa
   assert.ok(client.calls.includes("verifyEmailOTP:123456"));
 });
 
-test("email OTP can generate and link a dedicated EVM wallet locally before asking for the exported signing key", async () => {
+test("generated EVM wallet choice creates the wallet directly without asking for email OTP first", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "evmstarter" });
+  const persisted = { login: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    generateDedicatedEvmWallet: async () => ({
+      address: "0x1111111111111111111111111111111111111111",
+      privateKey: VALID_LOGIN_KEY,
+    }),
+    verifyEvmLoginKey: async () => ({ success: true, username: "evmstarter" }),
+    persistEvmLoginKey: async (loginKey) => {
+      persisted.login.push(loginKey);
+    },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "evm");
+  assert.equal(res.session.auth.choice, "generated_evm");
+  assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
+  assert.doesNotMatch(res.reply, /What email address should I use/i);
+  assert.equal(client.calls.includes("requestEmailOTP"), false);
+  assert.equal(client.calls.includes("generateAndLinkWallet"), false);
+  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
+});
+
+test("email OTP can still generate and link a dedicated EVM wallet locally after OTP verification", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
   const persisted = { email: [] as string[], login: [] as string[] };
@@ -3503,24 +3533,66 @@ test("email OTP can generate and link a dedicated EVM wallet locally before aski
   let res = await startTransferFlow("send 20 EUR to mom", deps);
   assert.equal(res.session.stage, "awaiting_auth_choice");
 
-  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
+  res = await advanceTransferFlow(res.session, "email OTP", deps);
   assert.equal(res.session.stage, "awaiting_email_address");
 
   res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
   assert.equal(res.session.stage, "awaiting_email_otp");
 
   res = await advanceTransferFlow(res.session, "123456", deps);
+  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.equal(res.session.auth.mode, "evm");
   assert.equal(res.session.auth.choice, "generated_evm");
-  assert.match(res.reply, /generated and linked a dedicated EVM login wallet locally/i);
+  assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.ok(client.calls.includes("generateAndLinkWallet"));
   assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 });
 
-test("email OTP can generate and link a dedicated TON wallet locally before asking for the exported signing key", async () => {
+test("generated TON wallet choice creates the wallet directly without asking for email OTP first", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "tonstarter" });
+  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    generateDedicatedTonWallet: async () => ({
+      address: "0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      privateKey: VALID_TON_PRIVATE_KEY,
+      walletVersion: "v4",
+    }),
+    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      persisted.tonPrivateKey.push(tonPrivateKey);
+    },
+    persistTonAddress: async (tonAddress) => {
+      persisted.tonAddress.push(tonAddress);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
+    },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "ton");
+  assert.equal(res.session.auth.choice, "generated_ton");
+  assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
+  assert.doesNotMatch(res.reply, /What email address should I use/i);
+  assert.equal(client.calls.includes("requestEmailOTP"), false);
+  assert.equal(client.calls.includes("generateAndLinkTonWallet"), false);
+  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
+  assert.deepEqual(persisted.tonAddress, ["0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+});
+
+test("email OTP can still generate and link a dedicated TON wallet locally after OTP verification", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
   const persisted = { email: [] as string[], tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
@@ -3541,16 +3613,19 @@ test("email OTP can generate and link a dedicated TON wallet locally before aski
   });
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
+  res = await advanceTransferFlow(res.session, "email OTP", deps);
   assert.equal(res.session.stage, "awaiting_email_address");
 
   res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
   res = await advanceTransferFlow(res.session, "123456", deps);
+  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
-  assert.match(res.reply, /generated and linked a dedicated TON login wallet locally/i);
+  assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
   assert.ok(client.calls.includes("generateAndLinkTonWallet"));
   assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);

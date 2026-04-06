@@ -28,10 +28,10 @@ Wait for the user to answer before proceeding.
 >
 > 1. **EVM wallet connection** — best if you want me to do everything, but this path has **two** EVM credentials: the wallet key you use to sign in, then the separate UNIGOX-exported signing key used for in-app signed actions.
 > 2. **TON wallet connection** — good if you want TON-based login/JWT acquisition. Signed EVM actions still need the separate UNIGOX-exported EVM signing key later.
-> 3. **Create a dedicated EVM wallet on this device** — best beginner path if you want me to generate and keep the login wallet locally after email OTP, so you never have to paste the EVM login key.
-> 4. **Create a dedicated TON wallet on this device** — same beginner path for TON; I generate the TON login wallet locally after email OTP and keep the replayable TON key on this machine.
+> 3. **Create a dedicated EVM wallet on this device** — best beginner path if you want me to generate and keep the login wallet locally on this machine, so you never have to paste the EVM login key.
+> 4. **Create a dedicated TON wallet on this device** — same beginner path for TON; I generate the TON login wallet locally and keep the replayable TON key on this machine.
 >
-> If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery and come back to your wallet choice after that.
+> The dedicated-wallet paths do **not** require email OTP. If neither wallet path is ready yet, we can temporarily use **email OTP** for onboarding or recovery and come back to your wallet choice after that.
 
 ### If they choose EVM wallet connection
 
@@ -253,6 +253,7 @@ When the agent restarts and finds legacy `UNIGOX_TON_MNEMONIC` in `.env`:
 
 When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
 - First ask which sign-in setup the user wants for UNIGOX: direct EVM, direct TON, generated EVM, or generated TON
+- If the user explicitly chooses a dedicated EVM or TON wallet path, generate that login wallet directly without forcing email first
 - If neither path is ready yet, use the email flow to re-authenticate and then offer the generated wallet setup
 - Agent email: reads OTP automatically
 - User email: asks for the code
