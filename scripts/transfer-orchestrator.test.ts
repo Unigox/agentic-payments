@@ -1844,6 +1844,47 @@ test("saved payment details question during KYC keeps asking for the legal name"
   assert.match(res.reply, /I can check saved payout details for Aleksandr right after that\./i);
 });
 
+test("generic KYC intent during the legal-name step does not get mistaken for a name", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+
+  res = await advanceTransferFlow(res.session, "I wanna do KYC on the platform", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+  assert.equal(res.session.auth.kycFullName, undefined);
+  assert.match(res.reply, /I can do that\./i);
+  assert.match(res.reply, /First, what full legal name should I use for the verification\?/i);
+});
+
 test("preflight KYC gating asks only for country when the full name is already known", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({
@@ -1951,6 +1992,190 @@ test("known KYC name and country start the verification link and resume after ap
   assert.match(res.reply, /KYC is approved now\./i);
   assert.match(res.reply, /Reply 'confirm' to place the trade/i);
   assert.ok(!client.calls.includes("createTradeRequest"));
+});
+
+test("generic KYC intent during awaiting_kyc_completion repeats the verification link", async () => {
+  const { file } = makeTempContactsFile();
+  let verificationState: KycVerificationData = {
+    status: "not_started",
+  };
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    client.calls.push(`getKycVerificationStatus:${verificationState.status}`);
+    return verificationState;
+  };
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    verificationState = {
+      status: "in_progress",
+      verification_url: "https://verify.example/kyc-session",
+      verification_seconds_left: 900,
+    };
+    return verificationState;
+  };
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+
+  res = await advanceTransferFlow(res.session, "I wanna do KYC on the platform", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
+});
+
+test("KYC FAQ explains the 100 USD threshold without forcing KYC early", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "Do I need to do KYC?", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /reach 100(?:\.00)? USD or more/i);
+  assert.match(res.reply, /recorded volume is about 40(?:\.00)? USD right now/i);
+  assert.match(res.reply, /so no — you do not need KYC for this transfer yet/i);
+});
+
+test("KYC FAQ explains that KYC can be done earlier", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "Can I do KYC earlier?", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.match(res.reply, /Yes — you can complete KYC earlier if you want/i);
+  assert.match(res.reply, /I wanna do KYC/i);
+  assert.match(res.reply, /give me the KYC link/i);
+});
+
+test("voluntary KYC start returns the live verification link before KYC is required", async () => {
+  const { file } = makeTempContactsFile();
+  let verificationState: KycVerificationData = {
+    status: "not_started",
+  };
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: "Alex",
+      last_name: "Grape",
+      kyc_country_code: "EE",
+    },
+  });
+  client.getKycVerificationStatus = async () => {
+    client.calls.push(`getKycVerificationStatus:${verificationState.status}`);
+    return verificationState;
+  };
+  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
+    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
+    verificationState = {
+      status: "in_progress",
+      verification_url: "https://verify.example/kyc-session",
+      verification_seconds_left: 900,
+    };
+    return verificationState;
+  };
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_confirmation");
+
+  res = await advanceTransferFlow(res.session, "I wanna do KYC on the platform", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /Yes — you can complete KYC earlier if you want/i);
+  assert.match(res.reply, /The verification link is ready\./i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
+  assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
 });
 
 test("verified profile is not downgraded by a stale active KYC session", async () => {

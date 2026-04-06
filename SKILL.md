@@ -8,7 +8,8 @@ description: >
   (4) user wants to check UNIGOX wallet balance before sending,
   (5) an active send-money session is already in progress and the user is replying with
   follow-up details like "yes", "confirm", amount-only replies, legal name, country,
-  city, postal code, street, "KYC done", or receipt confirmation.
+  city, postal code, street, "KYC done", "I wanna do KYC", "give me the KYC link",
+  "Do I need to do KYC?", "Can I do KYC earlier?", or receipt confirmation.
   Trigger this skill even when the user only names the recipient and gives no amount yet,
   for example "I wanna send money to Aleksandr". Do not answer those turns from general
   chat context. If a send-money session is active, do not let generic profile, memory,
@@ -36,6 +37,10 @@ If the user says anything equivalent to:
   - `50 EUR`
   - `My full legal name is Alex Grape and my country is Estonia`
   - `Estonia`
+  - `I wanna do KYC on the platform`
+  - `Give me the KYC link`
+  - `Do I need to do KYC?`
+  - `Can I do KYC earlier?`
   - `Tallinn`
   - `13511`
   - `Oismae tee 140`
@@ -63,6 +68,10 @@ Use the runner JSON as the source of truth for the user-facing reply.
 - The shell wrapper self-installs the skill's `scripts/` npm dependencies on first run before launching the TypeScript runner. Do not bypass it with a direct `node ... run-transfer-turn.ts` call unless you have already verified the dependencies are present.
 
 Do not freestyle recipient resolution, saved-recipient lookup, balance wording, onboarding wording, or action choices when the runner can answer them.
+
+KYC continuation rule:
+- if the user says `I wanna do KYC`, `give me the KYC link`, `complete KYC`, `Do I need to do KYC?`, `Can I do KYC earlier?`, or similar while the send-money flow is active, pass that turn to the runner verbatim
+- do not guess whether the runner wants legal name, country, should repeat the live verification link, or should answer the 100 USD threshold question; relay the runner's KYC answer closely
 
 Important path rule:
 - the runner path above is relative to the OpenClaw workspace root

@@ -675,6 +675,84 @@ function resolveCountryCode(text: string | undefined): string | undefined {
   return COMMON_COUNTRY_CODES[normalized] || COMMON_COUNTRY_CODES[compact];
 }
 
+const KYC_NON_NAME_TOKENS = new Set([
+  "i",
+  "im",
+  "i'm",
+  "wanna",
+  "want",
+  "to",
+  "do",
+  "start",
+  "continue",
+  "complete",
+  "platform",
+  "website",
+  "app",
+  "link",
+  "verification",
+  "verify",
+  "kyc",
+  "country",
+  "legal",
+  "name",
+  "saved",
+  "payment",
+  "details",
+  "recipient",
+  "bank",
+  "iban",
+  "please",
+  "can",
+  "you",
+  "give",
+  "me",
+  "my",
+  "the",
+  "on",
+]);
+
+function looksLikePlausibleLegalName(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  if (!/^[A-Za-z][A-Za-z'’. -]*(?:\s+[A-Za-z][A-Za-z'’. -]*)+$/.test(value)) {
+    return false;
+  }
+  const tokens = value.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2 || tokens.length > 6) return false;
+  return !tokens.some((token) => KYC_NON_NAME_TOKENS.has(token));
+}
+
+function hasKycIntent(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(kyc|verification|verify identity|identity check|do kyc|start kyc|complete kyc|kyc link|verification link)\b/i.test(value);
+}
+
+function asksIfKycIsRequired(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(do i need(?: to do)? kyc|is kyc required|will i need kyc|when do i need kyc|do we need kyc)\b/i.test(value);
+}
+
+function asksIfKycCanBeDoneEarly(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(can i do kyc earlier|can i do kyc early|can i complete kyc earlier|can i complete kyc early|can i do it earlier|can i do it early|before i need kyc|ahead of time|in advance)\b/i.test(value);
+}
+
+function wantsToStartKyc(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(i wanna do kyc|i want to do kyc|start kyc|begin kyc|complete kyc|do kyc on the platform|open kyc|launch kyc)\b/i.test(value);
+}
+
+function wantsKycLink(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(give me the kyc link|send me the kyc link|open the kyc link|get the kyc link|give me the verification link|send me the verification link)\b/i.test(value);
+}
+
 function parseKycIdentityInput(text: string | undefined): { fullName?: string; countryCode?: string } {
   const value = cleanText(text);
   if (!value) return {};
@@ -683,8 +761,9 @@ function parseKycIdentityInput(text: string | undefined): { fullName?: string; c
     /(?:my\s+)?(?:full\s+legal\s+name|legal\s+name|name)\s+is\s+(.+?)\s+(?:and|,)\s+(?:my\s+)?country\s+is\s+(.+)$/i
   );
   if (combined) {
+    const fullName = combined[1]?.trim() || undefined;
     return {
-      fullName: combined[1]?.trim() || undefined,
+      fullName: looksLikePlausibleLegalName(fullName) ? fullName : undefined,
       countryCode: resolveCountryCode(combined[2]),
     };
   }
@@ -695,7 +774,7 @@ function parseKycIdentityInput(text: string | undefined): { fullName?: string; c
   if (commaSeparated) {
     const fullName = commaSeparated[1]?.trim() || undefined;
     const countryCode = resolveCountryCode(commaSeparated[2]);
-    if (fullName && countryCode && /\s+/.test(fullName)) {
+    if (fullName && countryCode && looksLikePlausibleLegalName(fullName)) {
       return {
         fullName,
         countryCode,
@@ -705,9 +784,10 @@ function parseKycIdentityInput(text: string | undefined): { fullName?: string; c
 
   const fullNameMatch = value.match(/(?:my\s+)?(?:full\s+legal\s+name|legal\s+name|name)\s+is\s+(.+)$/i);
   const countryMatch = value.match(/(?:my\s+)?country\s+is\s+(.+)$/i);
+  const explicitFullName = fullNameMatch?.[1]?.trim() || undefined;
 
   return {
-    fullName: fullNameMatch?.[1]?.trim() || undefined,
+    fullName: looksLikePlausibleLegalName(explicitFullName) ? explicitFullName : undefined,
     countryCode: resolveCountryCode(countryMatch?.[1]),
   };
 }
@@ -3743,6 +3823,56 @@ function buildKycCountryPrompt(session: TransferSession): string {
   ].join(" ");
 }
 
+function buildKycEligibilityMessage(session: TransferSession): string {
+  if (isUserKycVerified(session.auth.kycStatus)) {
+    return "Your UNIGOX account is already KYC-approved, so you do not need to do KYC again for this flow.";
+  }
+
+  const currentVolume = session.auth.totalTradedVolumeUsd;
+  const projectedTradeUsd = getProjectedTradeUsd(session);
+  const projectedTotal = (currentVolume || 0) + projectedTradeUsd;
+
+  if (typeof currentVolume === "number" && projectedTradeUsd > 0) {
+    const needsKycNow = projectedTotal >= MAX_AMOUNT_WITHOUT_KYC;
+    return [
+      `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more.`,
+      `Your recorded volume is about ${formatFixed(currentVolume, 2)} USD right now, and this transfer would bring it to about ${formatFixed(projectedTotal, 2)} USD.`,
+      needsKycNow
+        ? "So yes — KYC is required before I can place this transfer."
+        : "So no — you do not need KYC for this transfer yet."
+    ].join(" ");
+  }
+
+  if (typeof currentVolume === "number") {
+    const needsKycNow = currentVolume >= MAX_AMOUNT_WITHOUT_KYC;
+    return [
+      `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more.`,
+      `Your recorded volume is about ${formatFixed(currentVolume, 2)} USD right now.`,
+      needsKycNow
+        ? "So yes — KYC is already required before I can continue higher-volume transfers."
+        : "So no — you do not need KYC yet for lower-volume transfers."
+    ].join(" ");
+  }
+
+  return `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more. If you want, I can still start it earlier once you're signed in.`;
+}
+
+function buildCurrentKycStepHint(session: TransferSession): string | undefined {
+  if (session.stage === "awaiting_kyc_full_name") {
+    return "To continue right now, send the full legal name I should use for the verification.";
+  }
+  if (session.stage === "awaiting_kyc_country") {
+    return "To continue right now, send the country name or the 2-letter country code I should use for the verification.";
+  }
+  if (session.stage === "awaiting_kyc_completion") {
+    if (session.auth.kycVerificationUrl) {
+      return `The live verification link is ready here: ${session.auth.kycVerificationUrl}`;
+    }
+    return "The KYC session is already in progress. If the live link has not appeared yet, message me again and I’ll re-check it immediately.";
+  }
+  return undefined;
+}
+
 function buildKycPendingMessage(session: TransferSession): string {
   const projectedTotal = (session.auth.totalTradedVolumeUsd || 0) + getProjectedTradeUsd(session);
   const projectedLine = projectedTotal > 0
@@ -5421,6 +5551,7 @@ async function maybeHandleKycTurn(
   const text = cleanText(turn.text || turn.option);
   const savedRecipientLookupIntent = hasSavedRecipientLookupIntent(text);
   const savedRecipientLookupQuery = parseSavedContactRecipient(text) || cleanText(session.recipientQuery || session.recipientName);
+  const explicitKycIntent = hasKycIntent(text);
   const parsedIdentity = parseKycIdentityInput(text);
 
   if (savedRecipientLookupIntent) {
@@ -5446,18 +5577,12 @@ async function maybeHandleKycTurn(
   }
 
   if (session.stage === "awaiting_kyc_full_name") {
-    const fullName = parsedIdentity.fullName || text?.trim();
+    const fullName = parsedIdentity.fullName || (looksLikePlausibleLegalName(text) ? text?.trim() : undefined);
     if (!fullName) {
+      const prefix = explicitKycIntent ? "I can do that. " : "";
       return reply(
         withUpdate(session, deps),
-        `${buildKycRequirementMessage(session)} First, what full legal name should I use for the verification?`
-      );
-    }
-    const words = fullName.split(/\s+/).filter(Boolean);
-    if (words.length < 2) {
-      return reply(
-        withUpdate(session, deps),
-        `${buildKycRequirementMessage(session)} Please send the full legal name with at least first and last name.`
+        `${prefix}${buildKycRequirementMessage(session)} First, what full legal name should I use for the verification?`
       );
     }
     session.auth.kycFullName = fullName;
@@ -5473,7 +5598,8 @@ async function maybeHandleKycTurn(
     }
     const countryCode = parsedIdentity.countryCode || resolveCountryCode(text);
     if (!countryCode) {
-      return reply(withUpdate(session, deps), buildKycCountryPrompt(session));
+      const prefix = explicitKycIntent ? "I can do that. " : "";
+      return reply(withUpdate(session, deps), `${prefix}${buildKycCountryPrompt(session)}`);
     }
     session.auth.kycCountryCode = countryCode;
     return startKycVerificationFlow(session, deps, client);
@@ -5523,6 +5649,83 @@ async function maybeHandleKycTurn(
   }
 
   return startKycVerificationFlow(session, deps, client);
+}
+
+async function maybeHandleKycInfoTurn(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  const text = cleanText(turn.text || turn.option);
+  if (!text || !hasKycIntent(text)) {
+    return undefined;
+  }
+
+  const needsQuestion = asksIfKycIsRequired(text);
+  const earlyQuestion = asksIfKycCanBeDoneEarly(text);
+  const wantsStart = wantsToStartKyc(text) || wantsKycLink(text);
+  if (!needsQuestion && !earlyQuestion && !wantsStart) {
+    return undefined;
+  }
+
+  const kycStageActive = ["awaiting_kyc_full_name", "awaiting_kyc_country", "awaiting_kyc_completion"].includes(session.stage);
+  if (wantsStart && kycStageActive) {
+    return undefined;
+  }
+
+  let client: TransferExecutionClient | undefined;
+  if (session.auth.available) {
+    client = await getExecutionClient(deps, session);
+    await maybeHydrateAuthIdentity(session, deps, client);
+  }
+
+  if (wantsStart) {
+    if (!session.auth.available || !client) {
+      session.status = "blocked";
+      session.stage = "awaiting_auth_choice";
+      const prompt = `${buildKycEligibilityMessage(session)} I can start KYC for you once you're signed in to UNIGOX. Which sign-in method would you like to use?`;
+      return reply(withUpdate(session, deps), prompt, [...AUTH_CHOICE_OPTIONS], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (isUserKycVerified(session.auth.kycStatus)) {
+      return reply(withUpdate(session, deps), buildKycEligibilityMessage(session));
+    }
+
+    session.status = "blocked";
+    session.execution.confirmed = false;
+    const intro = `${buildKycEligibilityMessage(session)} Yes — you can complete KYC earlier if you want, and I can start it from here.`;
+
+    if (!session.auth.kycFullName) {
+      session.stage = "awaiting_kyc_full_name";
+      return reply(
+        withUpdate(session, deps),
+        `${intro} First, what full legal name should I use for the verification?`
+      );
+    }
+
+    if (!session.auth.kycCountryCode) {
+      session.stage = "awaiting_kyc_country";
+      return reply(
+        withUpdate(session, deps),
+        `${intro} Which country should I use for KYC? Send the country name or the 2-letter country code, for example EE.`
+      );
+    }
+
+    return prependReplyContext(await startKycVerificationFlow(session, deps, client), intro);
+  }
+
+  const currentStepHint = buildCurrentKycStepHint(session);
+  const earlyLine = earlyQuestion
+    ? " Yes — you can complete KYC earlier if you want. Say `I wanna do KYC` or `give me the KYC link` and I’ll start it here."
+    : "";
+  const signInLine = !session.auth.available
+    ? " If you want me to check your exact status or start KYC from here, sign in to UNIGOX first."
+    : "";
+  const stepLine = currentStepHint ? ` ${currentStepHint}` : "";
+  return reply(withUpdate(session, deps), `${buildKycEligibilityMessage(session)}${earlyLine}${signInLine}${stepLine}`);
 }
 
 async function maybeHandleOutstandingTradeReminderTurn(
@@ -6476,6 +6679,9 @@ export async function advanceTransferFlow(
     const outstandingReminderReply = await maybeHandleOutstandingTradeReminderTurn(session, normalizedTurn, deps);
     if (outstandingReminderReply) return outstandingReminderReply;
   }
+
+  const kycInfoReply = await maybeHandleKycInfoTurn(session, normalizedTurn, deps);
+  if (kycInfoReply) return kycInfoReply;
 
   const authOnboardingReply = await maybeHandleAuthOnboardingTurn(session, normalizedTurn, deps);
   if (authOnboardingReply) return authOnboardingReply;

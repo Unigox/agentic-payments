@@ -35,6 +35,7 @@ After calling `send_money_turn`:
 - if the user chooses `Create a dedicated EVM wallet` or `Create a dedicated TON wallet`, do not ask for email unless the tool itself explicitly says email is required
 - if the user asks whether the recipient or payment details are already saved, call the tool again and relay its answer; do not claim the system requires manual IBAN entry every time unless the tool explicitly says no saved details were found
 - do not reinterpret a legal-name KYC prompt as if it were the recipient's name, and do not reinterpret a recipient prompt as if it were KYC
+- if the user says `I wanna do KYC`, `give me the KYC link`, `Do I need to do KYC?`, `Can I do KYC earlier?`, or similar, call the tool again and relay the runner's KYC answer directly instead of free-styling whether the next step is legal name, country, whether KYC starts after 100 USD total volume, or whether the link should be repeated
 - prefer the tool's exact flow wording over your own paraphrase when the tool is guiding authentication or wallet setup
 
 ## Tool usage

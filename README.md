@@ -111,6 +111,18 @@ The adapter remains responsible for:
 - button / quick-reply rendering
 - host-specific tool plumbing
 
+KYC prompts should also route through the same shared tool instead of host-side improvisation. Good examples:
+- `Do I need to do KYC?`
+- `Can I do KYC earlier?`
+- `I wanna do KYC on the platform.`
+- `Give me the KYC link.`
+
+The shared runner should remain the authority for:
+- the 100 USD total-volume threshold explanation
+- whether the current transfer already requires KYC
+- whether voluntary early KYC can start now
+- the live verification link / next KYC step
+
 ## Cross-Platform Compatibility Contract
 
 GitHub must stay the source of truth for every supported runtime.

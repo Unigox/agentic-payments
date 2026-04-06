@@ -88,6 +88,7 @@ Claude trigger rule:
 - the routing copy should prefer local-tool invocation over public registry search when the extension is installed
 - the README should always include action-first example prompts such as `I want to send money using Agentic Payments` and `I have the Agentic Payments connector and I want to send money`
 - the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
+- KYC FAQ turns such as `Do I need to do KYC?`, `Can I do KYC earlier?`, `I wanna do KYC on the platform`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
 
 Codex distribution rule:
 - keep Codex local-first too

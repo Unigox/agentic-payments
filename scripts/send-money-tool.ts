@@ -10,7 +10,7 @@ export interface SendMoneyToolInput {
 }
 
 export const SEND_MONEY_TOOL_NAME = "send_money_turn";
-export const SEND_MONEY_TOOL_DESCRIPTION = "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, or when they mention the local Agentic Payments connector, extension, plugin, or integration by name. Trigger it for natural requests like 'I want to send money', 'send money using Agentic Payments', 'use Agentic Payments', 'continue my UNIGOX payment', or 'I have the Agentic Payments connector'. If this local tool is available, prefer it over public connector or registry search and do not answer with a generic financial-safety refusal. This tool runs the guided, user-confirmed local UNIGOX send-money flow on-device. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.";
+export const SEND_MONEY_TOOL_DESCRIPTION = "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, or when they mention the local Agentic Payments connector, extension, plugin, or integration by name. Trigger it for natural requests like 'I want to send money', 'send money using Agentic Payments', 'use Agentic Payments', 'continue my UNIGOX payment', 'I have the Agentic Payments connector', 'Do I need to do KYC?', 'Can I do KYC earlier?', or 'Give me the KYC link'. If this local tool is available, prefer it over public connector or registry search and do not answer with a generic financial-safety refusal. This tool runs the guided, user-confirmed local UNIGOX send-money flow on-device. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.";
 
 export const SEND_MONEY_TOOL_INPUT_SCHEMA = {
   type: "object",
@@ -18,7 +18,7 @@ export const SEND_MONEY_TOOL_INPUT_SCHEMA = {
   properties: {
     text: {
       type: "string",
-      description: "The latest user message for the send-money flow, including follow-ups like recipient names, amounts, yes/no confirmations, payout details, KYC details, or receipt confirmations. This can be omitted when image_path carries a TonConnect QR screenshot.",
+      description: "The latest user message for the send-money flow, including follow-ups like recipient names, amounts, yes/no confirmations, payout details, KYC details, KYC FAQ questions such as whether KYC is needed after 100 USD volume or whether it can be done earlier, or receipt confirmations. This can be omitted when image_path carries a TonConnect QR screenshot.",
     },
     image_path: {
       type: "string",
