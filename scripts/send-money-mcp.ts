@@ -25,8 +25,9 @@ export const sendMoneyMcpInputShape = {
     .describe("Optional absolute local path to a fresh TonConnect QR screenshot from the UNIGOX browser."),
   session_key: z
     .string()
-    .min(1, "session_key is required")
-    .describe("Stable per-chat or per-user key reused across turns."),
+    .min(1, "session_key must not be empty")
+    .describe("Optional stable per-chat or per-user key reused across turns. If omitted, the local default conversation state is reused.")
+    .optional(),
   reset: z
     .boolean()
     .optional()

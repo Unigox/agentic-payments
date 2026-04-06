@@ -18,8 +18,10 @@ All adapters should call the same logical tool:
 - input:
   - `text`: latest user turn
   - `image_path`: optional absolute local path to a fresh TonConnect QR screenshot
-  - `session_key`: stable per-user or per-chat key reused across turns
+  - `session_key`: optional stable per-user or per-chat key reused across turns when the host can provide one
   - `reset`: optional hard reset
+
+If a host surface cannot provide a clean chat identifier, the shared contract should still stay callable and fall back to the local default conversation state instead of forcing the user to type a session key manually.
 
 The result still comes from the same runner/state machine:
 

@@ -1,6 +1,6 @@
 {
   "name": "send_money_turn",
-  "description": "Advance one conversational turn of the UNIGOX send-money flow. Reuse the same session_key across turns so recipient resolution, auth, KYC, quotes, and settlement state continue correctly.",
+  "description": "Use this tool when the user wants to send money with UNIGOX or Agentic Payments. Advance one conversational turn of the UNIGOX send-money flow. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.",
   "input_schema": {
     "type": "object",
     "additionalProperties": false,
@@ -15,13 +15,12 @@
       },
       "session_key": {
         "type": "string",
-        "description": "A stable per-chat or per-user conversation key. Reuse the same value across turns so the transfer session resumes instead of restarting."
+        "description": "Optional stable per-chat or per-user conversation key. Reuse the same value across turns so the transfer session resumes instead of restarting. If omitted, the local default conversation state is reused."
       },
       "reset": {
         "type": "boolean",
         "description": "When true, ignore any saved session state for this session_key and start a fresh send-money flow."
       }
-    },
-    "required": ["session_key"]
+    }
   }
 }

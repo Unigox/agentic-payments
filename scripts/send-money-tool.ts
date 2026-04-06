@@ -5,12 +5,12 @@ import type { TransferFlowDeps, TransferFlowResult } from "./transfer-orchestrat
 export interface SendMoneyToolInput {
   text?: string;
   image_path?: string;
-  session_key: string;
+  session_key?: string;
   reset?: boolean;
 }
 
 export const SEND_MONEY_TOOL_NAME = "send_money_turn";
-export const SEND_MONEY_TOOL_DESCRIPTION = "Advance one conversational turn of the UNIGOX send-money flow. Reuse the same session_key across turns so recipient resolution, auth, KYC, quotes, and settlement state continue correctly.";
+export const SEND_MONEY_TOOL_DESCRIPTION = "Use this tool when the user wants to send money with UNIGOX or Agentic Payments. Advance one conversational turn of the UNIGOX send-money flow. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.";
 
 export const SEND_MONEY_TOOL_INPUT_SCHEMA = {
   type: "object",
@@ -26,14 +26,13 @@ export const SEND_MONEY_TOOL_INPUT_SCHEMA = {
     },
     session_key: {
       type: "string",
-      description: "A stable per-chat or per-user conversation key. Reuse the same value across turns so the transfer session resumes instead of restarting.",
+      description: "Optional stable per-chat or per-user conversation key. Reuse the same value across turns so the transfer session resumes instead of restarting. If omitted, the local default conversation state is reused.",
     },
     reset: {
       type: "boolean",
       description: "When true, ignore any saved session state for this session_key and start a fresh send-money flow.",
     },
   },
-  required: ["session_key"],
 } as const;
 
 export function buildOpenAIToolDefinition() {
@@ -65,14 +64,11 @@ export async function runSendMoneyToolTurn(
   if (!text && !imagePath) {
     throw new Error("send_money_turn requires either text or image_path.");
   }
-  if (!sessionKey) {
-    throw new Error("send_money_turn requires a stable session_key.");
-  }
 
   return runTransferTurn({
     ...(text ? { text } : {}),
     ...(imagePath ? { imagePath } : {}),
-    sessionKey,
+    ...(sessionKey ? { sessionKey } : {}),
     reset: input.reset,
     deps,
   });

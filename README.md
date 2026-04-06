@@ -93,10 +93,10 @@ Current layout:
 For OpenAI and Anthropic, the safest integration is to call the same `send_money_turn` tool with:
 - `text`
 - optional `image_path`
-- `session_key`
+- optional `session_key`
 - optional `reset`
 
-The host application should keep the same `session_key` across turns so the send flow can resume correctly instead of restarting.
+The host application should keep the same `session_key` across turns when it can so the send flow resumes instead of restarting. If the host cannot provide one cleanly, the shared tool contract must still remain callable by falling back to the local default conversation state.
 
 The engine remains responsible for:
 - auth state

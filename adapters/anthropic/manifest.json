@@ -32,7 +32,7 @@
   "tools": [
     {
       "name": "send_money_turn",
-      "description": "Advance one conversational turn of the UNIGOX send-money flow using local on-device session state."
+      "description": "Use this tool when the user wants to send money with UNIGOX or Agentic Payments. It advances one conversational turn of the local on-device send-money flow."
     }
   ],
   "keywords": [

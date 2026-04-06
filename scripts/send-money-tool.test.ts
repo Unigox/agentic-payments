@@ -36,11 +36,8 @@ test("send_money_turn tool schema stays stable for Anthropic", () => {
   assert.deepEqual(json, definition);
 });
 
-test("runSendMoneyToolTurn requires a stable session_key", async () => {
-  await assert.rejects(
-    () => runSendMoneyToolTurn({ text: "send money to mom", session_key: "" }),
-    /session_key/i
-  );
+test("send_money_turn tool schema no longer requires session_key", () => {
+  assert.deepEqual(SEND_MONEY_TOOL_INPUT_SCHEMA.required ?? [], []);
 });
 
 test("runSendMoneyToolTurn requires either text or image_path", async () => {
