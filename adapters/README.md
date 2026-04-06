@@ -87,6 +87,7 @@ Claude trigger rule:
 - the local Anthropic descriptions should explicitly teach Claude that `Agentic Payments`, `UNIGOX`, `connector`, `extension`, and `plugin` mentions can all map to the same local `send_money_turn` tool
 - the routing copy should prefer local-tool invocation over public registry search when the extension is installed
 - the README should always include action-first example prompts such as `I want to send money using Agentic Payments` and `I have the Agentic Payments connector and I want to send money`
+- the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
 
 Codex distribution rule:
 - keep Codex local-first too

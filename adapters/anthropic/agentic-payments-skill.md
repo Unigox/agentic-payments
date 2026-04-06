@@ -22,6 +22,7 @@ If the local `Agentic Payments` extension is installed and the `send_money_turn`
 - if the user mentions `Agentic Payments` and a local connector/extension/plugin is available, do not search the public registry first
 - do **not** answer with a generic connector search
 - do **not** answer with a blanket payment refusal
+- if natural routing still fails, fall back to the documented direct invocation wording: `Use Agentic Payments send_money_turn. I want to send money.`
 
 The local tool runs a guided, user-confirmed UNIGOX flow on-device. It does not blindly execute a transfer without the user walking through recipient, auth, quote, KYC, and confirmation steps.
 

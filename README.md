@@ -235,12 +235,20 @@ npm run build:anthropic-bundle --prefix scripts
 
 Claude is more reliable when the prompt names both the action and the local connector, not just the brand in isolation.
 
+Always keep the explicit tool-invocation path documented too. Natural routing is the preferred UX, but `send_money_turn` should remain the fallback wording when Claude does not pick the connector on its own.
+
 Best cold-start prompts:
 
 - `I want to send money using Agentic Payments.`
 - `Use Agentic Payments to send money.`
 - `Continue my UNIGOX payment.`
 - `I have the Agentic Payments connector and I want to send money.`
+
+Explicit tool-invocation prompts:
+
+- `Use Agentic Payments send_money_turn. I want to send money.`
+- `Use the send_money_turn tool to continue my UNIGOX payment.`
+- `Check send_money_turn and start the Agentic Payments flow.`
 
 Less reliable cold-start prompt:
 
@@ -256,7 +264,7 @@ If Claude still falls back to generic connector search:
 
 1. start a fresh Claude chat
 2. make sure the local Agentic Payments extension is enabled
-3. if needed, add one explicit turn:
+3. use the explicit tool wording:
    - `Use Agentic Payments send_money_turn. I want to send money.`
 
 ### 5. Initialize the agent
