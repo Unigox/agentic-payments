@@ -458,4 +458,5 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
   assert.match(envBody, /UNIGOX_TON_WALLET_VERSION=v5r1/);
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
+  assert.match(envBody, /UNIGOX_LOGIN_WALLET_ORIGIN=ton/);
 });

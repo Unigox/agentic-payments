@@ -179,6 +179,11 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
         UNIGOX_EVM_LOGIN_PRIVATE_KEY: loginKey,
       });
     },
+    persistAuthChoice: async (choice) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_LOGIN_WALLET_ORIGIN: choice,
+      });
+    },
     persistEvmSigningKey: async (signingKey) => {
       upsertEnvAssignments(envPath, {
         UNIGOX_EVM_SIGNING_PRIVATE_KEY: signingKey,

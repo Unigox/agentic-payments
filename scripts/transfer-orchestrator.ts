@@ -265,6 +265,7 @@ export interface TransferFlowDeps {
   persistTonMnemonic?: (mnemonic: string) => Promise<void> | void;
   persistTonAddress?: (tonAddress: string) => Promise<void> | void;
   persistTonWalletVersion?: (tonWalletVersion: TonWalletVersion) => Promise<void> | void;
+  persistAuthChoice?: (choice: AuthChoice) => Promise<void> | void;
   handleSensitiveInput?: (params: {
     kind: SecretKind;
     secret: string;
@@ -289,6 +290,7 @@ export interface TransferFlowDeps {
 export interface AuthState {
   hasReplayableAuth: boolean;
   authMode?: "evm" | "ton" | "email";
+  choice?: AuthChoice;
   emailFallbackAvailable: boolean;
   evmSigningKeyAvailable?: boolean;
   username?: string;
@@ -1182,6 +1184,13 @@ function getEnvCandidates(): string[] {
   ].filter((candidate): candidate is string => Boolean(candidate))));
 }
 
+function normalizeStoredAuthChoice(choice: string | undefined): AuthChoice | undefined {
+  if (!choice) return undefined;
+  return ["evm", "ton", "email", "generated_evm", "generated_ton"].includes(choice)
+    ? choice as AuthChoice
+    : undefined;
+}
+
 function loadEnvValue(key: string): string | undefined {
   if (process.env[key]) return process.env[key];
   for (const envPath of getEnvCandidates()) {
@@ -1195,6 +1204,7 @@ function loadEnvValue(key: string): string | undefined {
 }
 
 export function detectAuthState(): AuthState {
+  const storedChoice = normalizeStoredAuthChoice(loadEnvValue("UNIGOX_LOGIN_WALLET_ORIGIN"));
   const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
   const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
@@ -1205,6 +1215,7 @@ export function detectAuthState(): AuthState {
     return {
       hasReplayableAuth: true,
       authMode: "evm",
+      choice: storedChoice === "generated_evm" ? storedChoice : "evm",
       emailFallbackAvailable: !!email,
       evmSigningKeyAvailable: !!evmSigningPrivateKey,
     };
@@ -1213,6 +1224,7 @@ export function detectAuthState(): AuthState {
     return {
       hasReplayableAuth: true,
       authMode: "ton",
+      choice: storedChoice === "generated_ton" ? storedChoice : "ton",
       emailFallbackAvailable: !!email,
       evmSigningKeyAvailable: !!evmSigningPrivateKey,
     };
@@ -1221,12 +1233,14 @@ export function detectAuthState(): AuthState {
     return {
       hasReplayableAuth: true,
       authMode: "evm",
+      choice: storedChoice === "generated_evm" ? storedChoice : "evm",
       emailFallbackAvailable: !!email,
       evmSigningKeyAvailable: true,
     };
   }
   return {
     hasReplayableAuth: false,
+    choice: email ? "email" : undefined,
     authMode: email ? "email" : undefined,
     emailFallbackAvailable: !!email,
     evmSigningKeyAvailable: false,
@@ -1240,6 +1254,7 @@ function resolveInitialAuthState(authState?: AuthState): ResolvedAuthState {
   return {
     hasReplayableAuth: authState.hasReplayableAuth || detected.hasReplayableAuth,
     authMode: authState.authMode || detected.authMode,
+    choice: authState.choice || detected.choice,
     emailFallbackAvailable: authState.emailFallbackAvailable || detected.emailFallbackAvailable,
     evmSigningKeyAvailable: authState.evmSigningKeyAvailable === true || detected.evmSigningKeyAvailable === true,
     username: authState.username || detected.username,
@@ -1915,8 +1930,8 @@ function buildEvmLoginKeyPrompt(): string {
   ].join(" ");
 }
 
-function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string): string {
-  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username);
+function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string, choice?: AuthChoice): string {
+  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username, choice);
   return [
     "That doesn’t look like a valid EVM private key.",
     "I accept the key with or without 0x, but it must be the full 32-byte private key, not the wallet address.",
@@ -1924,8 +1939,8 @@ function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", use
   ].join(" ");
 }
 
-function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string): string {
-  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username);
+function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string, choice?: AuthChoice): string {
+  const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username, choice);
   return [
     "That looks like an EVM address, not a private key.",
     "I accept the private key with or without 0x, but it must be the full 32-byte private key, not the 20-byte wallet address.",
@@ -1951,28 +1966,40 @@ function buildInvalidTonPrivateKeyPrompt(tonAddress: string | undefined): string
   ].join(" ");
 }
 
-function buildEvmSigningKeyPrompt(username: string | undefined): string {
+function buildSigningKeyBrowserAccessPrompt(choice?: AuthChoice): string {
+  if (choice === "generated_ton") {
+    return [
+      "Because I created the TON login wallet on this device, do not try to scan the UNIGOX QR in another wallet app for this flow.",
+      "Instead, open unigox.com and send me either: 1. a fresh screenshot of the visible TonConnect QR, or 2. the fresh tc:// TonConnect link from the page.",
+      "I can approve that live browser-login request locally with the TON wallet I created here so the page can finish logging you in.",
+    ].join(" ");
+  }
+
+  return "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.";
+}
+
+function buildEvmSigningKeyPromptForChoice(username: string | undefined, choice?: AuthChoice): string {
   return [
     buildUsernameReminder(username),
     buildEvmKeySecurityWarning("evm_signing_key"),
     "Login works. One more step: I still need the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
     "Why: wallet login, TON login, or email OTP only gets me signed in. Secure in-app actions like funding trade escrow, confirming fiat received, or releasing escrow require that separate exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
-    "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.",
+    buildSigningKeyBrowserAccessPrompt(choice),
     buildTonConnectBrowserApprovalPrompt(),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely for those signed actions.",
   ].filter(Boolean).join(" ");
 }
 
-function buildMissingSigningKeyPrompt(username: string | undefined): string {
+function buildMissingSigningKeyPrompt(username: string | undefined, choice?: AuthChoice): string {
   return [
     buildUsernameReminder(username),
     buildEvmKeySecurityWarning("evm_signing_key"),
     "Login is already set up, but this next step needs the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
     "Why: sign-in alone is enough for quotes and some setup, but secure actions like funding trade escrow, confirming fiat received, or releasing escrow still require the exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
-    "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.",
+    buildSigningKeyBrowserAccessPrompt(choice),
     buildTonConnectBrowserApprovalPrompt(),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely across turns.",
@@ -2139,7 +2166,7 @@ function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): strin
   return [
     "I generated a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
-    buildEvmSigningKeyPrompt(username),
+    buildEvmSigningKeyPromptForChoice(username, "generated_evm"),
   ].filter(Boolean).join(" ");
 }
 
@@ -2147,14 +2174,14 @@ function buildGeneratedTonWalletReadyPrompt(username: string | undefined): strin
   return [
     "I generated a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
-    buildEvmSigningKeyPrompt(username),
+    buildEvmSigningKeyPromptForChoice(username, "generated_ton"),
   ].filter(Boolean).join(" ");
 }
 
 function buildEmailOtpOnlyReadyPrompt(username: string | undefined): string {
   return [
     "Email OTP works. I can keep using email OTP for onboarding or recovery on this device, but future re-authentication may still need another code.",
-    buildMissingSigningKeyPrompt(username),
+    buildMissingSigningKeyPrompt(username, "email"),
   ].filter(Boolean).join(" ");
 }
 
@@ -2239,7 +2266,7 @@ async function maybeRefreshStoredAuthState(
   session.auth.checked = true;
   session.auth.available = true;
   session.auth.mode = auth.authMode || session.auth.mode;
-  session.auth.choice = auth.authMode || session.auth.choice;
+  session.auth.choice = auth.choice || auth.authMode || session.auth.choice;
   session.auth.evmSigningKeyAvailable = auth.evmSigningKeyAvailable;
   session.auth.username = auth.username || session.auth.username;
   session.auth.balanceUsd = auth.balanceUsd ?? session.auth.balanceUsd;
@@ -2347,6 +2374,7 @@ async function finalizeEvmLoginKey(
   }
 
   await deps.persistEvmLoginKey?.(loginKey);
+  await deps.persistAuthChoice?.("evm");
   session.auth.available = true;
   session.auth.mode = "evm";
   session.auth.choice = "evm";
@@ -2356,7 +2384,7 @@ async function finalizeEvmLoginKey(
     await maybeHydrateAuthIdentity(session, deps);
   }
   session.stage = "awaiting_evm_signing_key";
-  const followUp = buildEvmSigningKeyPrompt(session.auth.username);
+  const followUp = buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice);
   return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
     type: "blocked_missing_auth",
     message: followUp,
@@ -2404,6 +2432,7 @@ async function finalizeTonMnemonic(
   if (session.auth.tonAddress) {
     await deps.persistTonAddress?.(session.auth.tonAddress);
   }
+  await deps.persistAuthChoice?.("ton");
   if (verification.tonWalletVersion) {
     session.auth.tonWalletVersion = verification.tonWalletVersion;
     await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
@@ -2420,7 +2449,7 @@ async function finalizeTonMnemonic(
 
   if (!session.auth.evmSigningKeyAvailable) {
     session.stage = "awaiting_evm_signing_key";
-    const followUp = ["TON login works.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+  const followUp = ["TON login works.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
     return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
       message: followUp,
@@ -2623,6 +2652,7 @@ async function finalizeTonConnectLogin(
 
   if (session.auth.tonAddress && checked.walletAddress !== session.auth.tonAddress) {
     await deps.clearTonConnectLogin?.();
+    await deps.persistAuthChoice?.("ton");
     session.auth.tonConnect = undefined;
     session.stage = "awaiting_ton_address";
     session.status = "blocked";
@@ -2661,7 +2691,7 @@ async function finalizeTonConnectLogin(
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
       session.status = "blocked";
-      const followUp = ["TON login works via TonConnect.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+      const followUp = ["TON login works via TonConnect.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
       return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
         type: "blocked_missing_auth",
         message: followUp,
@@ -2706,6 +2736,7 @@ async function finalizeTonPrivateKey(
   if (session.auth.tonAddress) {
     await deps.persistTonAddress?.(session.auth.tonAddress);
   }
+  await deps.persistAuthChoice?.("ton");
   if (verification.tonWalletVersion) {
     session.auth.tonWalletVersion = verification.tonWalletVersion;
     await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
@@ -2722,7 +2753,7 @@ async function finalizeTonPrivateKey(
 
   if (!session.auth.evmSigningKeyAvailable) {
     session.stage = "awaiting_evm_signing_key";
-    const followUp = ["TON login works.", buildEvmSigningKeyPrompt(session.auth.username)].filter(Boolean).join(" ");
+    const followUp = ["TON login works.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
     return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
       message: followUp,
@@ -2761,6 +2792,7 @@ async function finalizeGeneratedEvmWalletSetup(
     }
 
     await deps.persistEvmLoginKey?.(generated.privateKey);
+    await deps.persistAuthChoice?.("generated_evm");
 
     session.auth.available = true;
     session.auth.mode = "evm";
@@ -2819,6 +2851,7 @@ async function finalizeGeneratedTonWalletSetup(
     await deps.persistTonPrivateKey?.(generated.privateKey);
     await deps.persistTonAddress?.(generated.address);
     await deps.persistTonWalletVersion?.(session.auth.tonWalletVersion || generated.walletVersion);
+    await deps.persistAuthChoice?.("generated_ton");
 
     session.auth.available = true;
     session.auth.mode = "ton";
@@ -3030,7 +3063,7 @@ async function maybeHandleAuthOnboardingTurn(
       const prompt = pendingSecret.kind === "evm_login_key"
         ? buildInvalidEvmKeyPrompt("evm_login_key")
         : pendingSecret.kind === "evm_signing_key"
-          ? buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username)
+          ? buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username, session.auth.choice)
           : buildInvalidTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
@@ -3543,7 +3576,7 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = buildMissingSigningKeyPrompt(session.auth.username);
+      const prompt = buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -3553,8 +3586,8 @@ async function maybeHandleAuthOnboardingTurn(
     const signingKey = parseEvmPrivateKey(responseText);
     if (!signingKey) {
       const prompt = looksLikeEvmAddress(responseText)
-        ? buildAddressInsteadOfPrivateKeyPrompt("evm_signing_key", session.auth.username)
-        : buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username);
+        ? buildAddressInsteadOfPrivateKeyPrompt("evm_signing_key", session.auth.username, session.auth.choice)
+        : buildInvalidEvmKeyPrompt("evm_signing_key", session.auth.username, session.auth.choice);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -6151,7 +6184,7 @@ export async function advanceTransferFlow(
       checked: true,
       available: auth.hasReplayableAuth,
       mode: auth.authMode,
-      choice: session.auth.choice,
+      choice: auth.choice || session.auth.choice,
       evmSigningKeyAvailable: auth.evmSigningKeyAvailable,
       username: auth.username,
       balanceUsd: auth.balanceUsd,
@@ -6245,7 +6278,7 @@ export async function advanceTransferFlow(
     if (tonConnectBrowserLogin) {
       return tonConnectBrowserLogin;
     }
-    const followUp = buildMissingSigningKeyPrompt(session.auth.username);
+    const followUp = buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
     return reply(withUpdate(session, deps), followUp, undefined, [{
       type: "blocked_missing_auth",
       message: followUp,

@@ -3214,6 +3214,22 @@ test("detectAuthState recognizes TON private-key auth without requiring mnemonic
   assert.equal(result.emailFallbackAvailable, true);
 });
 
+test("detectAuthState preserves generated TON wallet origin from env", () => {
+  const result = withEnv({
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
+    UNIGOX_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_EMAIL: undefined,
+    UNIGOX_LOGIN_WALLET_ORIGIN: "generated_ton",
+  }, () => detectAuthState());
+
+  assert.equal(result.hasReplayableAuth, true);
+  assert.equal(result.authMode, "ton");
+  assert.equal(result.choice, "generated_ton");
+});
+
 test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are available", () => {
   const result = withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
@@ -3557,7 +3573,7 @@ test("email OTP can still generate and link a dedicated EVM wallet locally after
 test("generated TON wallet choice creates the wallet directly without asking for email OTP first", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "tonstarter" });
-  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     generateDedicatedTonWallet: async () => ({
@@ -3575,6 +3591,9 @@ test("generated TON wallet choice creates the wallet directly without asking for
     persistTonWalletVersion: async (tonWalletVersion) => {
       persisted.tonWalletVersion.push(tonWalletVersion);
     },
+    persistAuthChoice: async (choice) => {
+      persisted.authChoice.push(choice);
+    },
   });
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
@@ -3585,18 +3604,23 @@ test("generated TON wallet choice creates the wallet directly without asking for
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
   assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
+  assert.match(res.reply, /do not try to scan the UNIGOX QR in another wallet app/i);
+  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
+  assert.match(res.reply, /approve that live browser-login request locally/i);
+  assert.doesNotMatch(res.reply, /mobile or desktop wallet and log in to UNIGOX directly/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.equal(client.calls.includes("requestEmailOTP"), false);
   assert.equal(client.calls.includes("generateAndLinkTonWallet"), false);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
   assert.deepEqual(persisted.tonAddress, ["0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
 });
 
 test("generated TON wallet choice overrides a stale email-address step instead of asking for email again", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "tonstarter" });
-  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     generateDedicatedTonWallet: async () => ({
@@ -3614,6 +3638,9 @@ test("generated TON wallet choice overrides a stale email-address step instead o
     persistTonWalletVersion: async (tonWalletVersion) => {
       persisted.tonWalletVersion.push(tonWalletVersion);
     },
+    persistAuthChoice: async (choice) => {
+      persisted.authChoice.push(choice);
+    },
   });
 
   let res = await startTransferFlow("send 20 EUR to mom", deps);
@@ -3626,16 +3653,18 @@ test("generated TON wallet choice overrides a stale email-address step instead o
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
+  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
   assert.deepEqual(persisted.tonAddress, ["0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
 });
 
 test("email OTP can still generate and link a dedicated TON wallet locally after OTP verification", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
-  const persisted = { email: [] as string[], tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const persisted = { email: [] as string[], tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     persistEmailAddress: async (emailAddress) => {
@@ -3649,6 +3678,9 @@ test("email OTP can still generate and link a dedicated TON wallet locally after
     },
     persistTonWalletVersion: async (tonWalletVersion) => {
       persisted.tonWalletVersion.push(tonWalletVersion);
+    },
+    persistAuthChoice: async (choice) => {
+      persisted.authChoice.push(choice);
     },
   });
 
@@ -3666,11 +3698,13 @@ test("email OTP can still generate and link a dedicated TON wallet locally after
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
   assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
+  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
   assert.ok(client.calls.includes("generateAndLinkTonWallet"));
   assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
   assert.deepEqual(persisted.tonAddress, ["0:1111111111111111111111111111111111111111111111111111111111111111"]);
   assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
 });
 
 test("email OTP can stay email-only for now and then ask for the exported signing key", async () => {
@@ -4159,13 +4193,15 @@ test("stored TON auth without a signing key prompts for the UNIGOX signing key i
   const { file } = makeTempContactsFile();
   const client = makeClient();
   const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
   });
 
   const res = await startTransferFlow("send 50 EUR to mom", deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
+  assert.doesNotMatch(res.reply, /mobile or desktop wallet and log in to UNIGOX directly/i);
   assert.doesNotMatch(res.reply, /Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY/i);
 });
 
