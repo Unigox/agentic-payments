@@ -21,6 +21,15 @@ If the local `Agentic Payments` extension is installed and the `send_money_turn`
 
 The local tool runs a guided, user-confirmed UNIGOX flow on-device. It does not blindly execute a transfer without the user walking through recipient, auth, quote, KYC, and confirmation steps.
 
+## Reply rule
+
+After calling `send_money_turn`:
+
+- relay the tool's returned reply closely and do not invent an alternative auth step
+- do not add an email request unless the tool reply explicitly asks for email OTP
+- if the user chooses `Create a dedicated EVM wallet` or `Create a dedicated TON wallet`, do not ask for email unless the tool itself explicitly says email is required
+- prefer the tool's exact flow wording over your own paraphrase when the tool is guiding authentication or wallet setup
+
 ## Tool usage
 
 - Pass the user's latest message as `text`.

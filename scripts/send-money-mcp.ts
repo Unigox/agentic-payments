@@ -65,7 +65,6 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
             text: formatSendMoneyMcpResult(result),
           },
         ],
-        structuredContent: result,
       };
     }
   );
