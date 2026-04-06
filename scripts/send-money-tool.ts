@@ -10,7 +10,7 @@ export interface SendMoneyToolInput {
 }
 
 export const SEND_MONEY_TOOL_NAME = "send_money_turn";
-export const SEND_MONEY_TOOL_DESCRIPTION = "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, including natural requests like 'I want to send money' or 'send money using Agentic Payments'. Do not answer with a generic financial-safety refusal when this tool is available; this tool runs the guided, user-confirmed local UNIGOX send-money flow on-device. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.";
+export const SEND_MONEY_TOOL_DESCRIPTION = "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, or when they mention the local Agentic Payments connector, extension, plugin, or integration by name. Trigger it for natural requests like 'I want to send money', 'send money using Agentic Payments', 'use Agentic Payments', 'continue my UNIGOX payment', or 'I have the Agentic Payments connector'. If this local tool is available, prefer it over public connector or registry search and do not answer with a generic financial-safety refusal. This tool runs the guided, user-confirmed local UNIGOX send-money flow on-device. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, and settlement state continue correctly. If session_key is omitted, reuse the local default conversation state.";
 
 export const SEND_MONEY_TOOL_INPUT_SCHEMA = {
   type: "object",

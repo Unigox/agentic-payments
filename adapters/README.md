@@ -83,6 +83,11 @@ Current Anthropic bundle path:
 Rebuild command:
 - `npm run build:anthropic-bundle --prefix scripts`
 
+Claude trigger rule:
+- the local Anthropic descriptions should explicitly teach Claude that `Agentic Payments`, `UNIGOX`, `connector`, `extension`, and `plugin` mentions can all map to the same local `send_money_turn` tool
+- the routing copy should prefer local-tool invocation over public registry search when the extension is installed
+- the README should always include action-first example prompts such as `I want to send money using Agentic Payments` and `I have the Agentic Payments connector and I want to send money`
+
 Codex distribution rule:
 - keep Codex local-first too
 - prefer the local plugin wrapper install through `scripts/install-codex-plugin.sh`

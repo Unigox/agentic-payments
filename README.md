@@ -231,6 +231,34 @@ To rebuild the bundle from source on the same commit:
 npm run build:anthropic-bundle --prefix scripts
 ```
 
+### Triggering on Claude
+
+Claude is more reliable when the prompt names both the action and the local connector, not just the brand in isolation.
+
+Best cold-start prompts:
+
+- `I want to send money using Agentic Payments.`
+- `Use Agentic Payments to send money.`
+- `Continue my UNIGOX payment.`
+- `I have the Agentic Payments connector and I want to send money.`
+
+Less reliable cold-start prompt:
+
+- `I have a connector called Agentic Payments.`
+
+Why:
+
+- Claude may treat a bare connector-name mention as a registry-search request instead of a local-tool request.
+- Action-first phrasing like `send money`, `continue payment`, or `use Agentic Payments` gives the local `send_money_turn` tool a clearer routing signal.
+- If the local Agentic Payments extension is installed, Claude should prefer that local tool over public connector search.
+
+If Claude still falls back to generic connector search:
+
+1. start a fresh Claude chat
+2. make sure the local Agentic Payments extension is enabled
+3. if needed, add one explicit turn:
+   - `Use Agentic Payments send_money_turn. I want to send money.`
+
 ### 5. Initialize the agent
 On first run, the skill now offers four sign-in setups: **EVM wallet connection**, **TON wallet connection**, **create a dedicated EVM wallet on this device**, or **create a dedicated TON wallet on this device**. The expert EVM and TON paths still work the same way: the user can bring their own wallet, confirm the exact wallet/address being reused, and only then share the needed login secret. The beginner path is new: the skill can generate a dedicated local EVM or TON login wallet with cryptographic randomness and store that replayable login wallet locally so the user does not have to paste the login key by hand. Email OTP is now a separate optional onboarding / recovery path rather than a prerequisite for dedicated wallet creation. For real transfer runs, the skill still blocks early on a missing exported signing key even after email OTP, generated-wallet setup, or TON login, so the user gets the export / beta-access explanation before recipient, quote, or trade execution instead of at the last secure step. On later runs, the flow checks stored auth first; if the saved login/signing credentials are already usable, it skips the auth-path questions, surfaces the current UNIGOX username and wallet balance immediately, and continues with the transfer. More details in the setup guide.
 

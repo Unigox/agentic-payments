@@ -1,11 +1,11 @@
 ---
 name: agentic-payments
-description: Use when the user wants to send money with UNIGOX or Agentic Payments. If the local Agentic Payments extension is installed and the send_money_turn tool is available, call it immediately for natural requests like "I want to send money" instead of falling back to generic connector search or a blanket payment refusal.
+description: Use when the user wants to send money with UNIGOX or Agentic Payments, or mentions the local Agentic Payments connector/extension/plugin by name. If the local Agentic Payments extension is installed and the send_money_turn tool is available, call it immediately for natural requests like "I want to send money", "use Agentic Payments", or "I have the Agentic Payments connector" instead of falling back to generic connector search or a blanket payment refusal.
 ---
 
 # Agentic Payments Skill
 
-Use this skill when the user wants to send money with UNIGOX or Agentic Payments.
+Use this skill when the user wants to send money with UNIGOX or Agentic Payments, or when they are trying to use the local Agentic Payments connector/extension/plugin.
 
 ## Routing rule
 
@@ -14,8 +14,12 @@ If the local `Agentic Payments` extension is installed and the `send_money_turn`
 - call `send_money_turn` immediately for natural requests like:
   - `I want to send money`
   - `I want to send money using Agentic Payments`
+  - `use Agentic Payments`
+  - `I have the Agentic Payments connector`
+  - `I have the Agentic Payments extension`
   - `send money to Aleksandr`
   - `continue my UNIGOX payment`
+- if the user mentions `Agentic Payments` and a local connector/extension/plugin is available, do not search the public registry first
 - do **not** answer with a generic connector search
 - do **not** answer with a blanket payment refusal
 
