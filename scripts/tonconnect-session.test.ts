@@ -45,7 +45,10 @@ test("approveTonConnectUniversalLinkWithWallet sends an encrypted connect event 
       signature: "c2lnbmF0dXJl",
     },
   }, {
-    resolveBridgeUrl: async () => "https://bridge.example/bridge",
+    resolveWalletInfo: async () => ({
+      bridgeUrl: "https://bridge.example/bridge",
+      appName: "tonkeeper",
+    }),
     fetchImpl: async (input, init) => {
       postedUrl = String(input);
       postedBody = String(init?.body || "");
@@ -72,6 +75,7 @@ test("approveTonConnectUniversalLinkWithWallet sends an encrypted connect event 
   const event = JSON.parse(decrypted);
 
   assert.equal(event.event, "connect");
+  assert.equal(event.payload.device.appName, "tonkeeper");
   assert.equal(event.payload.items[0].name, "ton_addr");
   assert.equal(event.payload.items[0].address, "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e");
   assert.equal(event.payload.items[1].name, "ton_proof");

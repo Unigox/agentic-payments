@@ -23,8 +23,8 @@ const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconne
 const DEFAULT_FRONTEND_URL = "https://www.unigox.com";
 const TONCONNECT_OPENING_DEADLINE_MS = 15 * 60 * 1000;
 const DEFAULT_WALLET_BRIDGE_URL = "https://bridge.tonapi.io/bridge";
-const DEFAULT_WALLET_DEVICE_INFO: ConnectEventSuccess["payload"]["device"] = {
-  appName: "agentic-payments",
+const DEFAULT_WALLET_APP_NAME = "tonkeeper";
+const DEFAULT_WALLET_DEVICE_INFO_BASE: Omit<ConnectEventSuccess["payload"]["device"], "appName"> = {
   appVersion: "1.0.0",
   maxProtocolVersion: 2,
   features: [],
@@ -98,6 +98,11 @@ export interface TonConnectWalletApprovalResult {
   walletSessionId: string;
   manifestUrl: string;
   tonProofPayload?: string;
+}
+
+interface ResolvedRemoteTonConnectWallet {
+  bridgeUrl: string;
+  appName: string;
 }
 
 class MemoryTonConnectStorage implements IStorage {
@@ -238,18 +243,35 @@ export function parseTonConnectUniversalLink(link: string): ParsedTonConnectLink
 }
 
 async function resolveRemoteTonConnectBridgeUrl(manifestUrl: string): Promise<string> {
+  return (await resolveRemoteTonConnectWallet(manifestUrl)).bridgeUrl;
+}
+
+async function resolveRemoteTonConnectWallet(manifestUrl: string): Promise<ResolvedRemoteTonConnectWallet> {
   try {
     const connector = createWalletsListConnector(manifestUrl);
     const wallets = await connector.getWallets();
     const remoteWallets = wallets.filter(isWalletInfoRemote);
     const tonkeeper = remoteWallets.find((wallet) => wallet.appName === "tonkeeper" && wallet.bridgeUrl);
-    if (tonkeeper?.bridgeUrl) return tonkeeper.bridgeUrl;
+    if (tonkeeper?.bridgeUrl) {
+      return {
+        bridgeUrl: tonkeeper.bridgeUrl,
+        appName: tonkeeper.appName,
+      };
+    }
     const first = remoteWallets.find((wallet) => wallet.bridgeUrl);
-    if (first?.bridgeUrl) return first.bridgeUrl;
+    if (first?.bridgeUrl) {
+      return {
+        bridgeUrl: first.bridgeUrl,
+        appName: first.appName,
+      };
+    }
   } catch {
     // Fall back to the best-known bridge URL below.
   }
-  return DEFAULT_WALLET_BRIDGE_URL;
+  return {
+    bridgeUrl: DEFAULT_WALLET_BRIDGE_URL,
+    appName: DEFAULT_WALLET_APP_NAME,
+  };
 }
 
 export async function approveTonConnectUniversalLinkWithWallet(
@@ -257,6 +279,7 @@ export async function approveTonConnectUniversalLinkWithWallet(
   options?: {
     fetchImpl?: typeof fetch;
     resolveBridgeUrl?: (manifestUrl: string) => Promise<string>;
+    resolveWalletInfo?: (manifestUrl: string) => Promise<ResolvedRemoteTonConnectWallet>;
   },
 ): Promise<TonConnectWalletApprovalResult> {
   const parsed = parseTonConnectUniversalLink(params.universalLink);
@@ -266,8 +289,20 @@ export async function approveTonConnectUniversalLinkWithWallet(
     throw new Error(`This TonConnect request expects network ${requestedNetwork}, not ${params.network}.`);
   }
 
-  const bridgeUrl = params.bridgeUrl
-    || await (options?.resolveBridgeUrl || resolveRemoteTonConnectBridgeUrl)(parsed.manifestUrl);
+  const resolvedWallet = options?.resolveWalletInfo
+    ? await options.resolveWalletInfo(parsed.manifestUrl)
+    : params.bridgeUrl
+      ? {
+          bridgeUrl: params.bridgeUrl,
+          appName: DEFAULT_WALLET_APP_NAME,
+        }
+      : options?.resolveBridgeUrl
+        ? {
+            bridgeUrl: await options.resolveBridgeUrl(parsed.manifestUrl),
+            appName: DEFAULT_WALLET_APP_NAME,
+          }
+        : await resolveRemoteTonConnectWallet(parsed.manifestUrl);
+  const bridgeUrl = params.bridgeUrl || resolvedWallet.bridgeUrl;
   const walletSession = new SessionCrypto();
 
   const items: ConnectEventSuccess["payload"]["items"] = [
@@ -298,7 +333,10 @@ export async function approveTonConnectUniversalLinkWithWallet(
     id: DEFAULT_EVENT_ID,
     payload: {
       items,
-      device: params.device || DEFAULT_WALLET_DEVICE_INFO,
+      device: params.device || {
+        appName: resolvedWallet.appName || DEFAULT_WALLET_APP_NAME,
+        ...DEFAULT_WALLET_DEVICE_INFO_BASE,
+      },
     },
   };
 
