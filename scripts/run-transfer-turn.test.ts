@@ -11,6 +11,7 @@ import {
   resolveSessionStatePath,
   runTransferTurn,
 } from "./run-transfer-turn.ts";
+import { UnigoxClient } from "./unigox-client.ts";
 import type {
   CurrencyPaymentData,
   PaymentDetail,
@@ -300,6 +301,69 @@ test("runner can continue an active missing-signing-key step from a TonConnect Q
 
   assert.equal(second.session.stage, "awaiting_evm_signing_key");
   assert.match(second.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
+});
+
+test("runner uses persisted TON auth from the configured env file when approving a fresh tc:// link", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-tonconnect-env-"));
+  const envPath = path.join(stateDir, ".env");
+  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+  const tcLink = "tc://?v=2&id=b3103ecefbea0dc9beba06ab43354d4ee5140ec047d905235cbd852aaf9ed97d&trace_id=019d62d1-4636-750c-a6b2-5eb083f9c9d1&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22b19fab0fec923203e6f0b93d609fe1660575cfa548e7239832025c72007524d6%22%7D%5D%7D&ret=none";
+
+  fs.writeFileSync(envPath, [
+    "UNIGOX_AUTH_MODE=ton",
+    `UNIGOX_TON_PRIVATE_KEY=${VALID_TON_PRIVATE_KEY}`,
+    `UNIGOX_TON_ADDRESS=${tonAddress}`,
+    "UNIGOX_TON_WALLET_VERSION=v4",
+    "UNIGOX_TON_NETWORK=-239",
+  ].join("\n") + "\n");
+
+  const originalApprove = UnigoxClient.prototype.approveTonConnectBrowserLogin;
+  const originalGetProfile = UnigoxClient.prototype.getProfile;
+  const approvedLinks: string[] = [];
+
+  UnigoxClient.prototype.getProfile = async function () {
+    return { username: "skill" } as any;
+  };
+
+  UnigoxClient.prototype.approveTonConnectBrowserLogin = async function (universalLink: string) {
+    approvedLinks.push(universalLink);
+    assert.equal(this["tonPrivateKey"] === null, false);
+    assert.match(this["tonAddressOverride"] || "", /^0:/);
+    return {
+      bridgeUrl: "https://bridge.tonapi.io/bridge",
+      walletAddress: this["tonAddressOverride"],
+      manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+      tonProofPayload: "proof-hash",
+    };
+  };
+
+  try {
+    const result = await withEnv(
+      {
+        SEND_MONEY_ENV_PATH: envPath,
+        SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: undefined,
+      },
+      () => runTransferTurn({
+        text: tcLink,
+        sessionKey: "telegram:main",
+        stateDir,
+        deps: {
+          authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+          client: {
+            getProfile: async () => ({ username: "skill" }),
+          } as any,
+        },
+      })
+    );
+
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+    assert.equal(result.session.amount, undefined);
+    assert.match(result.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
+    assert.deepEqual(approvedLinks, [tcLink]);
+  } finally {
+    UnigoxClient.prototype.approveTonConnectBrowserLogin = originalApprove;
+    UnigoxClient.prototype.getProfile = originalGetProfile;
+  }
 });
 
 test("formatTransferRunnerOutput appends options as bullets", () => {

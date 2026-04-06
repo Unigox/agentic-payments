@@ -4199,6 +4199,33 @@ test("missing signing key step accepts a fresh UNIGOX tc:// link and approves th
   assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
 });
 
+test("fresh turn with stored TON auth and only a missing signing key still accepts a tc:// link immediately", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const approvedLinks: string[] = [];
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    approveTonConnectLink: async (universalLink) => {
+      approvedLinks.push(universalLink);
+      return {
+        bridgeUrl: "https://bridge.tonapi.io/bridge",
+        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
+        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
+        tonProofPayload: "proof-hash",
+      };
+    },
+  });
+
+  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
+  const res = await startTransferFlow(tcLink, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.amount, undefined);
+  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
+  assert.deepEqual(approvedLinks, [tcLink]);
+  assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
+});
+
 test("missing signing key step explains that a fresh tc:// link still needs local TON key material if approval fails for missing TON auth", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();

@@ -942,6 +942,9 @@ function parseSavedContactRecipient(text: string | undefined): string | undefine
 function parseIntentHints(text: string | undefined): ParsedHints {
   const value = cleanText(text);
   if (!value) return {};
+  if (parseTonConnectUniversalLinkInput(value)) {
+    return {};
+  }
   const lower = value.toLowerCase();
   const amountCurrency = parseAmountAndCurrency(value);
 
@@ -1171,10 +1174,12 @@ function getEnvCandidates(): string[] {
   if (process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP === "1") {
     return [];
   }
-  return [
+  const configuredEnvPath = process.env.SEND_MONEY_ENV_PATH?.trim();
+  return Array.from(new Set([
+    configuredEnvPath,
     path.join(SKILL_DIR, ".env"),
     path.join(process.env.HOME || "", ".openclaw", ".env"),
-  ];
+  ].filter((candidate): candidate is string => Boolean(candidate))));
 }
 
 function loadEnvValue(key: string): string | undefined {
@@ -1242,6 +1247,7 @@ function resolveInitialAuthState(authState?: AuthState): ResolvedAuthState {
 }
 
 export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
+  const frontendUrl = loadEnvValue("UNIGOX_FRONTEND_URL") || loadEnvValue("NEXT_PUBLIC_UNIGOX_FRONTEND_URL");
   const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
   const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
@@ -1251,6 +1257,7 @@ export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
   if (evmLoginPrivateKey) {
     return {
       authMode: "evm",
+      ...(frontendUrl && { frontendUrl }),
       evmLoginPrivateKey,
       ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
       ...(email && { email }),
@@ -1260,6 +1267,7 @@ export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
   if (tonPrivateKey || tonMnemonic) {
     return {
       authMode: "ton",
+      ...(frontendUrl && { frontendUrl }),
       ...(tonPrivateKey && { tonPrivateKey }),
       ...(tonMnemonic && { tonMnemonic }),
       tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
@@ -1274,12 +1282,17 @@ export function loadUnigoxConfigFromEnv(): UnigoxClientConfig {
     return {
       email,
       authMode: "email",
+      ...(frontendUrl && { frontendUrl }),
       ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
     };
   }
 
   if (evmSigningPrivateKey) {
-    return { privateKey: evmSigningPrivateKey, authMode: "evm" };
+    return {
+      privateKey: evmSigningPrivateKey,
+      authMode: "evm",
+      ...(frontendUrl && { frontendUrl }),
+    };
   }
 
   throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
@@ -6228,6 +6241,10 @@ export async function advanceTransferFlow(
     await maybeHydrateAuthIdentity(session, deps);
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";
+    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
+    if (tonConnectBrowserLogin) {
+      return tonConnectBrowserLogin;
+    }
     const followUp = buildMissingSigningKeyPrompt(session.auth.username);
     return reply(withUpdate(session, deps), followUp, undefined, [{
       type: "blocked_missing_auth",

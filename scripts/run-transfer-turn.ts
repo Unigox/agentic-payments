@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   advanceTransferFlow,
+  loadUnigoxConfigFromEnv,
   startTransferFlow,
   type TransferFlowDeps,
   type TransferFlowResult,
   type TransferSession,
 } from "./transfer-orchestrator.ts";
-import { UnigoxClient } from "./unigox-client.ts";
+import { UnigoxClient, type UnigoxClientConfig } from "./unigox-client.ts";
 import {
   checkTonConnectSession,
   clearTonConnectSession,
@@ -151,8 +152,17 @@ function resolveFrontendUrl(): string | undefined {
 }
 
 function buildTonConnectClient(): UnigoxClient {
-  const frontendUrl = resolveFrontendUrl();
-  return new UnigoxClient(frontendUrl ? { frontendUrl } : {});
+  let config: UnigoxClientConfig = {};
+  try {
+    config = loadUnigoxConfigFromEnv();
+  } catch {
+    // TonConnect payload generation can still proceed without stored auth.
+  }
+  const frontendUrl = resolveFrontendUrl() || config.frontendUrl;
+  return new UnigoxClient({
+    ...config,
+    ...(frontendUrl ? { frontendUrl } : {}),
+  });
 }
 
 function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
