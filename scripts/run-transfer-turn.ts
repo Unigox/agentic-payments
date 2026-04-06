@@ -159,6 +159,11 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
   const envPath = resolveEnvFilePath();
   const frontendUrl = resolveFrontendUrl();
   return {
+    persistEmailAddress: async (emailAddress) => {
+      upsertEnvAssignments(envPath, {
+        UNIGOX_EMAIL: emailAddress,
+      });
+    },
     persistEvmLoginKey: async (loginKey) => {
       upsertEnvAssignments(envPath, {
         UNIGOX_EVM_LOGIN_PRIVATE_KEY: loginKey,

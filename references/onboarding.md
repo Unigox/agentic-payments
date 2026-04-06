@@ -24,10 +24,12 @@ Wait for the user to answer before proceeding.
 
 ## Step 2a: If they already have an account
 
-> To sign in on UNIGOX, I need one wallet connection path I can replay locally. Which wallet connection path should I use: **EVM wallet connection** or **TON wallet connection**?
+> To sign in on UNIGOX, I need one path I can replay locally. Which setup should I use: **EVM wallet connection**, **TON wallet connection**, **create a dedicated EVM wallet on this device**, or **create a dedicated TON wallet on this device**?
 >
 > 1. **EVM wallet connection** — best if you want me to do everything, but this path has **two** EVM credentials: the wallet key you use to sign in, then the separate UNIGOX-exported signing key used for in-app signed actions.
 > 2. **TON wallet connection** — good if you want TON-based login/JWT acquisition. Signed EVM actions still need the separate UNIGOX-exported EVM signing key later.
+> 3. **Create a dedicated EVM wallet on this device** — best beginner path if you want me to generate and keep the login wallet locally after email OTP, so you never have to paste the EVM login key.
+> 4. **Create a dedicated TON wallet on this device** — same beginner path for TON; I generate the TON login wallet locally after email OTP and keep the replayable TON key on this machine.
 >
 > If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery and come back to your wallet choice after that.
 
@@ -98,11 +100,11 @@ When the user provides TON credentials:
 
 ## Step 2b: If they don't have an account
 
-> No problem, let's create one. First decide which wallet connection path you want me to use for UNIGOX sign-in going forward: **EVM wallet connection** or **TON wallet connection**.
+> No problem, let's create one. First decide which sign-in setup you want me to end up using for UNIGOX going forward: **EVM wallet connection**, **TON wallet connection**, **create a dedicated EVM wallet on this device**, or **create a dedicated TON wallet on this device**.
 >
-> If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery, then link the wallet path you chose once you're in.
+> If neither path is ready yet, we can temporarily use **email OTP** for onboarding or recovery, then link or generate the wallet path you chose once you're in.
 >
-> Which wallet connection path do you want me to end up using: **EVM** or **TON**?
+> Which sign-in setup do you want me to end up using: **EVM**, **TON**, **generated EVM**, or **generated TON**?
 
 ### If they need email OTP first
 
@@ -113,20 +115,19 @@ Once they provide the email:
 2. If agent has access to the email inbox: read the code automatically
 3. If not: ask the user: "I just sent a 6-digit code to [email]. What's the code?"
 4. Call `verifyEmailOTP(code)` to log in
-5. Ask: "Now that you're in, which wallet connection path do you want me to use for future UNIGOX sign-in: EVM wallet connection or TON wallet connection?"
-6. If EVM:
+5. Ask: "Now that you're in, should I create a dedicated EVM wallet on this device, create a dedicated TON wallet on this device, or stay on email OTP for now?"
+6. If generated EVM:
    - call `generateAndLinkWallet()`
    - save the returned key as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`
    - save `UNIGOX_EMAIL`
-   - explain that this generated key is the **login** key only
+   - explain that this generated key is the **login** key only and was created locally from cryptographic randomness
    - then ask the user to manually export the separate UNIGOX signing key from unigox.com settings and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
    - proceed to Step 3 only after that second step is acknowledged
-7. If TON:
-   - collect the exact raw TON address first
-   - confirm it is the correct wallet address/version
-   - then collect the TON private key / secret key
-   - call `linkTonWallet()`
-   - save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_PRIVATE_KEY`, `UNIGOX_TON_ADDRESS`, save `UNIGOX_EMAIL`
+7. If generated TON:
+   - call `generateAndLinkTonWallet()`
+   - save `UNIGOX_AUTH_MODE=ton`, `UNIGOX_TON_PRIVATE_KEY`, `UNIGOX_TON_ADDRESS`, `UNIGOX_TON_WALLET_VERSION`, and `UNIGOX_EMAIL`
+   - explain that this generated TON key is the replayable **login** key only and was created locally from cryptographic randomness
+   - then ask the user to manually export the separate UNIGOX signing key from unigox.com settings and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
    - proceed to Step 3
 8. If they want to stay email-only for now:
    - save `UNIGOX_EMAIL`
@@ -251,8 +252,8 @@ When the agent restarts and finds legacy `UNIGOX_TON_MNEMONIC` in `.env`:
 - Prefer migrating the machine to `UNIGOX_TON_PRIVATE_KEY` plus `UNIGOX_TON_ADDRESS` when the user reconfigures TON auth
 
 When the agent restarts and finds `UNIGOX_EMAIL` but no replayable key material:
-- First ask which wallet connection path the user wants for UNIGOX sign-in: EVM wallet connection or TON wallet connection
-- If neither path is ready yet, use the email flow to re-authenticate
+- First ask which sign-in setup the user wants for UNIGOX: direct EVM, direct TON, generated EVM, or generated TON
+- If neither path is ready yet, use the email flow to re-authenticate and then offer the generated wallet setup
 - Agent email: reads OTP automatically
 - User email: asks for the code
 

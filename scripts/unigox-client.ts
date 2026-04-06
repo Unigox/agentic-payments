@@ -25,7 +25,7 @@
  */
 
 import crypto from "node:crypto";
-import { mnemonicToWalletKey } from "@ton/crypto";
+import { mnemonicNew, mnemonicToWalletKey } from "@ton/crypto";
 import {
   Address,
   WalletContractV1R1,
@@ -112,7 +112,7 @@ export type AuthMode = "auto" | "evm" | "ton" | "email";
 type ResolvedAuthMode = Exclude<AuthMode, "auto">;
 
 export function getUnigoxWalletConnectionPrompt(): string {
-  return "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection? If neither is ready yet, we can still use email OTP for onboarding or recovery.";
+  return "Which UNIGOX sign-in path should I set up: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device? If neither wallet path is ready yet, we can still use email OTP for onboarding or recovery.";
 }
 
 export interface UnigoxClientConfig {
@@ -962,7 +962,7 @@ export class UnigoxClient {
 
     // Sign SIWE message for wallet linking
     const domain = new URL(this.frontendUrl).host;
-    const nonce = Math.random().toString(36).substring(7);
+    const nonce = crypto.randomBytes(16).toString("hex");
     const issuedAt = new Date().toISOString();
     const message = `${domain} wants you to sign in with your Ethereum account:\n${newWallet.address}\n\nSign in to Unigox\n\nURI: https://${domain}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
     const signature = await newWallet.signMessage(message);
@@ -985,6 +985,68 @@ export class UnigoxClient {
     this.userProfile = null;
     console.log(`[UNIGOX] Wallet linked: ${newWallet.address}`);
     return { address: newWallet.address, privateKey: newWallet.privateKey };
+  }
+
+  async generateAndLinkTonWallet(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }> {
+    const primaryToken = this.requireFreshToken("generated TON wallet linking");
+    const mnemonicWords = await mnemonicNew(24);
+    const keyPair = await mnemonicToWalletKey(mnemonicWords);
+    const { matched, candidates } = resolveTonWalletCandidate({
+      publicKey: keyPair.publicKey,
+      workchain: 0,
+      preferredVersion: this.tonWalletVersion || undefined,
+    });
+
+    if (!matched) {
+      const candidateSummary = candidates.map((candidate) => `${candidate.version}:${candidate.address}`).join(", ");
+      throw new Error(`Generated TON wallet derivation failed. Tried: ${candidateSummary || "none"}.`);
+    }
+
+    const { payloadToken, payloadTokenHash } = await this.generateTonPayloadTokenPair();
+    const proof = {
+      ...this.buildTonProof(matched.address, payloadTokenHash, keyPair.secretKey),
+      stateInit: matched.stateInit,
+    };
+
+    const res = await jsonFetch(`${this.frontendUrl}/api/ton-link`, {
+      method: "POST",
+      body: JSON.stringify({
+        address: matched.address,
+        network: this.tonNetwork,
+        public_key: Buffer.from(keyPair.publicKey).toString("hex"),
+        proof,
+        payloadToken,
+        primary_token: primaryToken,
+      }),
+    });
+
+    if (!res?.success) {
+      throw new Error(`Generated TON wallet linking failed: ${JSON.stringify(res)}`);
+    }
+
+    const normalizedPrivateKey = Buffer.from(keyPair.secretKey).toString("hex");
+    this.tonPrivateKey = parseTonPrivateKeyInput(normalizedPrivateKey) || null;
+    this.tonMnemonicWords = mnemonicWords;
+    this.tonAddressOverride = matched.address;
+    this.tonWalletVersion = matched.version;
+    this.tonWalletAccount = {
+      address: matched.address,
+      network: this.tonNetwork,
+      publicKey: Buffer.from(keyPair.publicKey).toString("hex"),
+      secretKey: keyPair.secretKey,
+      derivedAddress: matched.address,
+      walletVersion: matched.version,
+      stateInit: matched.stateInit,
+    };
+
+    await this.updateLinkedTonAddress(matched.address, primaryToken);
+    this.userProfile = null;
+
+    return {
+      address: matched.address,
+      privateKey: normalizedPrivateKey,
+      walletVersion: matched.version,
+    };
   }
 
   async updateLinkedTonAddress(tonAddress: string, token = this.token): Promise<void> {
@@ -1042,7 +1104,7 @@ export class UnigoxClient {
   private async loginOnceWithEvm(): Promise<string> {
     const wallet = this.requireLoginWallet();
     const domain = new URL(this.frontendUrl).host;
-    const nonce = Math.random().toString(36).substring(7);
+    const nonce = crypto.randomBytes(16).toString("hex");
     const issuedAt = new Date().toISOString();
     const message = `${domain} wants you to sign in with your Ethereum account:\n${wallet.address}\n\nSign in to Unigox\n\nURI: https://${domain}\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}`;
     const signature = await wallet.signMessage(message);

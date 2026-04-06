@@ -68,7 +68,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 
-type AuthChoice = "evm" | "ton" | "email";
+type AuthChoice = "evm" | "ton" | "email" | "generated_evm" | "generated_ton";
 type SecretKind = "evm_login_key" | "evm_signing_key" | "ton_private_key" | "ton_mnemonic";
 type TopUpMethod = "internal_username" | "external_deposit";
 
@@ -78,6 +78,7 @@ export type TransferStage =
   | "awaiting_auth_choice"
   | "awaiting_email_address"
   | "awaiting_email_otp"
+  | "awaiting_wallet_setup_choice"
   | "awaiting_evm_wallet_signin"
   | "awaiting_evm_login_key"
   | "awaiting_evm_signing_key"
@@ -162,6 +163,10 @@ export interface TransferExecutionClient {
   getWalletBalance(): Promise<WalletBalance>;
   getKycVerificationStatus?(): Promise<KycVerificationData>;
   initializeKycVerification?(params: { fullName: string; country: string }): Promise<KycVerificationData>;
+  requestEmailOTP?(): Promise<void>;
+  verifyEmailOTP?(code: string): Promise<string>;
+  generateAndLinkWallet?(): Promise<{ address: string; privateKey: string }>;
+  generateAndLinkTonWallet?(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion }>;
   listPaymentDetails?(): Promise<PaymentDetail[]>;
   listInitiatorTrades?(filter?: "action_required" | "waiting_other_party" | "history"): Promise<InitiatorTradeSummary[]>;
   ensurePaymentDetail(params: {
@@ -249,6 +254,7 @@ export interface TransferFlowDeps {
     tonProofPayload?: string;
   }>;
   decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
+  persistEmailAddress?: (emailAddress: string) => Promise<void> | void;
   persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
   persistEvmSigningKey?: (signingKey: string) => Promise<void> | void;
   persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
@@ -752,6 +758,20 @@ function looksLikeEvmAddress(text: string | undefined): boolean {
   return /\b(?:0x)?[0-9a-fA-F]{40}\b/.test(value);
 }
 
+const AUTH_CHOICE_OPTIONS = [
+  "EVM wallet connection",
+  "TON wallet connection",
+  "Create dedicated EVM wallet",
+  "Create dedicated TON wallet",
+  "email OTP",
+] as const;
+
+const POST_EMAIL_WALLET_SETUP_OPTIONS = [
+  "Create dedicated EVM wallet",
+  "Create dedicated TON wallet",
+  "Stay on email OTP for now",
+] as const;
+
 function parseAuthChoice(value: string): AuthChoice | undefined {
   const normalized = cleanText(value)?.toLowerCase();
   if (!normalized) return undefined;
@@ -761,6 +781,12 @@ function parseAuthChoice(value: string): AuthChoice | undefined {
   }
   if (/^(ton|ton wallet|ton wallet connection|wallet connection ton)$/.test(normalized)) {
     return "ton";
+  }
+  if (/^(create|generate|make)\s+(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?evm wallet(?: for me)?$/.test(normalized)) {
+    return "generated_evm";
+  }
+  if (/^(create|generate|make)\s+(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?ton wallet(?: for me)?$/.test(normalized)) {
+    return "generated_ton";
   }
   if (/^(email|otp|email otp)$/.test(normalized)) {
     return "email";
@@ -772,7 +798,16 @@ function parseAuthChoice(value: string): AuthChoice | undefined {
   if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:ton|ton wallet(?: connection)?)\b/.test(normalized)) {
     return "ton";
   }
+  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?evm wallet\b/.test(normalized)) {
+    return "generated_evm";
+  }
+  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?ton wallet\b/.test(normalized)) {
+    return "generated_ton";
+  }
   if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:email|email otp|otp)\b/.test(normalized)) {
+    return "email";
+  }
+  if (/\b(?:stay|keep using|use)\s+(?:on\s+)?email(?: otp)?(?: for now)?\b/.test(normalized)) {
     return "email";
   }
 
@@ -1845,6 +1880,17 @@ function buildEvmKeySecurityWarning(kind: SecretKind): string {
   ].join(" ");
 }
 
+function buildWalletSetupChoicePrompt(emailAddress?: string): string {
+  return [
+    emailAddress ? `Email OTP worked for ${emailAddress}.` : "Email OTP worked.",
+    "To keep future sign-in simple, I can create a dedicated login wallet for you locally on this device.",
+    "Which path should I set up now?",
+    "1. Create a dedicated EVM wallet on this device",
+    "2. Create a dedicated TON wallet on this device",
+    "3. Stay on email OTP for now",
+  ].join(" ");
+}
+
 function buildEvmLoginKeyPrompt(): string {
   return [
     buildEvmKeySecurityWarning("evm_login_key"),
@@ -2063,6 +2109,40 @@ function buildEmailOtpPrompt(email: string): string {
   return `I sent a 6-digit code to ${email}. What’s the code?`;
 }
 
+function buildGeneratedWalletFailurePrompt(kind: "generated_evm" | "generated_ton", message?: string): string {
+  const walletLabel = kind === "generated_evm" ? "dedicated EVM login wallet" : "dedicated TON login wallet";
+  return [
+    `I couldn’t create the ${walletLabel} automatically yet.`,
+    message ? `Reason: ${message}` : undefined,
+    "You can retry that generated-wallet path, use your own wallet instead, or stay on email OTP for now.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): string {
+  return [
+    "Email OTP works.",
+    "I generated and linked a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
+    "It was created from cryptographic randomness and kept local to this device.",
+    buildEvmSigningKeyPrompt(username),
+  ].filter(Boolean).join(" ");
+}
+
+function buildGeneratedTonWalletReadyPrompt(username: string | undefined): string {
+  return [
+    "Email OTP works.",
+    "I generated and linked a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
+    "It was created from cryptographic randomness and kept local to this device.",
+    buildEvmSigningKeyPrompt(username),
+  ].filter(Boolean).join(" ");
+}
+
+function buildEmailOtpOnlyReadyPrompt(username: string | undefined): string {
+  return [
+    "Email OTP works. I can keep using email OTP for onboarding or recovery on this device, but future re-authentication may still need another code.",
+    buildMissingSigningKeyPrompt(username),
+  ].filter(Boolean).join(" ");
+}
+
 async function maybeHydrateAuthIdentity(
   session: TransferSession,
   deps: TransferFlowDeps,
@@ -2159,6 +2239,7 @@ async function maybeRefreshStoredAuthState(
     "awaiting_auth_choice",
     "awaiting_email_address",
     "awaiting_email_otp",
+    "awaiting_wallet_setup_choice",
     "awaiting_evm_wallet_signin",
     "awaiting_evm_login_key",
     "awaiting_evm_signing_key",
@@ -2642,6 +2723,112 @@ async function finalizeTonPrivateKey(
   return resumed;
 }
 
+async function finalizeGeneratedEvmWalletSetup(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<TransferFlowResult> {
+  if (!client.generateAndLinkWallet) {
+    session.stage = "awaiting_wallet_setup_choice";
+    session.status = "blocked";
+    const prompt = buildGeneratedWalletFailurePrompt("generated_evm", "This runtime cannot generate EVM wallets automatically yet.");
+    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    const generated = await client.generateAndLinkWallet();
+    await deps.persistEvmLoginKey?.(generated.privateKey);
+
+    session.auth.available = true;
+    session.auth.mode = "evm";
+    session.auth.choice = "generated_evm";
+    session.auth.evmSigningKeyAvailable = false;
+    if (!session.auth.username) {
+      await maybeHydrateAuthIdentity(session, { ...deps, client }, client);
+    }
+
+    if (!session.auth.evmSigningKeyAvailable) {
+      session.stage = "awaiting_evm_signing_key";
+      session.status = "blocked";
+      const followUp = buildGeneratedEvmWalletReadyPrompt(session.auth.username);
+      return reply(withUpdate(session, deps), followUp, undefined, [{
+        type: "blocked_missing_auth",
+        message: followUp,
+      }]);
+    }
+
+    session.status = "active";
+    session.stage = "resolving";
+    return advanceTransferFlow(session, { text: "" }, { ...deps, client });
+  } catch (error) {
+    session.stage = "awaiting_wallet_setup_choice";
+    session.status = "blocked";
+    const prompt = buildGeneratedWalletFailurePrompt("generated_evm", error instanceof Error ? error.message : String(error));
+    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+}
+
+async function finalizeGeneratedTonWalletSetup(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  client: TransferExecutionClient
+): Promise<TransferFlowResult> {
+  if (!client.generateAndLinkTonWallet) {
+    session.stage = "awaiting_wallet_setup_choice";
+    session.status = "blocked";
+    const prompt = buildGeneratedWalletFailurePrompt("generated_ton", "This runtime cannot generate TON wallets automatically yet.");
+    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    const generated = await client.generateAndLinkTonWallet();
+    await deps.persistTonPrivateKey?.(generated.privateKey);
+    await deps.persistTonAddress?.(generated.address);
+    await deps.persistTonWalletVersion?.(generated.walletVersion);
+
+    session.auth.available = true;
+    session.auth.mode = "ton";
+    session.auth.choice = "generated_ton";
+    session.auth.tonAddress = generated.address;
+    session.auth.tonAddressDisplay = generated.address;
+    session.auth.tonWalletVersion = generated.walletVersion;
+    if (!session.auth.username) {
+      await maybeHydrateAuthIdentity(session, { ...deps, client }, client);
+    }
+
+    if (!session.auth.evmSigningKeyAvailable) {
+      session.stage = "awaiting_evm_signing_key";
+      session.status = "blocked";
+      const followUp = buildGeneratedTonWalletReadyPrompt(session.auth.username);
+      return reply(withUpdate(session, deps), followUp, undefined, [{
+        type: "blocked_missing_auth",
+        message: followUp,
+      }]);
+    }
+
+    session.status = "active";
+    session.stage = "resolving";
+    return advanceTransferFlow(session, { text: "" }, { ...deps, client });
+  } catch (error) {
+    session.stage = "awaiting_wallet_setup_choice";
+    session.status = "blocked";
+    const prompt = buildGeneratedWalletFailurePrompt("generated_ton", error instanceof Error ? error.message : String(error));
+    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+}
+
 async function startEmailOtpFlow(
   session: TransferSession,
   deps: TransferFlowDeps,
@@ -2660,8 +2847,8 @@ async function startEmailOtpFlow(
     session.status = "blocked";
     return reply(
       withUpdate(session, deps),
-      "This skill setup cannot send email OTP codes automatically yet. Please choose EVM wallet connection or TON wallet connection instead.",
-      ["EVM wallet connection", "TON wallet connection"],
+      "This skill setup cannot send email OTP codes automatically yet. Please choose a wallet path instead.",
+      [...AUTH_CHOICE_OPTIONS],
       [{
         type: "blocked_missing_auth",
         message: "Email OTP request is not available in this client setup.",
@@ -2687,7 +2874,7 @@ async function startEmailOtpFlow(
   }
 
   session.auth.emailAddress = emailAddress;
-  session.auth.choice = "email";
+  session.auth.choice = session.auth.choice || "email";
   session.auth.mode = "email";
   session.status = "blocked";
   session.stage = "awaiting_email_otp";
@@ -2709,8 +2896,8 @@ async function finalizeEmailOtpVerification(
     session.status = "blocked";
     return reply(
       withUpdate(session, deps),
-      "This skill setup cannot verify email OTP codes automatically yet. Please choose EVM wallet connection or TON wallet connection instead.",
-      ["EVM wallet connection", "TON wallet connection"],
+      "This skill setup cannot verify email OTP codes automatically yet. Please choose a wallet path instead.",
+      [...AUTH_CHOICE_OPTIONS],
       [{
         type: "blocked_missing_auth",
         message: "Email OTP verification is not available in this client setup.",
@@ -2721,16 +2908,46 @@ async function finalizeEmailOtpVerification(
     const token = await client.verifyEmailOTP(otpCode);
     session.auth.available = true;
     session.auth.mode = "email";
-    session.auth.choice = "email";
+    session.auth.choice = session.auth.choice || "email";
     session.auth.emailAddress = emailAddress;
     session.auth.emailAuthToken = token;
     session.auth.emailAuthTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
     session.auth.sessionToken = token;
     session.auth.sessionTokenExpiresAt = session.auth.emailAuthTokenExpiresAt;
     session.auth.checked = true;
+    await deps.persistEmailAddress?.(emailAddress);
+    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
+
+    if (session.auth.choice === "generated_evm") {
+      const generated = await finalizeGeneratedEvmWalletSetup(session, deps, client);
+      generated.events = [{
+        type: "blocked_missing_auth",
+        message: `Email OTP verified for ${emailAddress}.`,
+      }, ...generated.events];
+      return generated;
+    }
+
+    if (session.auth.choice === "generated_ton") {
+      const generated = await finalizeGeneratedTonWalletSetup(session, deps, client);
+      generated.events = [{
+        type: "blocked_missing_auth",
+        message: `Email OTP verified for ${emailAddress}.`,
+      }, ...generated.events];
+      return generated;
+    }
+
+    if (session.auth.choice === "email") {
+      session.status = "blocked";
+      session.stage = "awaiting_wallet_setup_choice";
+      const prompt = buildWalletSetupChoicePrompt(emailAddress);
+      return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+        type: "blocked_missing_auth",
+        message: `Email OTP verified for ${emailAddress}.`,
+      }]);
+    }
+
     session.status = "active";
     session.stage = "resolving";
-    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
     const resumed = await advanceTransferFlow(session, { text: "" }, { ...deps, client });
     resumed.events = [{
       type: "blocked_missing_auth",
@@ -2768,7 +2985,7 @@ async function maybeHandleAuthOnboardingTurn(
     const pendingSecret = session.auth.pendingSecret;
     if (!pendingSecret) {
       session.stage = "awaiting_auth_choice";
-      return reply(withUpdate(session, deps), getUnigoxWalletConnectionPrompt(), ["EVM wallet connection", "TON wallet connection", "email OTP"], [{
+      return reply(withUpdate(session, deps), getUnigoxWalletConnectionPrompt(), [...AUTH_CHOICE_OPTIONS], [{
         type: "blocked_missing_auth",
         message: getUnigoxWalletConnectionPrompt(),
       }]);
@@ -2808,10 +3025,83 @@ async function maybeHandleAuthOnboardingTurn(
     return finalizeEvmSigningKey(session, normalizedSecret, deps);
   }
 
+  if (session.stage === "awaiting_wallet_setup_choice") {
+    session.status = "blocked";
+    const choice = hintedChoice;
+    const emailAddress = session.auth.emailAddress || getStoredEmailAddress(deps);
+    if (!emailAddress || !session.auth.sessionToken) {
+      session.stage = "awaiting_email_address";
+      const prompt = buildEmailAddressPrompt(emailAddress);
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    const client = await getExecutionClient(deps, {
+      ...session,
+      auth: {
+        ...session.auth,
+        emailAddress,
+        mode: "email",
+      },
+    });
+
+    if (choice === "generated_evm") {
+      return finalizeGeneratedEvmWalletSetup(session, deps, client);
+    }
+
+    if (choice === "generated_ton") {
+      return finalizeGeneratedTonWalletSetup(session, deps, client);
+    }
+
+    if (choice === "evm") {
+      session.stage = "awaiting_evm_wallet_signin";
+      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
+      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (choice === "ton") {
+      const storedTonAddress = getStoredTonAddress(deps);
+      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
+      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
+      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
+      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
+      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (choice === "email") {
+      if (!session.auth.evmSigningKeyAvailable) {
+        session.stage = "awaiting_evm_signing_key";
+        const prompt = buildEmailOtpOnlyReadyPrompt(session.auth.username);
+        return reply(withUpdate(session, deps), prompt, undefined, [{
+          type: "blocked_missing_auth",
+          message: prompt,
+        }]);
+      }
+
+      session.status = "active";
+      session.stage = "resolving";
+      return advanceTransferFlow(session, { text: "" }, { ...deps, client });
+    }
+
+    const prompt = buildWalletSetupChoicePrompt(emailAddress);
+    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
   if (session.stage === "awaiting_evm_wallet_signin") {
     session.status = "blocked";
 
-    if (hintedChoice === "ton" || hintedChoice === "email") {
+    if (hintedChoice === "ton" || hintedChoice === "email" || hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
       session.auth.choice = hintedChoice;
       if (hintedChoice === "ton") {
         const storedTonAddress = getStoredTonAddress(deps);
@@ -2820,6 +3110,19 @@ async function maybeHandleAuthOnboardingTurn(
         session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
         const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
         return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
+          type: "blocked_missing_auth",
+          message: followUp,
+        }]);
+      }
+
+      if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
+        const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
+        if (storedEmail) {
+          return startEmailOtpFlow(session, deps, storedEmail);
+        }
+        session.stage = "awaiting_email_address";
+        const followUp = buildEmailAddressPrompt();
+        return reply(withUpdate(session, deps), followUp, undefined, [{
           type: "blocked_missing_auth",
           message: followUp,
         }]);
@@ -2849,7 +3152,7 @@ async function maybeHandleAuthOnboardingTurn(
     const reminder = NOT_READY_RE.test(responseText) || !responseText
       ? "Before I ask for any key: please sign in on unigox.com with the EVM wallet you want me to reuse. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used."
       : "I still need you to sign in on unigox.com with that EVM wallet first. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used.";
-    return reply(withUpdate(session, deps), reminder, ["I signed in", "TON wallet connection", "email OTP"], [{
+    return reply(withUpdate(session, deps), reminder, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
       type: "blocked_missing_auth",
       message: reminder,
     }]);
@@ -5657,7 +5960,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method", "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_wallet_setup_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key", "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method", "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -5814,7 +6117,7 @@ export async function advanceTransferFlow(
       if (hints.authChoice === "evm") {
         const followUp = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
         session.stage = "awaiting_evm_wallet_signin";
-        return reply(withUpdate(session, deps), followUp, ["I signed in", "TON wallet connection", "email OTP"], [{
+        return reply(withUpdate(session, deps), followUp, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
           type: "blocked_missing_auth",
           message: followUp,
         }]);
@@ -5827,6 +6130,20 @@ export async function advanceTransferFlow(
         const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
         session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
         return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
+          type: "blocked_missing_auth",
+          message: followUp,
+        }]);
+      }
+
+      if (hints.authChoice === "generated_evm" || hints.authChoice === "generated_ton") {
+        const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
+        if (storedEmail) {
+          return startEmailOtpFlow(session, deps, storedEmail);
+        }
+
+        session.stage = "awaiting_email_address";
+        const followUp = buildEmailAddressPrompt();
+        return reply(withUpdate(session, deps), followUp, undefined, [{
           type: "blocked_missing_auth",
           message: followUp,
         }]);
@@ -5848,7 +6165,7 @@ export async function advanceTransferFlow(
     return reply(
       withUpdate(session, deps),
       getUnigoxWalletConnectionPrompt(),
-      ["EVM wallet connection", "TON wallet connection", "email OTP"],
+      [...AUTH_CHOICE_OPTIONS],
       [{
         type: "blocked_missing_auth",
         message: getUnigoxWalletConnectionPrompt(),

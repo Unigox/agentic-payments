@@ -93,11 +93,11 @@ Expected pattern:
 
 On first use, check if the environment is configured. Read `references/onboarding.md` and follow it step by step.
 
-**Quick check**: before asking any onboarding question, look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_PRIVATE_KEY` for TON (`UNIGOX_TON_MNEMONIC` is legacy env-only fallback for older installs). Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If stored auth is already usable, skip auth-path and key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance at the start of the send flow. Only ask auth questions for the missing piece (for example the exported signing key). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?" If neither path is ready yet, use email OTP as the onboarding / recovery fallback.
+**Quick check**: before asking any onboarding question, look for a replayable wallet sign-in path in the user's `.env` / environment: `UNIGOX_EVM_LOGIN_PRIVATE_KEY` for EVM sign-in or `UNIGOX_TON_PRIVATE_KEY` for TON (`UNIGOX_TON_MNEMONIC` is legacy env-only fallback for older installs). Separately check whether the signed-action key is present as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy alias `UNIGOX_PRIVATE_KEY`). If stored auth is already usable, skip auth-path and key-collection questions, hydrate the current UNIGOX username, and surface the current wallet balance at the start of the send flow. Only ask auth questions for the missing piece (for example the exported signing key). If neither wallet login path is available, do **not** jump straight into generic login instructions. First ask which sign-in path to set up: **EVM wallet connection**, **TON wallet connection**, **create a dedicated EVM wallet on this device**, or **create a dedicated TON wallet on this device**. If neither wallet path is ready yet, use email OTP as the onboarding / recovery fallback.
 
 The onboarding flow:
 1. Explain what this skill does and the security model
-2. Ask the user which wallet connection path they want to use for UNIGOX sign-in: EVM wallet connection or TON wallet connection
+2. Ask the user which sign-in path they want to set up for UNIGOX: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device
 3. If neither wallet path is ready yet, offer email OTP as the temporary onboarding / recovery fallback
 4. For EVM, first ask whether they have already signed in on unigox.com with that wallet and instruct them to do so before sharing any key
 5. Before requesting **either** EVM key, show a strong warning: 🚨 use a **NEWLY CREATED / ISOLATED wallet only** and **never** the user's main wallet
@@ -108,16 +108,18 @@ The onboarding flow:
 10. Explain clearly why it is needed: login auth only gets a UNIGOX session; secure in-app actions like funding trade escrow, confirming receipt, and releasing escrow still require the separate exported signing key
 11. When asking the user to fetch that signing key from unigox.com, explain the practical browser-login paths too: they can scan a fresh UNIGOX TonConnect QR in the wallet, paste a fresh `tc://` TonConnect link here, send a fresh local screenshot of the visible UNIGOX TonConnect QR when the runtime can pass an image path to the runner, or log in to unigox.com directly from their mobile or desktop wallet
 12. If the user cannot find the export option in UNIGOX settings, explain that this is a beta feature, their account likely still needs agentic-payments access enabled, and tell them to ask UNIGOX via `hello@unigox.com` or Intercom chat to enable it
-13. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — EVM, TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
-14. For TON, collect the raw TON address first and confirm that it is the correct wallet address/version the user used on UNIGOX
-15. After the address is confirmed, offer three first-class TON login paths for that exact wallet: send the mnemonic phrase, send the TON private key / secret key, or request a fresh TonConnect QR / deep link
-16. For mnemonic/private-key flows, apply the same secret-cleanup rule, derive the supported TON wallet versions locally, ensure one of them matches the exact confirmed raw TON address, and persist the matched version locally as `UNIGOX_TON_WALLET_VERSION`
-17. For TonConnect, generate a fresh live deep link, accept the login only if the connected wallet comes back as the exact confirmed address, and explain that old QR screenshots are not reusable login credentials
-18. If the user is already on `unigox.com` and shares a fresh TonConnect browser-login request from the website while the missing exported signing key is the blocker, use the stored TON key to approve that live browser-login request locally so the UNIGOX page can finish logging in and the user can reach settings to export the signing key. Accept either a fresh pasted `tc://` link or, when the runtime can pass a local image path, a fresh screenshot of the visible TonConnect QR
-19. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
-20. Optionally link the other wallet path later if the user wants flexibility
-21. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
-22. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
+13. After email OTP succeeds, if the user chose a generated wallet path, create and link the dedicated EVM or TON login wallet locally with cryptographic randomness, persist it on the machine, and explain that the user no longer needs to paste the login key for that wallet manually
+14. If the user chooses to stay on email OTP for now, explain that future re-auth may still need another OTP and then continue toward the exported signing-key explanation
+15. For transfer runs, do not wait until the last secure action to discover a missing signing key. After any auth path succeeds — direct EVM, direct TON, generated EVM, generated TON, or email OTP — block early on the missing exported signing key and explain the export / beta-access path before continuing with recipient, quote, or trade execution
+16. For TON, collect the raw TON address first and confirm that it is the correct wallet address/version the user used on UNIGOX
+17. After the address is confirmed, offer three first-class TON login paths for that exact wallet: send the mnemonic phrase, send the TON private key / secret key, or request a fresh TonConnect QR / deep link
+18. For mnemonic/private-key flows, apply the same secret-cleanup rule, derive the supported TON wallet versions locally, ensure one of them matches the exact confirmed raw TON address, and persist the matched version locally as `UNIGOX_TON_WALLET_VERSION`
+19. For TonConnect, generate a fresh live deep link, accept the login only if the connected wallet comes back as the exact confirmed address, and explain that old QR screenshots are not reusable login credentials
+20. If the user is already on `unigox.com` and shares a fresh TonConnect browser-login request from the website while the missing exported signing key is the blocker, use the stored TON key to approve that live browser-login request locally so the UNIGOX page can finish logging in and the user can reach settings to export the signing key. Accept either a fresh pasted `tc://` link or, when the runtime can pass a local image path, a fresh screenshot of the visible TonConnect QR
+21. If TON login succeeds but the UNIGOX-exported EVM signing key is still missing, ask for that signing key right away instead of waiting for a later runtime failure
+22. Optionally link the other wallet path later if the user wants flexibility
+23. If the user wants to top up, do it step by step: first ask which top-up method they want — another UNIGOX user sends to their username, or an external/on-chain deposit
+24. If they choose another UNIGOX user, clearly show the current UNIGOX username and tell them to have the other user send funds directly to that username; do not switch into token + chain deposit questions for that internal route
 23. If they choose an external/on-chain deposit, keep the existing token-first, then chain/network, then single relevant address flow
 24. Use the frontend-supported deposit options as the source of truth for the external/on-chain path: start from `getBridgeTokens()`, keep only routes where `chain.enabled_for_deposit` is true, exclude XAI/internal-only routes, keep only frontend-supported address families (EVM, Solana, Tron/TVM, TON), and model token-specific chain support correctly
 
@@ -203,8 +205,8 @@ Use the UNIGOX client module. See `references/integration.md` for code patterns.
 
 ```
 1. On flow start, check stored auth first (`UNIGOX_EVM_LOGIN_PRIVATE_KEY`, `UNIGOX_EVM_SIGNING_PRIVATE_KEY` / `UNIGOX_PRIVATE_KEY`, `UNIGOX_TON_PRIVATE_KEY`, legacy `UNIGOX_TON_MNEMONIC`, `UNIGOX_EMAIL`) instead of defaulting to onboarding.
-2. If login is needed and no replayable wallet path is configured, ask: "Which wallet connection path should I use to sign in on UNIGOX: EVM wallet connection or TON wallet connection?"
-3. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen wallet path
+2. If login is needed and no replayable wallet path is configured, ask which sign-in path to set up: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device
+3. If the user has neither path ready, use email OTP as onboarding / recovery, then continue toward their chosen or generated wallet path
 4. For EVM, first confirm the user has already signed in on unigox.com with that wallet, then verify login with `UNIGOX_EVM_LOGIN_PRIVATE_KEY`, and only after that require the separate exported signing key before transfer execution
 5. Login with the configured auth mode (EVM login key or TON wallet auth)
 6. Fetch the current UNIGOX username when available and show it early
@@ -266,9 +268,10 @@ Preferred auth environment variables:
 - **Default currency** is EUR
 - **Trade type is SELL** (sell crypto to send fiat)
 - **Show security warnings** on first run and when balance is high
-- **When auth is missing or needs recovery, explicitly ask for the wallet sign-in path first**: EVM wallet connection or TON wallet connection
+- **When auth is missing or needs recovery, explicitly ask for the sign-in setup path first**: EVM wallet connection, TON wallet connection, create a dedicated EVM wallet on this device, or create a dedicated TON wallet on this device
 - **If stored auth is already usable, do not re-ask auth-path or key-collection questions.** Surface the current username and current balance first, then continue the send flow.
 - **If the user chooses EVM, do not ask for a key immediately**. First confirm they have already signed in on unigox.com with that wallet; only after that confirmation should you ask for the login wallet key
+- **If the user chooses a generated EVM or TON wallet path, bootstrap with email OTP, then create the dedicated login wallet locally and persist it on the machine instead of asking the user to paste the login key**
 - **Before requesting either EVM key, show the isolated-wallet warning**: newly created / isolated wallet only, never the main wallet
 - **After the user pastes an EVM key, try to delete that message if the runtime supports it**; otherwise instruct the user to delete it themselves and wait for explicit confirmation before continuing
 - **Email OTP is fallback**, not the first phrasing for repeatable sign-in. Use it when the chosen wallet path is not ready yet or for recovery

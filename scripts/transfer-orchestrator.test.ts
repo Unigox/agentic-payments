@@ -658,6 +658,8 @@ function makeClient(options: {
   requestEmailOtpError?: string;
   verifyEmailOtpError?: string;
   verifyEmailOtpToken?: string;
+  generatedEvmWallet?: { address: string; privateKey: string };
+  generatedTonWallet?: { address: string; privateKey: string; walletVersion: "v4" | "v5r1" };
 } = {}): TransferExecutionClient & {
   calls: string[];
   lastCreateTradeRequestParams?: {
@@ -755,6 +757,21 @@ function makeClient(options: {
         throw new Error(options.verifyEmailOtpError);
       }
       return options.verifyEmailOtpToken ?? "email-token";
+    },
+    async generateAndLinkWallet() {
+      calls.push("generateAndLinkWallet");
+      return options.generatedEvmWallet ?? {
+        address: "0xGeneratedWallet000000000000000000000000000000",
+        privateKey: VALID_LOGIN_KEY,
+      };
+    },
+    async generateAndLinkTonWallet() {
+      calls.push("generateAndLinkTonWallet");
+      return options.generatedTonWallet ?? {
+        address: "0:1111111111111111111111111111111111111111111111111111111111111111",
+        privateKey: VALID_TON_PRIVATE_KEY,
+        walletVersion: "v4",
+      };
     },
     async getPreflightQuote(params): Promise<PreflightQuote | undefined> {
       const assetCode = (params.cryptoCurrencyCode || "USDC") as "USDC" | "USDT";
@@ -3320,7 +3337,7 @@ test("stored auth added after a session starts still skips onboarding on the nex
   }, async () => startTransferFlow("send 20 EUR to mom", deps));
 
   assert.equal(res.session.stage, "awaiting_auth_choice");
-  assert.match(res.reply, /Which wallet connection path should I use/i);
+  assert.match(res.reply, /Which UNIGOX sign-in path should I set up/i);
 
   res = await withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
@@ -3359,7 +3376,7 @@ test("missing EVM auth asks the user to sign in on unigox.com before requesting 
   assert.match(afterSignin.reply, /must NOT be your main wallet/i);
 });
 
-test("email OTP choice asks for an email address when none is configured, then blocks early on the missing signing key after OTP verification", async () => {
+test("email OTP choice asks for an email address when none is configured, then offers generated wallet setup after OTP verification", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3404,22 +3421,23 @@ test("email OTP choice asks for an email address when none is configured, then b
     assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
 
     result = await advanceTransferFlow(result.session, "123456", deps);
-    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+    assert.equal(result.session.stage, "awaiting_wallet_setup_choice");
     assert.equal(result.session.auth.mode, "email");
     assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
     assert.equal(result.session.auth.emailAuthToken, "email-login-token");
-    assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
-    assert.match(result.reply, /early beta access for agentic payments/i);
-    assert.match(result.reply, /hello@unigox\.com|Intercom chat/i);
+    assert.match(result.reply, /Email OTP worked/i);
+    assert.match(result.reply, /Create a dedicated EVM wallet/i);
+    assert.match(result.reply, /Create a dedicated TON wallet/i);
+    assert.match(result.reply, /Stay on email OTP for now/i);
     return result;
   });
 
   assert.ok(client.calls.includes("requestEmailOTP"));
   assert.ok(client.calls.includes("verifyEmailOTP:123456"));
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
 });
 
-test("configured recovery email skips the email-address step and still blocks early on the missing signing key after OTP verification", async () => {
+test("configured recovery email skips the email-address step and still offers wallet setup after OTP verification", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3459,14 +3477,105 @@ test("configured recovery email skips the email-address step and still blocks ea
     assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
 
     result = await advanceTransferFlow(result.session, "123456", deps);
-    assert.equal(result.session.stage, "awaiting_evm_signing_key");
-    assert.match(result.reply, /UNIGOX-exported EVM signing key/i);
-    assert.match(result.reply, /early beta access for agentic payments/i);
-    assert.match(result.reply, /hello@unigox\.com|Intercom chat/i);
+    assert.equal(result.session.stage, "awaiting_wallet_setup_choice");
+    assert.match(result.reply, /Create a dedicated EVM wallet/i);
+    assert.match(result.reply, /Create a dedicated TON wallet/i);
   });
 
   assert.ok(client.calls.includes("requestEmailOTP"));
   assert.ok(client.calls.includes("verifyEmailOTP:123456"));
+});
+
+test("email OTP can generate and link a dedicated EVM wallet locally before asking for the exported signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
+  const persisted = { email: [] as string[], login: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    persistEmailAddress: async (emailAddress) => {
+      persisted.email.push(emailAddress);
+    },
+    persistEvmLoginKey: async (loginKey) => {
+      persisted.login.push(loginKey);
+    },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
+  assert.equal(res.session.stage, "awaiting_email_address");
+
+  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
+  assert.equal(res.session.stage, "awaiting_email_otp");
+
+  res = await advanceTransferFlow(res.session, "123456", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "evm");
+  assert.equal(res.session.auth.choice, "generated_evm");
+  assert.match(res.reply, /generated and linked a dedicated EVM login wallet locally/i);
+  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
+  assert.ok(client.calls.includes("generateAndLinkWallet"));
+  assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
+  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
+});
+
+test("email OTP can generate and link a dedicated TON wallet locally before asking for the exported signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
+  const persisted = { email: [] as string[], tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    persistEmailAddress: async (emailAddress) => {
+      persisted.email.push(emailAddress);
+    },
+    persistTonPrivateKey: async (tonPrivateKey) => {
+      persisted.tonPrivateKey.push(tonPrivateKey);
+    },
+    persistTonAddress: async (tonAddress) => {
+      persisted.tonAddress.push(tonAddress);
+    },
+    persistTonWalletVersion: async (tonWalletVersion) => {
+      persisted.tonWalletVersion.push(tonWalletVersion);
+    },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
+  assert.equal(res.session.stage, "awaiting_email_address");
+
+  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
+  res = await advanceTransferFlow(res.session, "123456", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "ton");
+  assert.equal(res.session.auth.choice, "generated_ton");
+  assert.match(res.reply, /generated and linked a dedicated TON login wallet locally/i);
+  assert.ok(client.calls.includes("generateAndLinkTonWallet"));
+  assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
+  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
+  assert.deepEqual(persisted.tonAddress, ["0:1111111111111111111111111111111111111111111111111111111111111111"]);
+  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
+});
+
+test("email OTP can stay email-only for now and then ask for the exported signing key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 20 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "email OTP", deps);
+  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
+  res = await advanceTransferFlow(res.session, "123456", deps);
+  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
+
+  res = await advanceTransferFlow(res.session, "Stay on email OTP for now", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "email");
+  assert.match(res.reply, /keep using email OTP/i);
+  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
 });
 
 test("EVM login without exported signing key blocks before transfer execution", async () => {
