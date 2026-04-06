@@ -976,11 +976,23 @@ function parseRecipient(text: string | undefined): string | undefined {
 function parseSavedContactRecipient(text: string | undefined): string | undefined {
   const value = cleanText(text);
   if (!value) return undefined;
-  const match = value.match(/\b(?:saved contact|existing contact|someone saved)\s+(?:named\s+)?([a-z0-9][a-z0-9 .,'@_-]{1,60})$/i);
-  const candidate = match?.[1]?.trim().replace(/[!?.,]+$/g, "");
+  const patterns = [
+    /\b(?:saved contact|existing contact|someone saved)\s+(?:named\s+)?([a-z0-9][a-z0-9 .,'@_-]{1,60})$/i,
+    /\b(?:payment details|saved details|saved payout details|payout details)\s+saved(?:\s+for)?\s+([a-z0-9][a-z0-9 .,'@_-]{1,60})$/i,
+    /\b(?:have|has)\s+([a-z0-9][a-z0-9 .,'@_-]{1,60}?)'?s\s+(?:payment details|saved details|saved payout details|payout details)\s+saved\b/i,
+  ];
+  const candidate = patterns
+    .map((pattern) => value.match(pattern)?.[1]?.trim().replace(/[!?.,]+$/g, ""))
+    .find((match): match is string => Boolean(match));
   if (!candidate) return undefined;
   if (/\b(currency|amount|method|wallet|status)\b/i.test(candidate)) return undefined;
   return candidate;
+}
+
+function hasSavedRecipientLookupIntent(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(saved contact|existing contact|someone saved|payment details saved|saved payment details|saved payout details|saved details|payout details saved)\b/i.test(value);
 }
 
 function parseIntentHints(text: string | undefined): ParsedHints {
@@ -1003,7 +1015,7 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/make a transfer|send money|send|transfer|pay /.test(lower) && !hints.goal) {
     hints.goal = "transfer";
   }
-  if (/saved contact|existing contact|someone saved/.test(lower)) {
+  if (hasSavedRecipientLookupIntent(value)) {
     hints.savedOrNew = "saved";
   }
   if (/new recipient|new contact|someone new/.test(lower)) {
@@ -5407,7 +5419,31 @@ async function maybeHandleKycTurn(
     return existingVerificationResult;
   }
   const text = cleanText(turn.text || turn.option);
+  const savedRecipientLookupIntent = hasSavedRecipientLookupIntent(text);
+  const savedRecipientLookupQuery = parseSavedContactRecipient(text) || cleanText(session.recipientQuery || session.recipientName);
   const parsedIdentity = parseKycIdentityInput(text);
+
+  if (savedRecipientLookupIntent) {
+    const recipientLine = savedRecipientLookupQuery
+      ? ` I can check saved payout details for ${savedRecipientLookupQuery} right after that.`
+      : " I can check saved payout details right after that.";
+    if (session.stage === "awaiting_kyc_full_name") {
+      return reply(
+        withUpdate(session, deps),
+        `${buildKycRequirementMessage(session)} First, what full legal name should I use for the verification?${recipientLine}`
+      );
+    }
+    if (session.stage === "awaiting_kyc_country") {
+      return reply(
+        withUpdate(session, deps),
+        `${buildKycCountryPrompt(session)}${recipientLine}`
+      );
+    }
+    return reply(
+      withUpdate(session, deps),
+      `I still need UNIGOX to mark your KYC as approved before I can continue. Once that is done, message me here and I’ll resume the transfer.${recipientLine}`
+    );
+  }
 
   if (session.stage === "awaiting_kyc_full_name") {
     const fullName = parsedIdentity.fullName || text?.trim();
@@ -6582,13 +6618,15 @@ export async function advanceTransferFlow(
   const knownRecipientQuery = cleanText(session.recipientQuery || session.recipientName);
   const normalizedKnownRecipient = normalizeLookupValue(knownRecipientQuery);
   const normalizedHintedRecipient = normalizeLookupValue(hints.recipient);
+  const explicitSavedRecipientLookup = stageAwareHints.savedOrNew === "saved";
   const shouldRecheckSavedRecipient = Boolean(
     session.goal === "transfer"
     && !session.contactExists
     && !session.contactKey
     && !session.remoteSavedContact
     && (
-      (session.recipientQuery && !session.recipientName)
+      explicitSavedRecipientLookup
+      || (session.recipientQuery && !session.recipientName)
       || session.recipientMode === "saved"
       || (
         hints.recipient
@@ -6599,7 +6637,9 @@ export async function advanceTransferFlow(
     )
   );
   const recipientLookupQuery = cleanText(
-    shouldRecheckSavedRecipient && hints.recipient
+    explicitSavedRecipientLookup
+      ? (hints.recipient || session.recipientQuery || session.recipientName)
+      : shouldRecheckSavedRecipient && hints.recipient
       ? hints.recipient
       : knownRecipientQuery
   );

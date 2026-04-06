@@ -1481,6 +1481,50 @@ test("saved contact partial name asks for confirmation before using the saved ro
   assert.doesNotMatch(res.reply, /What currency should the recipient receive/i);
 });
 
+test("mid-flow saved payment details question re-checks saved UNIGOX payout details", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send money", deps);
+  res.session.recipientMode = "new";
+  res.session.recipientName = "Aleksandr Vinogradov";
+  res.session.recipientQuery = "Aleksandr Vinogradov";
+  res.session.currency = "EUR";
+  res.session.payment = {
+    methodId: 519,
+    methodName: "Other Bank",
+    methodSlug: "other-bank",
+    networkId: 49,
+    networkName: "European Transfer (SEPA)",
+    networkSlug: "iban-sepa",
+  };
+  res.session.details = {};
+  res.session.detailCollection = { index: 0 };
+  res.session.stage = "awaiting_payment_details";
+
+  res = await advanceTransferFlow(res.session, "We have Aleksandr's payment details saved.", deps);
+
+  assert.equal(res.session.stage, "awaiting_saved_recipient_confirmation");
+  assert.equal(res.session.pendingSavedRecipientConfirmation?.source, "remote");
+  assert.equal(res.session.pendingSavedRecipientConfirmation?.match.contact.name, "Aleksandr Example");
+  assert.match(res.reply, /saved UNIGOX payout details for Aleksandr Example/i);
+  assert.match(res.reply, /Should I use that saved recipient\?/i);
+});
+
 test("remote saved UNIGOX payout details resolve directly when the send amount is already specified", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({
@@ -1757,6 +1801,47 @@ test("preflight KYC gating blocks before confirmation and asks only for the full
   assert.ok(client.calls.includes("getProfile"));
   assert.ok(client.calls.includes("getKycVerificationStatus"));
   assert.ok(!client.calls.includes("createTradeRequest"));
+});
+
+test("saved payment details question during KYC keeps asking for the legal name", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    balances: { USDC: 1, USDT: 110.2 },
+    paymentDetails: [
+      {
+        id: 3413,
+        fiat_currency_code: "EUR",
+        payment_method: { id: 1, name: "Wise", slug: "wise" },
+        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        details: {
+          iban: "EE382200221020145685",
+          full_name: "Aleksandr Example",
+        },
+      },
+    ],
+    profile: {
+      id_verification_status: "NOT_VERIFIED",
+      total_traded_volume_usd: 40,
+      first_name: undefined,
+      last_name: undefined,
+      kyc_country_code: undefined,
+    },
+    preflightQuotesByAsset: {
+      USDC: { totalCryptoAmount: 73.1, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+      USDT: { totalCryptoAmount: 72.55, feeCryptoAmount: 0.36, vendorOfferRate: 0.827 },
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+
+  res = await advanceTransferFlow(res.session, "Don't we have payment details saved for Aleksandr?", deps);
+
+  assert.equal(res.session.stage, "awaiting_kyc_full_name");
+  assert.equal(res.session.auth.kycFullName, undefined);
+  assert.match(res.reply, /First, what full legal name should I use for the verification\?/i);
+  assert.match(res.reply, /I can check saved payout details for Aleksandr right after that\./i);
 });
 
 test("preflight KYC gating asks only for country when the full name is already known", async () => {
