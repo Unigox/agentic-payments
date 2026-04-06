@@ -2542,6 +2542,48 @@ test("bank-style SEPA flows collect bank name when required", async () => {
   assert.match(res.reply, /Which bank should receive this payout/i);
 });
 
+test("awaiting confirmation re-resolves a natural bank or provider correction before trade placement", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({
+    preflightQuote: {
+      paymentMethodName: "Other Bank",
+      paymentNetworkName: "European Transfer (SEPA)",
+    },
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send money", deps);
+  res = await advanceTransferFlow(res.session, "new recipient", deps);
+  res = await advanceTransferFlow(res.session, "Aleksandr Vinogradov", deps);
+  res = await advanceTransferFlow(res.session, "EUR", deps);
+  res = await advanceTransferFlow(res.session, "Other Bank", deps);
+  res = await advanceTransferFlow(res.session, "BE70967067003825", deps);
+  res = await advanceTransferFlow(res.session, "Aleksandr Vinogradov", deps);
+  res = await advanceTransferFlow(res.session, "Example Bank", deps);
+  res = await advanceTransferFlow(res.session, "no", deps);
+  res = await advanceTransferFlow(res.session, "50", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.payment?.methodSlug, "other-bank");
+  assert.equal(res.session.payment?.networkSlug, "iban-sepa");
+  assert.match(res.reply, /Send 50 EUR to Aleksandr Vinogradov via Other Bank via European Transfer \(SEPA\)\?/i);
+
+  res = await advanceTransferFlow(res.session, "No, the bank is Wise! SEPA", deps);
+
+  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.execution.confirmed, false);
+  assert.equal(res.session.payment?.methodSlug, "wise");
+  assert.equal(res.session.payment?.networkSlug, "iban-sepa");
+  assert.deepEqual(res.session.details, {
+    iban: "BE70967067003825",
+    full_name: "Aleksandr Vinogradov",
+  });
+  assert.match(res.reply, /I'll use Wise via European Transfer \(SEPA\) instead/i);
+  assert.match(res.reply, /Send 50 EUR to Aleksandr Vinogradov via Wise via European Transfer \(SEPA\)\?/i);
+  assert.equal(client.calls.includes("createTradeRequest"), false);
+  assert.ok(client.calls.filter((call) => call === "ensurePaymentDetail").length >= 2);
+});
+
 test("India IMPS details validate and normalize placeholder IMPS payout fields", () => {
   const config = FIELD_CONFIGS["INR:imps-or-neft-transfer:imps-neft-india"];
   assert.ok(config);

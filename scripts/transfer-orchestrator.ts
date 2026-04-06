@@ -526,6 +526,48 @@ const AFFIRMATIVE_RE = /^(yes|y|save it|save|update it)$/i;
 const CONFIRM_RE = /^(confirm|confirmed|proceed|go ahead|send it|do it|retry|continue)$/i;
 const NO_RE = /^(no|n|don'?t|not now|skip save)$/i;
 const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
+const GENERIC_SELECTION_TOKENS = new Set([
+  "account",
+  "accounts",
+  "actually",
+  "bank",
+  "banks",
+  "change",
+  "correct",
+  "different",
+  "digital",
+  "do",
+  "for",
+  "funds",
+  "iban",
+  "instead",
+  "is",
+  "make",
+  "method",
+  "methods",
+  "money",
+  "network",
+  "networks",
+  "no",
+  "not",
+  "now",
+  "payment",
+  "payments",
+  "please",
+  "provider",
+  "receive",
+  "route",
+  "send",
+  "the",
+  "traditional",
+  "transfer",
+  "transfers",
+  "use",
+  "via",
+  "wallet",
+  "wallets",
+  "wrong",
+]);
 const SIGNIN_READY_RE = /^(yes|y|done|ready|already signed in|already logged in|signed in|logged in|i signed in|i have signed in|i already signed in|i logged in|i have logged in)$/i;
 const NOT_READY_RE = /^(no|n|not yet|haven'?t|have not|didn'?t|did not)$/i;
 const DELETED_RE = /^(deleted|i deleted it|deleted it|it'?s deleted|removed it|done deleting)$/i;
@@ -3619,6 +3661,7 @@ function resetPaymentSelection(session: TransferSession): void {
   session.saveContactDecision = undefined;
   session.contactSaveAction = session.contactExists ? "update" : "create";
   session.execution.confirmed = false;
+  session.execution.paymentDetailsId = undefined;
   clearExecutionPreflight(session);
 }
 
@@ -4409,6 +4452,82 @@ function chooseNetwork(networks: PaymentNetworkInfo[], query: string): PaymentNe
     normalizeMatchValue(network.slug) === normalizedQuery ||
     normalizeMatchValue(network.name) === normalizedQuery
   ) || networks.find((network) => normalizeMatchValue(network.name).includes(normalizedQuery));
+}
+
+function tokenizeSelectionTerms(value: string | undefined, ignored: Set<string> = new Set()): string[] {
+  return normalizeMatchValue(value)
+    .split(" ")
+    .filter((token) => token.length >= 3 && !GENERIC_SELECTION_TOKENS.has(token) && !ignored.has(token));
+}
+
+function scoreSelectionMention(query: string, candidates: string[], ignored: Set<string> = new Set()): number {
+  const normalizedQuery = normalizeMatchValue(query);
+  if (!normalizedQuery) return 0;
+
+  let bestScore = 0;
+  const queryTokens = new Set(tokenizeSelectionTerms(normalizedQuery));
+  for (const candidate of candidates) {
+    const normalizedCandidate = normalizeMatchValue(candidate);
+    if (!normalizedCandidate) continue;
+    if (normalizedQuery === normalizedCandidate) return 1000;
+    if (normalizedQuery.includes(normalizedCandidate)) {
+      bestScore = Math.max(bestScore, 500 + normalizedCandidate.split(" ").length);
+    }
+    const overlap = tokenizeSelectionTerms(normalizedCandidate, ignored).filter((token) => queryTokens.has(token)).length;
+    if (overlap > 0) {
+      bestScore = Math.max(bestScore, overlap * 10);
+    }
+  }
+
+  return bestScore;
+}
+
+function chooseMentionedMethod(methods: PaymentMethodInfo[], query: string): { method?: PaymentMethodInfo; ambiguous: PaymentMethodInfo[] } {
+  const direct = chooseMethod(methods, query);
+  if (direct.method) return direct;
+
+  const scored = methods
+    .map((method) => ({
+      method,
+      score: scoreSelectionMention(query, [method.name, method.slug]),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (!scored.length) return { ambiguous: [] };
+  if (scored.length === 1 || scored[0].score > scored[1].score) {
+    return { method: scored[0].method, ambiguous: [] };
+  }
+  return { ambiguous: scored.filter((entry) => entry.score === scored[0].score).slice(0, 6).map((entry) => entry.method) };
+}
+
+function chooseMentionedNetwork(
+  networks: PaymentNetworkInfo[],
+  query: string,
+  method?: PaymentMethodInfo
+): PaymentNetworkInfo | undefined {
+  const direct = chooseNetwork(networks, query);
+  if (direct) return direct;
+
+  const ignoredMethodTerms = new Set([
+    ...tokenizeSelectionTerms(method?.name),
+    ...tokenizeSelectionTerms(method?.slug),
+  ]);
+  const scored = networks
+    .map((network) => ({
+      network,
+      score: scoreSelectionMention(query, [network.name, network.slug], ignoredMethodTerms),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score);
+
+  if (!scored.length) return undefined;
+  if (scored.length === 1 || scored[0].score > scored[1].score) return scored[0].network;
+  return undefined;
+}
+
+function buildPaymentRouteChangeMessage(method: PaymentMethodInfo, network: PaymentNetworkInfo): string {
+  return `Okay — I'll use ${method.name} via ${network.name} instead.`;
 }
 
 function settlementMonitorOptions(
@@ -5786,6 +5905,126 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
   return undefined;
 }
 
+async function maybeHandlePaymentRouteCorrection(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps
+): Promise<TransferFlowResult | undefined> {
+  if (session.stage !== "awaiting_confirmation" || !session.currency || !session.payment) return undefined;
+
+  const query = cleanText(turn.option || turn.text);
+  if (!query || CONFIRM_RE.test(query) || /^confirm\b/i.test(query)) return undefined;
+
+  const getMethods = deps.getPaymentMethodsForCurrency || defaultGetPaymentMethodsForCurrency;
+  const currencyData = await getMethods(session.currency);
+  const currentMethod = currencyData.paymentMethods.find((method) => method.id === session.payment?.methodId);
+  const selectedMethod = chooseMentionedMethod(currencyData.paymentMethods, query).method;
+  const nextMethod = selectedMethod || currentMethod;
+  if (!nextMethod) return undefined;
+
+  const nextNetwork = chooseMentionedNetwork(nextMethod.networks, query, nextMethod)
+    || (nextMethod.networks.length === 1 ? nextMethod.networks[0] : undefined);
+
+  if (!nextNetwork) {
+    if (!selectedMethod || selectedMethod.id === session.payment.methodId) return undefined;
+    session.payment = {
+      methodId: nextMethod.id,
+      methodSlug: nextMethod.slug,
+      methodName: nextMethod.name,
+      networkId: 0,
+      networkSlug: "",
+      networkName: "",
+    };
+    session.details = {};
+    session.detailCollection = { index: 0 };
+    session.execution.confirmed = false;
+    session.execution.paymentDetailsId = undefined;
+    clearExecutionPreflight(session);
+    session.stage = "awaiting_payment_network";
+    return reply(
+      withUpdate(session, deps),
+      `${nextMethod.name} has multiple payout routes. ${buildPaymentNetworkPrompt(nextMethod, session.currency)}`,
+      nextMethod.networks.map((network) => network.name)
+    );
+  }
+
+  if (nextMethod.id === session.payment.methodId && nextNetwork.id === session.payment.networkId) {
+    return undefined;
+  }
+
+  const previousDetails = { ...session.details };
+  session.payment = {
+    methodId: nextMethod.id,
+    methodSlug: nextMethod.slug,
+    methodName: nextMethod.name,
+    networkId: nextNetwork.id,
+    networkSlug: nextNetwork.slug,
+    networkName: nextNetwork.name,
+  };
+  session.details = {};
+  session.detailCollection = { index: 0 };
+  session.contactSaveAction = session.contactExists ? "update" : "create";
+  session.execution.confirmed = false;
+  session.execution.paymentDetailsId = undefined;
+  clearExecutionPreflight(session);
+
+  const config = await resolveFieldConfig(session, deps);
+  const relevantDetails = Object.fromEntries(
+    config.fields
+      .map((field) => [field.field, previousDetails[field.field]])
+      .filter(([, value]) => typeof value === "string" && cleanText(value).length > 0)
+  ) as Record<string, string>;
+  const validate = deps.validatePaymentDetailInput || defaultValidatePaymentDetailInput;
+  const validation = validate(relevantDetails, config.fields, fieldValidationOptions(config));
+  session.details = { ...validation.normalizedDetails };
+  session.payment = {
+    ...session.payment,
+    methodSlug: config.method.slug,
+    networkSlug: config.network.slug,
+    networkName: config.network.name,
+    selectedFormatId: config.selectedFormatId,
+  };
+
+  const routeChangeMessage = buildPaymentRouteChangeMessage(config.method, config.network);
+  const events: TransferFlowEvent[] = [];
+  if (!validation.valid) {
+    const firstError = validation.errors[0];
+    const fieldIndex = Math.max(0, config.fields.findIndex((field) => field.field === firstError.field));
+    session.detailCollection.index = fieldIndex;
+    session.detailCollection.lastError = firstError.message;
+    session.stage = "awaiting_payment_details";
+    return reply(
+      withUpdate(session, deps),
+      `${routeChangeMessage} ${firstError.message}. ${currentFieldPrompt(config.fields[fieldIndex])}`,
+      undefined,
+      events
+    );
+  }
+
+  session.detailCollection.index = config.fields.length;
+  if (session.saveContactDecision === "yes") {
+    const savedEvent = await saveCurrentContact(session, deps);
+    if (savedEvent) events.push(savedEvent);
+  }
+
+  const client = await getExecutionClient(deps, session);
+  const preflight = await ensureExecutionPreflight(session, deps, client);
+  events.push(...preflight.events);
+  if (preflight.blockedResult) {
+    preflight.blockedResult.reply = `${routeChangeMessage}\n\n${preflight.blockedResult.reply}`;
+    preflight.blockedResult.events = [...events, ...preflight.blockedResult.events];
+    return preflight.blockedResult;
+  }
+
+  session.stage = "awaiting_confirmation";
+  return reply(
+    withUpdate(session, deps),
+    `${routeChangeMessage}\n\n${buildConfirmationMessage(session)}`,
+    undefined,
+    events
+  );
+}
+
 async function ensureExecutionPreflight(
   session: TransferSession,
   deps: TransferFlowDeps,
@@ -6210,6 +6449,9 @@ export async function advanceTransferFlow(
 
   applyHintsToSession(session, stageAwareHints);
   applyMidFlowChanges(session, hints);
+
+  const paymentRouteCorrectionReply = await maybeHandlePaymentRouteCorrection(session, normalizedTurn, deps);
+  if (paymentRouteCorrectionReply) return paymentRouteCorrectionReply;
 
   const topUpReply = await maybeHandleTopUpTurn(session, normalizedTurn, deps);
   if (topUpReply) return topUpReply;
