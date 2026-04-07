@@ -49,6 +49,11 @@ Each adapter decides how to render them:
 
 Everything above is intended to stay local to each tester's machine. This repo does not assume a shared hosted MCP layer.
 
+WalletConnect distribution rule:
+- the product should ship with a default UNIGOX-managed WalletConnect project id for the EVM browser-login helper
+- end users should not be asked to create their own WalletConnect / Reown project just to use the connector
+- advanced or self-hosted installs may still override the default with `WALLETCONNECT_PROJECT_ID`, `REOWN_PROJECT_ID`, or `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`
+
 Anthropic-specific tool split:
 - `send_money_turn` remains the canonical catch-all tool contract
 - Claude Desktop additionally exposes thin entry tools for `start_send_money`, `sign_in_unigox`, `create_wallet`, `export_wallet`, `check_kyc`, and `save_payment_details`

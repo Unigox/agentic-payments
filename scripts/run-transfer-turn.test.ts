@@ -483,6 +483,71 @@ test("runner uses persisted EVM auth from the configured env file when approving
   }
 });
 
+test("runner falls back to the bundled WalletConnect project id when no env override is configured", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-walletconnect-default-"));
+  const envPath = path.join(stateDir, ".env");
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+
+  fs.writeFileSync(envPath, [
+    `UNIGOX_EVM_LOGIN_PRIVATE_KEY=${VALID_LOGIN_KEY}`,
+    "UNIGOX_LOGIN_WALLET_ORIGIN=generated_evm",
+  ].join("\n") + "\n");
+
+  const originalApprove = UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin;
+  const originalGetProfile = UnigoxClient.prototype.getProfile;
+  const approvedUris: string[] = [];
+
+  UnigoxClient.prototype.getProfile = async function () {
+    return { username: "skill" } as any;
+  };
+
+  UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin = async function (uri: string, options: { projectId: string; sessionKey?: string }) {
+    approvedUris.push(uri);
+    assert.equal(options.projectId, "5b859bb2b321133226b5b03b00ace35b");
+    assert.equal(options.sessionKey, "telegram-main");
+    return {
+      sessionTopic: "session-topic",
+      pairingTopic: "pairing-topic",
+      requestedChains: ["eip155:1"],
+      approvedChains: ["eip155:1"],
+      requestedMethods: ["eth_accounts"],
+      handledMethods: ["eth_accounts"],
+      requestCount: 1,
+      walletAddress: this["loginWallet"]?.address,
+    };
+  };
+
+  try {
+    const result = await withEnv(
+      {
+        SEND_MONEY_ENV_PATH: envPath,
+        SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: undefined,
+        WALLETCONNECT_PROJECT_ID: undefined,
+        REOWN_PROJECT_ID: undefined,
+        NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: undefined,
+      },
+      () => runTransferTurn({
+        text: wcLink,
+        sessionKey: "telegram:main",
+        stateDir,
+        deps: {
+          authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+          client: {
+            getProfile: async () => ({ username: "skill" }),
+          } as any,
+        },
+      }),
+    );
+
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+    assert.match(result.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
+    assert.deepEqual(approvedUris, [wcLink]);
+  } finally {
+    UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin = originalApprove;
+    UnigoxClient.prototype.getProfile = originalGetProfile;
+  }
+});
+
 test("formatTransferRunnerOutput appends options as bullets", () => {
   const output = formatTransferRunnerOutput({
     session: {} as any,

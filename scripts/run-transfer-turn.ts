@@ -31,6 +31,7 @@ const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
 const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconnect");
 const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
 const DEFAULT_EXPORT_DIR = path.join(SKILL_DIR, "workflows", "exports");
+const DEFAULT_WALLETCONNECT_PROJECT_ID = "5b859bb2b321133226b5b03b00ace35b";
 
 export interface TransferRunnerOptions {
   text?: string;
@@ -263,7 +264,8 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
   const exportDir = resolveWalletExportDir();
   const walletConnectProjectId = process.env.WALLETCONNECT_PROJECT_ID
     || process.env.REOWN_PROJECT_ID
-    || process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
+    || process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+    || DEFAULT_WALLETCONNECT_PROJECT_ID;
   return {
     persistEmailAddress: async (emailAddress) => {
       upsertEnvAssignments(envPath, {
@@ -344,9 +346,6 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
     },
     decodeTonConnectQr: async (imagePath) => decodeTonConnectUniversalLinkFromImagePath(imagePath),
     approveEvmWalletConnectLink: async (uri) => {
-      if (!walletConnectProjectId) {
-        throw new Error("WalletConnect browser approval requires WALLETCONNECT_PROJECT_ID on this machine.");
-      }
       const client = buildWalletConnectClient();
       return client.approveEvmWalletConnectBrowserLogin(uri, {
         projectId: walletConnectProjectId,
