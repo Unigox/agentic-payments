@@ -2471,7 +2471,8 @@ function buildSigningKeyBrowserAccessPrompt(choice?: AuthChoice): string {
 
   if (choice === "generated_evm") {
     return [
-      "To get into unigox.com settings and export it, use the EVM wallet-connection flow for this same wallet on the website.",
+      "To get into unigox.com settings and export it, use the EVM wallet-connection flow (WalletConnect) for this same wallet on the website.",
+      "Do not use TonConnect or tc:// links — this is an EVM wallet, not a TON wallet.",
       "Because I created the EVM login wallet on this device, say 'export this wallet' if you want a portable backup, import it into an isolated EVM wallet app or browser extension, then complete the wallet connection on unigox.com.",
       "If unigox.com shows a fresh WalletConnect QR or wc: link for that wallet, send it here and I can approve that live browser-login request locally with the EVM login wallet on this machine.",
       "If the site opens a browser-extension approval instead of WalletConnect, complete that extension approval there.",
@@ -2480,7 +2481,8 @@ function buildSigningKeyBrowserAccessPrompt(choice?: AuthChoice): string {
 
   if (choice === "evm") {
     return [
-      "To get into unigox.com settings and export it, use the EVM wallet-connection flow for the same EVM wallet you already use on UNIGOX.",
+      "To get into unigox.com settings and export it, use the EVM wallet-connection flow (WalletConnect) for the same EVM wallet you already use on UNIGOX.",
+      "Do not use TonConnect or tc:// links — this is an EVM wallet, not a TON wallet.",
       "If unigox.com shows a fresh WalletConnect QR or wc: link for that wallet, send it here and I can approve that live browser-login request locally with the EVM login wallet on this machine.",
       "If the site opens a browser-extension approval instead of WalletConnect, complete that extension approval there.",
     ].join(" ");

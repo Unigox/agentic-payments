@@ -3940,12 +3940,11 @@ test("generated EVM wallet choice creates the wallet directly without asking for
   assert.equal(res.session.auth.mode, "evm");
   assert.equal(res.session.auth.choice, "generated_evm");
   assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
-  assert.match(res.reply, /use the EVM wallet-connection flow for this same wallet on the website/i);
+  assert.match(res.reply, /use the EVM wallet-connection flow.*for this same wallet on the website/i);
   assert.match(res.reply, /say 'export this wallet'/i);
   assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
   assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /TonConnect/i);
-  assert.doesNotMatch(res.reply, /tc:\/\//i);
+  assert.match(res.reply, /Do not use TonConnect/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.equal(client.calls.includes("requestEmailOTP"), false);
   assert.equal(client.calls.includes("generateAndLinkWallet"), false);
@@ -4946,12 +4945,11 @@ test("stored generated EVM auth without a signing key explains the EVM website l
   const res = await startTransferFlow("send 50 EUR to mom", deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /use the EVM wallet-connection flow for this same wallet on the website/i);
+  assert.match(res.reply, /use the EVM wallet-connection flow.*for this same wallet on the website/i);
   assert.match(res.reply, /say 'export this wallet'/i);
   assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
   assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /TonConnect/i);
-  assert.doesNotMatch(res.reply, /tc:\/\//i);
+  assert.match(res.reply, /Do not use TonConnect/i);
 });
 
 test("stored direct EVM auth without a signing key keeps the browser-login guidance on the EVM wallet path", async () => {
@@ -4964,11 +4962,10 @@ test("stored direct EVM auth without a signing key keeps the browser-login guida
   const res = await startTransferFlow("send 50 EUR to mom", deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /use the EVM wallet-connection flow for the same EVM wallet you already use on UNIGOX/i);
+  assert.match(res.reply, /use the EVM wallet-connection flow.*for the same EVM wallet you already use on UNIGOX/i);
   assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
   assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /TonConnect/i);
-  assert.doesNotMatch(res.reply, /tc:\/\//i);
+  assert.match(res.reply, /Do not use TonConnect/i);
 });
 
 test("missing signing key step accepts a fresh UNIGOX wc: link and approves the browser login with the local EVM wallet", async () => {
