@@ -286,6 +286,8 @@ Always keep the explicit tool-invocation path documented too. Natural routing is
 
 Best cold-start prompts:
 
+- `/agentic-payments`
+- `/agentic-payments lets start`
 - `I want to send money using Agentic Payments.`
 - `Use Agentic Payments to send money.`
 - `Continue my UNIGOX payment.`
@@ -304,6 +306,8 @@ Less reliable cold-start prompt:
 Why:
 
 - Claude may treat a bare connector-name mention as a registry-search request instead of a local-tool request.
+- An explicit `/agentic-payments` skill invocation should be treated as a direct request to use the installed local Agentic Payments setup, not as a reason to claim the extension is unavailable before routing has had a chance to load the local tools.
+- Fresh-start prompts like `/agentic-payments`, `/agentic-payments lets start`, `let's start`, or `I want to send money using Agentic Payments` should reset the default local Claude session instead of inheriting an older blocked payment flow when no explicit `session_key` is available.
 - Action-first phrasing like `send money`, `continue payment`, or `use Agentic Payments` gives the local `send_money_turn` tool a clearer routing signal.
 - If the local Agentic Payments extension is installed, Claude should prefer that local tool over public connector search.
 

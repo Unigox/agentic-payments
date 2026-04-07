@@ -1,11 +1,11 @@
 ---
 name: agentic-payments
-description: Use when the user wants to send money with UNIGOX or Agentic Payments, or mentions the local Agentic Payments connector/extension/plugin by name. If the local Agentic Payments extension is installed and its local tools are available, route into the best matching tool immediately instead of falling back to generic connector search or a blanket payment refusal.
+description: Use when the user wants to send money with UNIGOX or Agentic Payments, mentions the local Agentic Payments connector/extension/plugin by name, or explicitly invokes `/agentic-payments`. Route into the installed local Agentic Payments extension instead of generic connector search or a blanket payment refusal.
 ---
 
 # Agentic Payments Skill
 
-Use this skill when the user wants to send money with UNIGOX or Agentic Payments, or when they are trying to use the local Agentic Payments connector/extension/plugin.
+Use this skill when the user wants to send money with UNIGOX or Agentic Payments, when they are trying to use the local Agentic Payments connector/extension/plugin, or when they explicitly invoke `/agentic-payments`.
 
 ## Routing rule
 
@@ -20,6 +20,8 @@ If the local `Agentic Payments` extension is installed and its local tools are a
   - `save_payment_details` for saving or updating recipient payout details for later
   - `send_money_turn` as the canonical catch-all when more than one area is involved
 - call the matching tool immediately for natural requests like:
+  - `/agentic-payments`
+  - `/agentic-payments lets start`
   - `I want to send money`
   - `I want to send money using Agentic Payments`
   - `use Agentic Payments`
@@ -36,8 +38,11 @@ If the local `Agentic Payments` extension is installed and its local tools are a
   - `backup my generated wallet`
   - `Help me sign in to UNIGOX`
 - if the user mentions `Agentic Payments` and a local connector/extension/plugin is available, do not search the public registry first
+- if the user explicitly invokes `/agentic-payments`, treat that as a direct request to use the installed local Agentic Payments setup even if Claude has not yet shown the tools in a prior thought step
+- for explicit fresh-start phrasing like `/agentic-payments`, `/agentic-payments lets start`, `let's start`, `start over`, or `I want to send money using Agentic Payments`, prefer `start_send_money` and treat it as a new flow rather than inheriting an older blocked local session
 - do **not** answer with a generic connector search
 - do **not** answer with a blanket payment refusal
+- do **not** say the extension is unavailable merely because the current turn has not listed the local tools yet; if the user is clearly invoking the local setup, proceed with the local Agentic Payments path
 - if natural routing still fails, fall back to the documented direct invocation wording: `Use Agentic Payments send_money_turn. I want to send money.`
 
 The local tool runs a guided, user-confirmed UNIGOX flow on-device. It does not blindly execute a transfer without the user walking through recipient, auth, quote, KYC, and confirmation steps.
@@ -76,4 +81,4 @@ Use `send_money_turn` for:
 - receipt confirmation
 - any follow-up turn in the same UNIGOX payment flow
 
-If the local tool is unavailable, say that clearly and then fall back to a plain explanation.
+Only say the local tool is unavailable when Claude truly cannot access the installed Agentic Payments extension after trying to route into it. Do not use that fallback for explicit `/agentic-payments` starts, connector-name mentions, or first-turn lazy-load situations.

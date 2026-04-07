@@ -21,6 +21,7 @@ import {
   formatSendMoneyMcpResult,
   exportWalletMcpInputShape,
   savePaymentDetailsMcpInputShape,
+  shouldResetForFreshStart,
 } from "./send-money-mcp.ts";
 import { SEND_MONEY_TOOL_NAME } from "./send-money-tool.ts";
 
@@ -50,6 +51,15 @@ test("Anthropic alias tool schemas accept the expected inputs", () => {
   assert.equal(CHECK_KYC_TOOL_NAME, "check_kyc");
   assert.equal(SAVE_PAYMENT_DETAILS_TOOL_NAME, "save_payment_details");
   assert.equal(EXPORT_WALLET_TOOL_NAME, "export_wallet");
+});
+
+test("fresh Claude start phrasing resets the default local session when no session_key is provided", () => {
+  assert.equal(shouldResetForFreshStart("/agentic-payments lets start", undefined, undefined), true);
+  assert.equal(shouldResetForFreshStart("I want to send money using Agentic Payments.", undefined, undefined), true);
+  assert.equal(shouldResetForFreshStart("kick off Agentic Payments", undefined, undefined), true);
+  assert.equal(shouldResetForFreshStart("continue my UNIGOX payment", undefined, undefined), undefined);
+  assert.equal(shouldResetForFreshStart("/agentic-payments lets start", undefined, "chat-123"), undefined);
+  assert.equal(shouldResetForFreshStart("/agentic-payments lets start", false, undefined), false);
 });
 
 test("send_money MCP result formatter includes quick-reply options when available", () => {

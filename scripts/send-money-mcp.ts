@@ -193,6 +193,29 @@ function buildExportWalletFallback(walletType: "evm" | "ton" | undefined): strin
   return "Export this wallet";
 }
 
+export function shouldResetForFreshStart(text: string | undefined, reset: boolean | undefined, sessionKey: string | undefined): boolean | undefined {
+  if (typeof reset === "boolean") return reset;
+  if (sessionKey) return undefined;
+
+  const value = trimmed(text)?.toLowerCase();
+  if (!value) return true;
+
+  const freshStartPatterns = [
+    /^\/agentic-payments(?:\s|$)/,
+    /\blet'?s start\b/,
+    /\bstart\b/,
+    /\bstart over\b/,
+    /\bnew payment\b/,
+    /\bnew transfer\b/,
+    /\bbegin\b/,
+    /\bkick off\b/,
+    /\bi want to send money\b/,
+    /\buse agentic payments\b/,
+  ];
+
+  return freshStartPatterns.some((pattern) => pattern.test(value)) ? true : undefined;
+}
+
 export function formatSendMoneyMcpResult(result: TransferFlowResult): string {
   const reply = result.reply?.trim() || "No reply returned.";
   const options = Array.isArray(result.options)
@@ -238,7 +261,16 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
       description: startTool.description,
       inputSchema: startSendMoneyMcpInputShape,
     },
-    async (input) => runAndFormat(buildBaseToolInput(input, "I want to send money."), deps)
+    async (input) => runAndFormat(
+      buildBaseToolInput(
+        {
+          ...input,
+          reset: shouldResetForFreshStart(input.text, input.reset, input.session_key),
+        },
+        "I want to send money."
+      ),
+      deps
+    )
   );
 
   const signInTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === SIGN_IN_UNIGOX_TOOL_NAME)!;

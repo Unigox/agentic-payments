@@ -104,6 +104,8 @@ Claude trigger rule:
 - the local Anthropic descriptions should explicitly teach Claude that `Agentic Payments`, `UNIGOX`, `connector`, `extension`, and `plugin` mentions can all map to the same local `send_money_turn` tool
 - the routing copy should prefer local-tool invocation over public registry search when the extension is installed
 - the README should always include action-first example prompts such as `I want to send money using Agentic Payments` and `I have the Agentic Payments connector and I want to send money`
+- the README and companion Claude skill should also document `/agentic-payments` as a direct skill-style trigger for Claude, and that explicit skill invocation should not be treated as proof the extension is unavailable before local-tool routing has had a chance to load
+- when Claude does not provide a real per-chat `session_key`, explicit fresh-start prompts like `/agentic-payments lets start` should reset the default local session instead of inheriting an older blocked flow
 - the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
 - KYC FAQ turns such as `Do I need to do KYC?`, `Can I do KYC earlier?`, `I wanna do KYC on the platform`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
 - generated-wallet backup prompts like `export this wallet` or `backup my generated wallet` should route into the shared runner and write a local file instead of echoing secrets into chat
