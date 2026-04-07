@@ -1408,7 +1408,10 @@ function buildStartupAuthSnapshot(session: TransferSession): string | undefined 
   const parts: string[] = [];
   const formattedUsername = formatUsername(session.auth.username);
   if (formattedUsername) {
-    parts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
+    const origin = formatAuthOrigin(session.auth.choice);
+    parts.push(origin
+      ? `You're currently signed in as ${formattedUsername} on UNIGOX (${origin}).`
+      : `You're currently signed in as ${formattedUsername} on UNIGOX.`);
   }
   const balanceLine = buildWalletBalanceLine(session.auth.walletBalance, session.auth.balanceUsd);
   if (balanceLine) {
@@ -1513,7 +1516,10 @@ function decorateStartupReply(session: TransferSession, message: string): string
   if (!/signed in as/i.test(message)) {
     const formattedUsername = formatUsername(session.auth.username);
     if (formattedUsername) {
-      snapshotParts.push(`You're currently signed in as ${formattedUsername} on UNIGOX.`);
+      const origin = formatAuthOrigin(session.auth.choice);
+      snapshotParts.push(origin
+        ? `You're currently signed in as ${formattedUsername} on UNIGOX (${origin}).`
+        : `You're currently signed in as ${formattedUsername} on UNIGOX.`);
     }
   }
   if (!/Current wallet balance:/i.test(message)) {
@@ -1984,10 +1990,24 @@ function formatUsername(username: string | undefined): string | undefined {
   return username.startsWith("@") ? username : `@${username}`;
 }
 
-function buildUsernameReminder(username: string | undefined): string | undefined {
+function formatAuthOrigin(choice: AuthChoice | undefined): string | undefined {
+  switch (choice) {
+    case "evm": return "via EVM wallet";
+    case "ton": return "via TON wallet";
+    case "generated_evm": return "via a generated EVM wallet on this device";
+    case "generated_ton": return "via a generated TON wallet on this device";
+    case "email": return "via email";
+    default: return undefined;
+  }
+}
+
+function buildUsernameReminder(username: string | undefined, choice?: AuthChoice): string | undefined {
   const formatted = formatUsername(username);
   if (!formatted) return undefined;
-  return `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
+  const origin = formatAuthOrigin(choice);
+  return origin
+    ? `You're currently signed in as ${formatted} on UNIGOX (${origin}). You can change that username later in this agent flow or on unigox.com.`
+    : `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
 }
 
 function getInitiatorTradeRecipientName(trade: InitiatorTradeSummary | undefined): string | undefined {
@@ -2524,7 +2544,7 @@ function buildBrowserLoginAccessPrompt(choice?: AuthChoice): string {
 
 function buildEvmSigningKeyPromptForChoice(username: string | undefined, choice?: AuthChoice): string {
   return [
-    buildUsernameReminder(username),
+    buildUsernameReminder(username, choice),
     buildEvmKeySecurityWarning("evm_signing_key"),
     "Login works. One more step: I still need the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
     "Why: wallet login, TON login, or email OTP only gets me signed in. Secure in-app actions like funding trade escrow, confirming fiat received, or releasing escrow require that separate exported signing key.",
@@ -2538,7 +2558,7 @@ function buildEvmSigningKeyPromptForChoice(username: string | undefined, choice?
 
 function buildMissingSigningKeyPrompt(username: string | undefined, choice?: AuthChoice): string {
   return [
-    buildUsernameReminder(username),
+    buildUsernameReminder(username, choice),
     buildEvmKeySecurityWarning("evm_signing_key"),
     "Login is already set up, but this next step needs the separate UNIGOX EVM signing key from your account settings, the UNIGOX-exported EVM signing key.",
     "Why: sign-in alone is enough for quotes and some setup, but secure actions like funding trade escrow, confirming fiat received, or releasing escrow still require the exported signing key.",
@@ -2552,7 +2572,7 @@ function buildMissingSigningKeyPrompt(username: string | undefined, choice?: Aut
 
 function buildBrowserLoginContinuationPrompt(username: string | undefined, choice?: AuthChoice): string {
   return [
-    buildUsernameReminder(username),
+    buildUsernameReminder(username, choice),
     "Agent-side login is already set up on this machine.",
     "If you just want to log into unigox.com in the browser, you do not need to export any key yet.",
     buildBrowserLoginAccessPrompt(choice),
@@ -2641,7 +2661,15 @@ function buildTonConnectBrowserApprovalSuccessPrompt(): string {
   ].join(" ");
 }
 
-function buildTonConnectBrowserApprovalMissingTonKeyPrompt(): string {
+function buildTonConnectBrowserApprovalMissingTonKeyPrompt(choice?: AuthChoice): string {
+  if (choice === "evm" || choice === "generated_evm") {
+    return [
+      "That tc:// link is a TonConnect request, but you're signed in with an EVM wallet on this machine.",
+      "TonConnect needs TON key material, which isn't available here.",
+      "For this EVM login wallet, use the WalletConnect flow instead: open unigox.com, start the EVM wallet-connection login, and send me the fresh wc: link or WalletConnect QR from that page.",
+    ].join(" ");
+  }
+
   return [
     "I can consume a fresh UNIGOX tc:// TonConnect link here, but I still need TON key material for that exact wallet on this machine first.",
     "Send the TON mnemonic phrase or TON private key / secret key for that wallet, then paste the fresh tc:// link again.",
@@ -3317,7 +3345,7 @@ async function tryApproveProvidedTonConnectBrowserLink(
   } catch (error) {
     const message = error instanceof Error ? error.message : undefined;
     const prompt = /TON auth requires|tonPrivateKey|tonMnemonic|does not derive the exact TON address/i.test(message || "")
-      ? buildTonConnectBrowserApprovalMissingTonKeyPrompt()
+      ? buildTonConnectBrowserApprovalMissingTonKeyPrompt(session.auth.choice)
       : buildTonConnectBrowserApprovalFailurePrompt(message);
     return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
@@ -4485,7 +4513,7 @@ function buildConfirmationMessage(session: TransferSession): string {
     : undefined;
   const detailBlock = buildHumanDetailBlock(session.details);
   return [
-    buildUsernameReminder(session.auth.username),
+    buildUsernameReminder(session.auth.username, session.auth.choice),
     balanceLine,
     buildPreflightQuoteSummary(session.execution.preflight),
     buildAssetCoverageLine(session.execution.preflight),
@@ -7056,7 +7084,7 @@ async function ensureExecutionPreflight(
     session.topUp = undefined;
     session.stage = "awaiting_topup_method";
     const message = [
-      buildUsernameReminder(session.auth.username),
+      buildUsernameReminder(session.auth.username, session.auth.choice),
       buildWalletBalanceLine(balance, balance.totalUsd),
       buildPreflightQuoteSummary(session.execution.preflight),
       buildAssetCoverageLine(session.execution.preflight),

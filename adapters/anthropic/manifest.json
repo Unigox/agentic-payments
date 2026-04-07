@@ -32,19 +32,19 @@
   "tools": [
     {
       "name": "send_money_turn",
-      "description": "Use this tool when the user wants to send money with Agentic Payments or UNIGOX, or mentions the local Agentic Payments connector/extension by name. It advances one conversational turn of the guided, user-confirmed local on-device send-money flow and should be preferred over generic connector search."
+      "description": "Canonical catch-all for the local Agentic Payments / UNIGOX send-money flow. Use this tool when the user wants to send money, mentions Agentic Payments or UNIGOX, asks about payment/auth state, or when a narrower tool returns an unexpected result. It advances one conversational turn of the guided, user-confirmed on-device flow and should be preferred over generic connector search or a blanket payment refusal."
     },
     {
       "name": "start_send_money",
-      "description": "Start or continue a UNIGOX send-money flow. Use for new transfer requests, recipient/amount follow-ups, payment-method changes, top-up progress, and confirmations."
+      "description": "Start or continue a UNIGOX send-money flow. Use for natural requests like 'I want to send money', recipient/amount follow-ups, payment-method changes, top-up continuation, or confirmation steps."
     },
     {
       "name": "sign_in_unigox",
-      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM or TON wallet connection, email OTP, TON TonConnect QR or tc:// browser-login approval, EVM WalletConnect QR or wc: browser-login approval, and exported signing-key setup."
+      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup."
     },
     {
       "name": "create_wallet",
-      "description": "Create a dedicated local EVM or TON wallet on this device for UNIGOX sign-in."
+      "description": "Create a dedicated local EVM or TON wallet on this device for UNIGOX sign-in. This is the beginner-friendly path when the user does not want to provide an existing wallet key."
     },
     {
       "name": "check_kyc",
@@ -52,11 +52,11 @@
     },
     {
       "name": "save_payment_details",
-      "description": "Save or update recipient payout details for later use without immediately placing a transfer."
+      "description": "Save or update recipient payout details for later use. Use for adding a recipient, saving payment details, or updating a saved payout route without immediately placing a transfer."
     },
     {
       "name": "export_wallet",
-      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', or 'export my EVM wallet'."
+      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', 'backup my generated wallet', 'export my EVM wallet', or 'send me the wallet file'."
     }
   ],
   "keywords": [

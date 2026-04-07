@@ -48,6 +48,14 @@ If the user says anything equivalent to:
   - `Oismae tee 140`
   - `KYC done`
   - `Yes money arrived`
+  - or the user asks a question about the current payment/auth state, such as:
+  - `how did you log in?`
+  - `what auth method am I using?`
+  - `what wallet am I using?`
+  - `what's my balance?`
+  - `what's my UNIGOX username?`
+  - `why do you need that key?`
+  - `what stage is this at?`
 
 this skill must own the turn immediately.
 
@@ -70,6 +78,15 @@ Use the runner JSON as the source of truth for the user-facing reply.
 - The shell wrapper self-installs the skill's `scripts/` npm dependencies on first run before launching the TypeScript runner. Do not bypass it with a direct `node ... run-transfer-turn.ts` call unless you have already verified the dependencies are present.
 
 Do not freestyle recipient resolution, saved-recipient lookup, balance wording, onboarding wording, or action choices when the runner can answer them.
+
+Flow-state rule:
+- if the user asks any question about the current auth method, login state, wallet, balance, username, why a step is needed, or what happened in the flow, pass that question to the runner verbatim and relay the runner's answer
+- do not guess, infer from prior runner output, or reconstruct the answer from memory — prior runner output may be stale
+
+Protocol-naming rule:
+- when the runner says "WalletConnect" or "wc:", relay exactly that — do not substitute "TonConnect" or "tc://"
+- when the runner says "TonConnect" or "tc://", relay exactly that — do not substitute "WalletConnect" or "wc:"
+- these are different protocols for different wallet types (EVM vs TON) and mixing them sends the user down the wrong path
 
 KYC continuation rule:
 - if the user says `I wanna do KYC`, `give me the KYC link`, `complete KYC`, `Do I need to do KYC?`, `Can I do KYC earlier?`, or similar while the send-money flow is active, pass that turn to the runner verbatim

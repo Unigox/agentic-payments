@@ -287,7 +287,16 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
       description: signInTool.description,
       inputSchema: signInUnigoxMcpInputShape,
     },
-    async (input) => runAndFormat(buildBaseToolInput(input, "I need to sign in to UNIGOX."), deps)
+    async (input) => runAndFormat(
+      buildBaseToolInput(
+        {
+          ...input,
+          reset: shouldResetForFreshStart(input.text, input.reset, input.session_key),
+        },
+        "I need to sign in to UNIGOX."
+      ),
+      deps
+    )
   );
 
   const createWalletTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === CREATE_WALLET_TOOL_NAME)!;
