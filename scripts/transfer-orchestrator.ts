@@ -4086,7 +4086,7 @@ async function maybeHandleAuthOnboardingTurn(
       }
     }
 
-    if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
+    if (!responseText || hinted.signInIntent || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
       const prompt = hinted.signInIntent
         ? buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice)
         : buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
