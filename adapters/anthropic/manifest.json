@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "agentic-payments-local",
   "display_name": "Agentic Payments",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Local Agentic Payments / UNIGOX send-money connector for Claude Desktop.",
   "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same shared runner used by the other runtime adapters. The Claude extension now exposes multiple entry tools for clearer routing: start a payment, sign in, create a wallet, export a generated wallet backup, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. These tools all dispatch into the same underlying state machine instead of forking payment logic.",
   "author": {
