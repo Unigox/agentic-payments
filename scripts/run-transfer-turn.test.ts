@@ -261,7 +261,7 @@ test("runner can continue an active missing-signing-key step from a TonConnect Q
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-tonconnect-qr-"));
   const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
   const deps = {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
     client: {
       getProfile: async () => ({ username: "skill" }),
       getWalletBalance: async () => makeWalletBalance(),
@@ -284,21 +284,37 @@ test("runner can continue an active missing-signing-key step from a TonConnect Q
     },
   };
 
-  const first = await runTransferTurn({
+  const first = await withEnv({
+    SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: "1",
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_LOGIN_WALLET_ORIGIN: undefined,
+    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: undefined,
+    UNIGOX_TON_LOGIN_WALLET_ORIGIN: undefined,
+  }, async () => runTransferTurn({
     text: "send 50 EUR to Aleksandr",
     sessionKey: "telegram:main",
     stateDir,
     deps,
-  });
+  }));
 
   assert.equal(first.session.stage, "awaiting_evm_signing_key");
 
-  const second = await runTransferTurn({
+  const second = await withEnv({
+    SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: "1",
+    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
+    UNIGOX_TON_PRIVATE_KEY: undefined,
+    UNIGOX_TON_MNEMONIC: undefined,
+    UNIGOX_LOGIN_WALLET_ORIGIN: undefined,
+    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: undefined,
+    UNIGOX_TON_LOGIN_WALLET_ORIGIN: undefined,
+  }, async () => runTransferTurn({
     imagePath: "/tmp/unigox-qr.png",
     sessionKey: "telegram:main",
     stateDir,
     deps,
-  });
+  }));
 
   assert.equal(second.session.stage, "awaiting_evm_signing_key");
   assert.match(second.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
@@ -641,6 +657,7 @@ test("runner persists TON auth secrets into the skill env file by default", asyn
   assert.match(envBody, /UNIGOX_TON_WALLET_VERSION=v5r1/);
   assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
   assert.match(envBody, /UNIGOX_LOGIN_WALLET_ORIGIN=ton/);
+  assert.match(envBody, /UNIGOX_TON_LOGIN_WALLET_ORIGIN=ton/);
 });
 
 test("runner writes a generated TON wallet export file when asked", async () => {

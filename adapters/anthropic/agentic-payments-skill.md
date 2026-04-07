@@ -52,8 +52,10 @@ The local tool runs a guided, user-confirmed UNIGOX flow on-device. It does not 
 After calling `send_money_turn`:
 
 - relay the tool's returned reply closely and do not invent an alternative auth step
+- if the user says they just want to log in to UNIGOX, keep the response focused on browser login first; do not lead with exported-signing-key instructions before the login step is complete
 - do not add an email request unless the tool reply explicitly asks for email OTP
 - if the user chooses `Create a dedicated EVM wallet` or `Create a dedicated TON wallet`, do not ask for email unless the tool itself explicitly says email is required
+- do not mix TON and EVM browser-login protocols: TON means TonConnect (`tc://` or TonConnect QR), EVM means WalletConnect (`wc:` or WalletConnect QR / extension approval)
 - if the user asks whether the recipient or payment details are already saved, call the tool again and relay its answer; do not claim the system requires manual IBAN entry every time unless the tool explicitly says no saved details were found
 - if the user asks to export a generated wallet, relay the file path from the tool closely and do not paste the wallet secret back into chat as plain text yourself
 - if the user asks to export the wallet the tool created for them, prefer `export_wallet` and do not reinterpret that as exporting the separate UNIGOX signing key from account settings

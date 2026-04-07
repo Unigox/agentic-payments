@@ -238,7 +238,7 @@ function resolveFrontendUrl(): string | undefined {
 function buildTonConnectClient(): UnigoxClient {
   let config: UnigoxClientConfig = {};
   try {
-    config = loadUnigoxConfigFromEnv();
+    config = loadUnigoxConfigFromEnv("ton");
   } catch {
     // TonConnect payload generation can still proceed without stored auth.
   }
@@ -250,7 +250,7 @@ function buildTonConnectClient(): UnigoxClient {
 }
 
 function buildWalletConnectClient(): UnigoxClient {
-  const config = loadUnigoxConfigFromEnv();
+  const config = loadUnigoxConfigFromEnv("evm");
   const frontendUrl = resolveFrontendUrl() || config.frontendUrl;
   return new UnigoxClient({
     ...config,
@@ -278,8 +278,17 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
       });
     },
     persistAuthChoice: async (choice) => {
+      const authMode = choice === "evm" || choice === "generated_evm"
+        ? "evm"
+        : choice === "ton" || choice === "generated_ton"
+          ? "ton"
+          : choice === "email"
+            ? "email"
+            : undefined;
       upsertEnvAssignments(envPath, {
         UNIGOX_LOGIN_WALLET_ORIGIN: choice,
+        ...(authMode === "evm" ? { UNIGOX_EVM_LOGIN_WALLET_ORIGIN: choice } : {}),
+        ...(authMode === "ton" ? { UNIGOX_TON_LOGIN_WALLET_ORIGIN: choice } : {}),
       });
     },
     exportLoginWalletFile: async (wallet) => writeLoginWalletExportFile(exportDir, wallet),
