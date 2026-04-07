@@ -41,7 +41,7 @@ const imagePathShape = z
   .string()
   .min(1, "image_path must not be empty")
   .optional()
-  .describe("Optional absolute local path to a fresh TonConnect QR screenshot from the UNIGOX browser.");
+  .describe("Optional absolute local path to a fresh TonConnect or WalletConnect QR screenshot from the UNIGOX browser.");
 
 export const sendMoneyMcpInputShape = {
   text: z
@@ -122,7 +122,7 @@ export const ANTHROPIC_MCP_TOOL_DESCRIPTORS: AnthropicMcpToolDescriptor[] = [
   {
     name: SIGN_IN_UNIGOX_TOOL_NAME,
     title: "Sign In to UNIGOX",
-    description: "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup.",
+    description: "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup.",
   },
   {
     name: CREATE_WALLET_TOOL_NAME,

@@ -18,7 +18,11 @@ import {
   clearTonConnectSession,
   startTonConnectSession,
 } from "./tonconnect-session.ts";
-import { decodeTonConnectUniversalLinkFromImagePath } from "./qr-decode.ts";
+import { approveWalletConnectUriWithWallet } from "./walletconnect-session.ts";
+import {
+  decodeTonConnectUniversalLinkFromImagePath,
+  decodeWalletConnectUriFromImagePath,
+} from "./qr-decode.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -244,10 +248,22 @@ function buildTonConnectClient(): UnigoxClient {
   });
 }
 
+function buildWalletConnectClient(): UnigoxClient {
+  const config = loadUnigoxConfigFromEnv();
+  const frontendUrl = resolveFrontendUrl() || config.frontendUrl;
+  return new UnigoxClient({
+    ...config,
+    ...(frontendUrl ? { frontendUrl } : {}),
+  });
+}
+
 function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
   const envPath = resolveEnvFilePath();
   const frontendUrl = resolveFrontendUrl();
   const exportDir = resolveWalletExportDir();
+  const walletConnectProjectId = process.env.WALLETCONNECT_PROJECT_ID
+    || process.env.REOWN_PROJECT_ID
+    || process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
   return {
     persistEmailAddress: async (emailAddress) => {
       upsertEnvAssignments(envPath, {
@@ -327,6 +343,17 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
       return client.approveTonConnectBrowserLogin(universalLink);
     },
     decodeTonConnectQr: async (imagePath) => decodeTonConnectUniversalLinkFromImagePath(imagePath),
+    approveEvmWalletConnectLink: async (uri) => {
+      if (!walletConnectProjectId) {
+        throw new Error("WalletConnect browser approval requires WALLETCONNECT_PROJECT_ID on this machine.");
+      }
+      const client = buildWalletConnectClient();
+      return client.approveEvmWalletConnectBrowserLogin(uri, {
+        projectId: walletConnectProjectId,
+        sessionKey,
+      });
+    },
+    decodeEvmWalletConnectQr: async (imagePath) => decodeWalletConnectUriFromImagePath(imagePath),
   };
 }
 

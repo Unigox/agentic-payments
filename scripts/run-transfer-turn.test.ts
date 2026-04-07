@@ -20,6 +20,7 @@ import type {
   WalletBalance,
 } from "./unigox-client.ts";
 
+const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const VALID_TON_PRIVATE_KEY = "4444444444444444444444444444444444444444444444444444444444444444";
 
 function makeWalletBalance(usdt = 71, usdc = 1): WalletBalance {
@@ -362,6 +363,122 @@ test("runner uses persisted TON auth from the configured env file when approving
     assert.deepEqual(approvedLinks, [tcLink]);
   } finally {
     UnigoxClient.prototype.approveTonConnectBrowserLogin = originalApprove;
+    UnigoxClient.prototype.getProfile = originalGetProfile;
+  }
+});
+
+test("runner can continue an active missing-signing-key step from a WalletConnect QR screenshot path", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-walletconnect-qr-"));
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+  const deps = {
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    client: {
+      getProfile: async () => ({ username: "skill" }),
+      getWalletBalance: async () => makeWalletBalance(),
+      listPaymentDetails: async () => [makeRemotePaymentDetail()],
+      listInitiatorTrades: async () => [],
+    },
+    getPaymentMethodsForCurrency: async () => makeCurrencyData(),
+    getPaymentMethodFieldConfig: async () => makeFieldConfig(),
+    decodeEvmWalletConnectQr: async (imagePath: string) => {
+      assert.equal(imagePath, "/tmp/unigox-walletconnect-qr.png");
+      return wcLink;
+    },
+    approveEvmWalletConnectLink: async (uri: string) => {
+      assert.equal(uri, wcLink);
+      return {
+        sessionTopic: "session-topic",
+        pairingTopic: "pairing-topic",
+        requestedChains: ["eip155:1"],
+        approvedChains: ["eip155:1"],
+        requestedMethods: ["eth_accounts"],
+        handledMethods: ["eth_accounts"],
+        requestCount: 1,
+      };
+    },
+  };
+
+  const first = await runTransferTurn({
+    text: "send 50 EUR to Aleksandr",
+    sessionKey: "telegram:main",
+    stateDir,
+    deps,
+  });
+
+  assert.equal(first.session.stage, "awaiting_evm_signing_key");
+
+  const second = await runTransferTurn({
+    imagePath: "/tmp/unigox-walletconnect-qr.png",
+    sessionKey: "telegram:main",
+    stateDir,
+    deps,
+  });
+
+  assert.equal(second.session.stage, "awaiting_evm_signing_key");
+  assert.match(second.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
+});
+
+test("runner uses persisted EVM auth from the configured env file when approving a fresh wc: link", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-walletconnect-env-"));
+  const envPath = path.join(stateDir, ".env");
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+
+  fs.writeFileSync(envPath, [
+    `UNIGOX_EVM_LOGIN_PRIVATE_KEY=${VALID_LOGIN_KEY}`,
+    "UNIGOX_LOGIN_WALLET_ORIGIN=generated_evm",
+  ].join("\n") + "\n");
+
+  const originalApprove = UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin;
+  const originalGetProfile = UnigoxClient.prototype.getProfile;
+  const approvedUris: string[] = [];
+
+  UnigoxClient.prototype.getProfile = async function () {
+    return { username: "skill" } as any;
+  };
+
+  UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin = async function (uri: string, options: { projectId: string; sessionKey?: string }) {
+    approvedUris.push(uri);
+    assert.equal(this["loginWallet"]?.privateKey, VALID_LOGIN_KEY);
+    assert.equal(options.projectId, "test-project-id");
+    assert.equal(options.sessionKey, "telegram-main");
+    return {
+      sessionTopic: "session-topic",
+      pairingTopic: "pairing-topic",
+      requestedChains: ["eip155:1"],
+      approvedChains: ["eip155:1"],
+      requestedMethods: ["eth_accounts"],
+      handledMethods: ["eth_accounts"],
+      requestCount: 1,
+      walletAddress: this["loginWallet"]?.address,
+    };
+  };
+
+  try {
+    const result = await withEnv(
+      {
+        SEND_MONEY_ENV_PATH: envPath,
+        SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: undefined,
+        WALLETCONNECT_PROJECT_ID: "test-project-id",
+      },
+      () => runTransferTurn({
+        text: wcLink,
+        sessionKey: "telegram:main",
+        stateDir,
+        deps: {
+          authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+          client: {
+            getProfile: async () => ({ username: "skill" }),
+          } as any,
+        },
+      }),
+    );
+
+    assert.equal(result.session.stage, "awaiting_evm_signing_key");
+    assert.equal(result.session.amount, undefined);
+    assert.match(result.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
+    assert.deepEqual(approvedUris, [wcLink]);
+  } finally {
+    UnigoxClient.prototype.approveEvmWalletConnectBrowserLogin = originalApprove;
     UnigoxClient.prototype.getProfile = originalGetProfile;
   }
 });

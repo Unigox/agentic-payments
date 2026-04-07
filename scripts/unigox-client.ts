@@ -44,6 +44,7 @@ import {
 import nacl from "tweetnacl";
 import { Wallet, ethers } from "ethers";
 import { approveTonConnectUniversalLinkWithWallet, parseTonConnectUniversalLink } from "./tonconnect-session.ts";
+import { approveWalletConnectUriWithWallet, parseWalletConnectUri } from "./walletconnect-session.ts";
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -1238,6 +1239,40 @@ export class UnigoxClient {
       walletAddress: tonWallet.address,
       manifestUrl: approved.manifestUrl,
       tonProofPayload: approved.tonProofPayload,
+    };
+  }
+
+  async approveEvmWalletConnectBrowserLogin(
+    uri: string,
+    options: {
+      projectId: string;
+      sessionKey?: string;
+    },
+  ): Promise<{
+    sessionTopic?: string;
+    pairingTopic?: string;
+    requestedChains: string[];
+    approvedChains: string[];
+    requestedMethods: string[];
+    handledMethods: string[];
+    requestCount: number;
+    walletAddress: string;
+  }> {
+    const parsed = parseWalletConnectUri(uri);
+    const wallet = this.requireLoginWallet();
+
+    const approved = await approveWalletConnectUriWithWallet({
+      uri: parsed.uri,
+      privateKey: wallet.privateKey,
+      walletAddress: wallet.address,
+      projectId: options.projectId,
+      frontendUrl: this.frontendUrl,
+      sessionKey: options.sessionKey,
+    });
+
+    return {
+      ...approved,
+      walletAddress: wallet.address,
     };
   }
 

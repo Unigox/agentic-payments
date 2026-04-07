@@ -3881,7 +3881,8 @@ test("generated EVM wallet choice creates the wallet directly without asking for
   assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
   assert.match(res.reply, /use the EVM wallet-connection flow for this same wallet on the website/i);
   assert.match(res.reply, /say 'export this wallet'/i);
-  assert.match(res.reply, /WalletConnect-style QR, deep link, or browser-extension approval/i);
+  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
+  assert.match(res.reply, /approve that live browser-login request locally/i);
   assert.doesNotMatch(res.reply, /TonConnect/i);
   assert.doesNotMatch(res.reply, /tc:\/\//i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
@@ -4711,7 +4712,8 @@ test("stored generated EVM auth without a signing key explains the EVM website l
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /use the EVM wallet-connection flow for this same wallet on the website/i);
   assert.match(res.reply, /say 'export this wallet'/i);
-  assert.match(res.reply, /WalletConnect-style QR, deep link, or browser-extension approval/i);
+  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
+  assert.match(res.reply, /approve that live browser-login request locally/i);
   assert.doesNotMatch(res.reply, /TonConnect/i);
   assert.doesNotMatch(res.reply, /tc:\/\//i);
 });
@@ -4727,9 +4729,94 @@ test("stored direct EVM auth without a signing key keeps the browser-login guida
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /use the EVM wallet-connection flow for the same EVM wallet you already use on UNIGOX/i);
-  assert.match(res.reply, /WalletConnect-style QR, deep link, or browser-extension approval/i);
+  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
+  assert.match(res.reply, /approve that live browser-login request locally/i);
   assert.doesNotMatch(res.reply, /TonConnect/i);
   assert.doesNotMatch(res.reply, /tc:\/\//i);
+});
+
+test("missing signing key step accepts a fresh UNIGOX wc: link and approves the browser login with the local EVM wallet", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const approvedUris: string[] = [];
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    approveEvmWalletConnectLink: async (uri) => {
+      approvedUris.push(uri);
+      return {
+        sessionTopic: "session-topic",
+        pairingTopic: "pairing-topic",
+        requestedChains: ["eip155:1"],
+        approvedChains: ["eip155:1"],
+        requestedMethods: ["eth_accounts"],
+        handledMethods: ["eth_accounts"],
+        requestCount: 1,
+      };
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+  res = await advanceTransferFlow(res.session, wcLink, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
+  assert.match(res.reply, /export the agentic-payments \/ signing key/i);
+  assert.deepEqual(approvedUris, [wcLink]);
+  assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
+});
+
+test("missing signing key step accepts a fresh UNIGOX WalletConnect QR screenshot path and decodes it into the same browser-login handoff", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const approvedUris: string[] = [];
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    decodeEvmWalletConnectQr: async (imagePath) => {
+      assert.equal(imagePath, "/tmp/unigox-walletconnect-qr.png");
+      return wcLink;
+    },
+    approveEvmWalletConnectLink: async (uri) => {
+      approvedUris.push(uri);
+      return {
+        sessionTopic: "session-topic",
+        pairingTopic: "pairing-topic",
+        requestedChains: ["eip155:1"],
+        approvedChains: ["eip155:1"],
+        requestedMethods: ["eth_accounts"],
+        handledMethods: ["eth_accounts"],
+        requestCount: 1,
+      };
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-walletconnect-qr.png" }, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
+  assert.deepEqual(approvedUris, [wcLink]);
+});
+
+test("missing signing key step tells the user when a WalletConnect QR screenshot did not contain a valid wc: request", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    decodeEvmWalletConnectQr: async () => undefined,
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-walletconnect-qr.png" }, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /couldn’t read a valid fresh UNIGOX WalletConnect QR from that image/i);
+  assert.match(res.reply, /paste the fresh wc: link directly/i);
 });
 
 test("missing signing key step accepts a fresh UNIGOX tc:// link and approves the browser login with the local TON key", async () => {

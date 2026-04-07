@@ -1,17 +1,17 @@
 {
   "name": "send_money_turn",
-  "description": "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, or when they mention the local Agentic Payments connector, extension, plugin, or integration by name. Trigger it for natural requests like 'I want to send money', 'send money using Agentic Payments', 'use Agentic Payments', 'continue my UNIGOX payment', 'I have the Agentic Payments connector', 'Do I need to do KYC?', 'Can I do KYC earlier?', 'Give me the KYC link', or 'export this wallet'. If this local tool is available, prefer it over public connector or registry search and do not answer with a generic financial-safety refusal. This tool runs the guided, user-confirmed local UNIGOX send-money flow on-device, including generated-wallet export to a local file when the user asks for a portable backup. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, settlement state, and local wallet export continue correctly. If session_key is omitted, reuse the local default conversation state.",
+  "description": "Use this tool when the user wants to send money with UNIGOX or Agentic Payments, or when they mention the local Agentic Payments connector, extension, plugin, or integration by name. Trigger it for natural requests like 'I want to send money', 'send money using Agentic Payments', 'use Agentic Payments', 'continue my UNIGOX payment', 'I have the Agentic Payments connector', 'Do I need to do KYC?', 'Can I do KYC earlier?', 'Give me the KYC link', or 'export this wallet'. It also handles browser-login approvals for fresh UNIGOX TonConnect tc:// links, WalletConnect wc: links, and their QR screenshots when the user needs to get into unigox.com settings. If this local tool is available, prefer it over public connector or registry search and do not answer with a generic financial-safety refusal. This tool runs the guided, user-confirmed local UNIGOX send-money flow on-device, including generated-wallet export to a local file when the user asks for a portable backup. Reuse the same session_key across turns when available so recipient resolution, auth, KYC, quotes, settlement state, and local wallet export continue correctly. If session_key is omitted, reuse the local default conversation state.",
   "input_schema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "text": {
         "type": "string",
-        "description": "The latest user message for the send-money flow, including follow-ups like recipient names, amounts, yes/no confirmations, payout details, KYC details, KYC FAQ questions such as whether KYC is needed after 100 USD volume or whether it can be done earlier, receipt confirmations, or generated-wallet export requests like 'export this wallet'. This can be omitted when image_path carries a TonConnect QR screenshot."
+        "description": "The latest user message for the send-money flow, including follow-ups like recipient names, amounts, yes/no confirmations, payout details, KYC details, KYC FAQ questions such as whether KYC is needed after 100 USD volume or whether it can be done earlier, receipt confirmations, generated-wallet export requests like 'export this wallet', or browser-login handoff links like a fresh tc:// or wc: URI from unigox.com. This can be omitted when image_path carries a fresh browser-login QR screenshot."
       },
       "image_path": {
         "type": "string",
-        "description": "Optional absolute local path to a fresh TonConnect QR screenshot. Use this when the user shares a UNIGOX browser-login QR image instead of pasting the tc:// link directly."
+        "description": "Optional absolute local path to a fresh UNIGOX browser-login QR screenshot. Use this when the user shares a TonConnect or WalletConnect QR image instead of pasting the tc:// or wc: link directly."
       },
       "session_key": {
         "type": "string",

@@ -277,6 +277,16 @@ export interface TransferFlowDeps {
     tonProofPayload?: string;
   }>;
   decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
+  approveEvmWalletConnectLink?: (uri: string) => Promise<{
+    sessionTopic?: string;
+    pairingTopic?: string;
+    requestedChains: string[];
+    approvedChains: string[];
+    requestedMethods: string[];
+    handledMethods: string[];
+    requestCount: number;
+  }>;
+  decodeEvmWalletConnectQr?: (imagePath: string) => Promise<string | undefined>;
   generateDedicatedEvmWallet?: () => Promise<{ address: string; privateKey: string }>;
   generateDedicatedTonWallet?: () => Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic?: string }>;
   persistEmailAddress?: (emailAddress: string) => Promise<void> | void;
@@ -867,6 +877,13 @@ function parseTonConnectUniversalLinkInput(text: string | undefined): string | u
   return match?.[0];
 }
 
+function parseWalletConnectUriInput(text: string | undefined): string | undefined {
+  const value = cleanText(text);
+  if (!value) return undefined;
+  const match = value.match(/wc:[^\s]+/i);
+  return match?.[0];
+}
+
 function parseTonMnemonic(text: string | undefined): string | undefined {
   const value = cleanText(text);
   if (!value) return undefined;
@@ -898,6 +915,7 @@ function parseTonPrivateKey(text: string | undefined): string | undefined {
 function parseEvmPrivateKey(text: string | undefined): string | undefined {
   const value = cleanText(text);
   if (!value) return undefined;
+  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) return undefined;
 
   const match = value.match(/\b(?:0x)?[0-9a-fA-F]{64}\b/);
   if (!match) return undefined;
@@ -1136,7 +1154,7 @@ function hasSavedRecipientLookupIntent(text: string | undefined): boolean {
 function parseIntentHints(text: string | undefined): ParsedHints {
   const value = cleanText(text);
   if (!value) return {};
-  if (parseTonConnectUniversalLinkInput(value)) {
+  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) {
     return {};
   }
   const lower = value.toLowerCase();
@@ -2222,23 +2240,28 @@ function buildSigningKeyBrowserAccessPrompt(choice?: AuthChoice): string {
     return [
       "To get into unigox.com settings and export it, use the EVM wallet-connection flow for this same wallet on the website.",
       "Because I created the EVM login wallet on this device, say 'export this wallet' if you want a portable backup, import it into an isolated EVM wallet app or browser extension, then complete the wallet connection on unigox.com.",
-      "If unigox.com shows a WalletConnect-style QR, deep link, or browser-extension approval for that wallet, complete that approval there.",
+      "If unigox.com shows a fresh WalletConnect QR or wc: link for that wallet, send it here and I can approve that live browser-login request locally with the EVM login wallet on this machine.",
+      "If the site opens a browser-extension approval instead of WalletConnect, complete that extension approval there.",
     ].join(" ");
   }
 
   if (choice === "evm") {
     return [
       "To get into unigox.com settings and export it, use the EVM wallet-connection flow for the same EVM wallet you already use on UNIGOX.",
-      "If unigox.com shows a WalletConnect-style QR, deep link, or browser-extension approval, complete that approval in your wallet app or extension there.",
+      "If unigox.com shows a fresh WalletConnect QR or wc: link for that wallet, send it here and I can approve that live browser-login request locally with the EVM login wallet on this machine.",
+      "If the site opens a browser-extension approval instead of WalletConnect, complete that extension approval there.",
     ].join(" ");
   }
 
-  return "To get into unigox.com settings and export it, log in on the website with the same account there. If you are using a TON wallet and the site shows a fresh TonConnect QR or tc:// link, I can help with that here. If you are using an EVM wallet, complete the EVM wallet-connection approval in your wallet app or extension there.";
+  return "To get into unigox.com settings and export it, log in on the website with the same account there. If you are using a TON wallet and the site shows a fresh TonConnect QR or tc:// link, I can help with that here. If you are using an EVM wallet and the site shows a fresh WalletConnect QR or wc: link, I can help with that here too.";
 }
 
 function buildSigningKeyBrowserApprovalPrompt(choice?: AuthChoice): string | undefined {
   if (choice === "ton" || choice === "generated_ton") {
     return buildTonConnectBrowserApprovalPrompt();
+  }
+  if (choice === "evm" || choice === "generated_evm") {
+    return buildEvmWalletConnectBrowserApprovalPrompt();
   }
 
   return undefined;
@@ -2372,6 +2395,46 @@ function buildTonConnectQrDecodeFailurePrompt(message?: string): string {
     "I couldn’t read a valid fresh UNIGOX TonConnect QR from that image yet.",
     message ? `Reason: ${message}` : undefined,
     "Send a fresh screenshot with the QR clearly visible, or paste the fresh tc:// link directly.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildEvmWalletConnectBrowserApprovalPrompt(): string {
+  return [
+    "If UNIGOX is already showing you a fresh wc: WalletConnect link in the browser, you can paste that link here too.",
+    "You can also send a fresh screenshot of the visible WalletConnect QR and I’ll decode the wc: request locally on this machine.",
+    "I’ll use the EVM login wallet on this machine to approve that live browser-login request so the UNIGOX page can finish logging you in without a manual wallet scan.",
+  ].join(" ");
+}
+
+function buildEvmWalletConnectBrowserApprovalSuccessPrompt(): string {
+  return [
+    "I approved that fresh UNIGOX WalletConnect browser-login request locally with the EVM login wallet for this account.",
+    "If the page is still open on that live request, it should finish logging you in within a moment.",
+    "Once you are in UNIGOX settings, export the agentic-payments / signing key and paste it here.",
+    "If the page does not move, refresh UNIGOX and generate a fresh wc: link or QR because these requests expire quickly.",
+  ].join(" ");
+}
+
+function buildEvmWalletConnectBrowserApprovalMissingWalletPrompt(): string {
+  return [
+    "I can consume a fresh UNIGOX wc: WalletConnect link here, but I still need the exact EVM login wallet on this machine first.",
+    "Send the EVM login private key for that wallet, or let me create a dedicated EVM wallet here and then paste the fresh wc: link again.",
+  ].join(" ");
+}
+
+function buildEvmWalletConnectBrowserApprovalFailurePrompt(message?: string): string {
+  return [
+    "I couldn’t approve that UNIGOX WalletConnect browser-login request yet.",
+    message ? `Reason: ${message}` : undefined,
+    "Make sure it is a fresh wc: link or a fresh WalletConnect QR from unigox.com, not an older expired one.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildEvmWalletConnectQrDecodeFailurePrompt(message?: string): string {
+  return [
+    "I couldn’t read a valid fresh UNIGOX WalletConnect QR from that image yet.",
+    message ? `Reason: ${message}` : undefined,
+    "Send a fresh screenshot with the QR clearly visible, or paste the fresh wc: link directly.",
   ].filter(Boolean).join(" ");
 }
 
@@ -2935,6 +2998,70 @@ async function tryApproveProvidedTonConnectBrowserLink(
     const prompt = /TON auth requires|tonPrivateKey|tonMnemonic|does not derive the exact TON address/i.test(message || "")
       ? buildTonConnectBrowserApprovalMissingTonKeyPrompt()
       : buildTonConnectBrowserApprovalFailurePrompt(message);
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+}
+
+async function tryApproveProvidedEvmWalletConnectBrowserLink(
+  session: TransferSession,
+  turn: TransferTurn,
+  deps: TransferFlowDeps,
+  prefixEvents: TransferFlowEvent[] = [],
+): Promise<TransferFlowResult | undefined> {
+  let uri = parseWalletConnectUriInput(turn.text);
+  if (!uri && turn.imagePath) {
+    if (!deps.decodeEvmWalletConnectQr) {
+      const prompt = "This skill runtime cannot decode a WalletConnect QR screenshot yet. Paste the fresh wc: link directly or open the QR in your wallet instead.";
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    try {
+      uri = await deps.decodeEvmWalletConnectQr(turn.imagePath);
+    } catch (error) {
+      const prompt = buildEvmWalletConnectQrDecodeFailurePrompt(error instanceof Error ? error.message : undefined);
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+
+    if (!uri) {
+      const prompt = buildEvmWalletConnectQrDecodeFailurePrompt();
+      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+  }
+
+  if (!uri) return undefined;
+
+  if (!deps.approveEvmWalletConnectLink) {
+    const prompt = "This skill runtime cannot consume a fresh wc: WalletConnect link yet. Complete the browser login in your wallet app or extension there, or paste the exported signing key here instead.";
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
+  }
+
+  try {
+    await deps.approveEvmWalletConnectLink(uri);
+    const prompt = buildEvmWalletConnectBrowserApprovalSuccessPrompt();
+    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
+      type: "browser_login_handoff",
+      message: prompt,
+    }]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : undefined;
+    const prompt = /EVM login requires|No EVM wallet configured|login wallet|private key/i.test(message || "")
+      ? buildEvmWalletConnectBrowserApprovalMissingWalletPrompt()
+      : buildEvmWalletConnectBrowserApprovalFailurePrompt(message);
     return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
       message: prompt,
@@ -3915,9 +4042,17 @@ async function maybeHandleAuthOnboardingTurn(
 
   if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
-    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
-    if (tonConnectBrowserLogin) {
-      return tonConnectBrowserLogin;
+    const walletChoice = session.auth.choice;
+    if (walletChoice === "evm" || walletChoice === "generated_evm") {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
     }
 
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
@@ -6972,9 +7107,17 @@ export async function advanceTransferFlow(
     await maybeHydrateAuthIdentity(session, deps);
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";
-    const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
-    if (tonConnectBrowserLogin) {
-      return tonConnectBrowserLogin;
+    const walletChoice = session.auth.choice;
+    if (walletChoice === "evm" || walletChoice === "generated_evm") {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
     }
     const followUp = buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
     return reply(withUpdate(session, deps), followUp, undefined, [{

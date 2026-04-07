@@ -23,11 +23,19 @@ function toClampedArray(data: Uint8Array | Buffer): Uint8ClampedArray {
   return new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength);
 }
 
-function extractTonConnectLink(text: string | undefined): string | undefined {
+function extractMatchingLink(text: string | undefined, pattern: RegExp): string | undefined {
   const value = (text || "").trim();
   if (!value) return undefined;
-  const match = value.match(/tc:\/\/\?[^\s]+/i);
+  const match = value.match(pattern);
   return match?.[0];
+}
+
+function extractTonConnectLink(text: string | undefined): string | undefined {
+  return extractMatchingLink(text, /tc:\/\/\?[^\s]+/i);
+}
+
+function extractWalletConnectLink(text: string | undefined): string | undefined {
+  return extractMatchingLink(text, /wc:[^\s]+/i);
 }
 
 function decodeQrPixels(buffer: Buffer): { data: Uint8ClampedArray; width: number; height: number } {
@@ -52,13 +60,13 @@ function decodeQrPixels(buffer: Buffer): { data: Uint8ClampedArray; width: numbe
     };
   }
 
-  throw new Error("I can only read PNG or JPEG screenshots for TonConnect QR login right now.");
+  throw new Error("I can only read PNG or JPEG screenshots for these browser-login QR flows right now.");
 }
 
-export async function decodeTonConnectUniversalLinkFromImagePath(imagePath: string): Promise<string | undefined> {
+async function decodeQrTextFromImagePath(imagePath: string): Promise<string | undefined> {
   const normalizedPath = imagePath.trim();
   if (!normalizedPath) {
-    throw new Error("I need a local image path for the TonConnect QR screenshot.");
+    throw new Error("I need a local image path for the QR screenshot.");
   }
 
   let file: Buffer;
@@ -70,5 +78,13 @@ export async function decodeTonConnectUniversalLinkFromImagePath(imagePath: stri
 
   const { data, width, height } = decodeQrPixels(file);
   const decoded = jsQR(data, width, height, { inversionAttempts: "attemptBoth" });
-  return extractTonConnectLink(decoded?.data);
+  return decoded?.data;
+}
+
+export async function decodeTonConnectUniversalLinkFromImagePath(imagePath: string): Promise<string | undefined> {
+  return extractTonConnectLink(await decodeQrTextFromImagePath(imagePath));
+}
+
+export async function decodeWalletConnectUriFromImagePath(imagePath: string): Promise<string | undefined> {
+  return extractWalletConnectLink(await decodeQrTextFromImagePath(imagePath));
 }

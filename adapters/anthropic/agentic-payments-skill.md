@@ -13,7 +13,7 @@ If the local `Agentic Payments` extension is installed and its local tools are a
 
 - prefer the narrowest matching tool first:
   - `start_send_money` for new transfer requests and normal send-money continuation
-  - `sign_in_unigox` for auth setup, wallet connection, TON TonConnect login approval, and signing-key setup
+  - `sign_in_unigox` for auth setup, wallet connection, TON TonConnect login approval, EVM WalletConnect login approval, and signing-key setup
   - `create_wallet` for dedicated EVM or TON wallet creation
   - `export_wallet` for exporting a generated EVM or TON login wallet into a local file
   - `check_kyc` for KYC threshold questions, early KYC questions, or live KYC-link requests
@@ -52,6 +52,7 @@ After calling `send_money_turn`:
 - if the user asks whether the recipient or payment details are already saved, call the tool again and relay its answer; do not claim the system requires manual IBAN entry every time unless the tool explicitly says no saved details were found
 - if the user asks to export a generated wallet, relay the file path from the tool closely and do not paste the wallet secret back into chat as plain text yourself
 - if the user asks to export the wallet the tool created for them, prefer `export_wallet` and do not reinterpret that as exporting the separate UNIGOX signing key from account settings
+- if the user shares a fresh `wc:` link or a WalletConnect QR screenshot for the EVM website login, call the tool again and relay the runner's EVM browser-login approval result directly instead of saying they must always scan it manually in another wallet
 - do not reinterpret a legal-name KYC prompt as if it were the recipient's name, and do not reinterpret a recipient prompt as if it were KYC
 - if the user says `I wanna do KYC`, `give me the KYC link`, `Do I need to do KYC?`, `Can I do KYC earlier?`, or similar, call the tool again and relay the runner's KYC answer directly instead of free-styling whether the next step is legal name, country, whether KYC starts after 100 USD total volume, or whether the link should be repeated
 - prefer the tool's exact flow wording over your own paraphrase when the tool is guiding authentication or wallet setup
@@ -61,7 +62,7 @@ After calling `send_money_turn`:
 - Pass the user's latest message as `text`.
 - Reuse the same `session_key` across turns when the host/runtime provides one.
 - If the host/runtime does not provide a clean chat key, omit `session_key` and let the tool reuse the local default conversation state.
-- If the user shares a fresh UNIGOX TonConnect QR screenshot and the host can supply a local file path, pass it as `image_path`.
+- If the user shares a fresh UNIGOX browser-login QR screenshot and the host can supply a local file path, pass it as `image_path`.
 
 ## Scope
 

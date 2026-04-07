@@ -17,7 +17,7 @@ All adapters should call the same logical tool:
 - `name`: `send_money_turn`
 - input:
   - `text`: latest user turn
-  - `image_path`: optional absolute local path to a fresh TonConnect QR screenshot
+  - `image_path`: optional absolute local path to a fresh UNIGOX browser-login QR screenshot (`tc://` TonConnect or `wc:` WalletConnect)
   - `session_key`: optional stable per-user or per-chat key reused across turns when the host can provide one
   - `reset`: optional hard reset
 
@@ -95,6 +95,7 @@ Claude trigger rule:
 - the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
 - KYC FAQ turns such as `Do I need to do KYC?`, `Can I do KYC earlier?`, `I wanna do KYC on the platform`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
 - generated-wallet backup prompts like `export this wallet` or `backup my generated wallet` should route into the shared runner and write a local file instead of echoing secrets into chat
+- EVM WalletConnect browser-login prompts such as `paste the wc link`, `scan this WalletConnect QR`, or `approve the UNIGOX EVM login` should route into the shared runner, not be answered with TON/TonConnect guidance
 
 Codex distribution rule:
 - keep Codex local-first too

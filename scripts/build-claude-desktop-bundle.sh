@@ -18,6 +18,12 @@ if [[ ! -f "${SCRIPT_DIR}/package.json" ]]; then
   exit 1
 fi
 
+# Clean up stale npm rename-temporary directories left behind by interrupted installs.
+# They can cause ENOTEMPTY failures on the next npm install or bundle build.
+if [[ -d "${SCRIPT_DIR}/node_modules" ]]; then
+  find "${SCRIPT_DIR}/node_modules" -mindepth 1 -maxdepth 2 -type d -name '.*-*' -prune -exec rm -rf {} +
+fi
+
 npm install --prefix "${SCRIPT_DIR}" --no-fund --no-audit >&2
 
 rm -rf "${BUNDLE_BUILD_DIR}"
