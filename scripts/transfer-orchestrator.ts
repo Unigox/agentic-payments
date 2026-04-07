@@ -75,7 +75,7 @@ type SecretKind = "evm_login_key" | "evm_signing_key" | "ton_private_key" | "ton
 type TopUpMethod = "internal_username" | "external_deposit";
 type WalletExportType = "evm" | "ton";
 
-export type TransferGoal = "transfer" | "save_contact_only";
+export type TransferGoal = "transfer" | "save_contact_only" | "sign_in_only";
 export type TransferStage =
   | "resolving"
   | "awaiting_auth_profile_choice"
@@ -571,6 +571,7 @@ const AFFIRMATIVE_RE = /^(yes|y|save it|save|update it)$/i;
 const CONFIRM_RE = /^(confirm|confirmed|proceed|go ahead|send it|do it|retry|continue)$/i;
 const NO_RE = /^(no|n|don'?t|not now|skip save)$/i;
 const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
+const AUTH_STAGE_GUIDANCE_RE = /\b(agentic payments|unigox|sign(?:\s+me)? in|log(?:\s+me)? in|signin|login|browser login|walletconnect|wallet connect|tonconnect|ton connect|what next|what do i do|help|let'?s start|start again|start over|continue)\b/i;
 const GENERIC_SELECTION_TOKENS = new Set([
   "account",
   "accounts",
@@ -931,6 +932,19 @@ function parseEvmPrivateKey(text: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function looksLikeAttemptedEvmPrivateKeyInput(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) return false;
+  return /\b(?:0x)?[0-9a-fA-F]{16,64}\b/.test(value);
+}
+
+function looksLikeGenericLoginRequest(text: string | undefined): boolean {
+  const value = cleanText(text);
+  if (!value) return false;
+  return /\b(sign(?:\s+me)? in|log(?:\s+me)? in|signin|login|authenticate|auth)\b/i.test(value);
 }
 
 function looksLikeEvmAddress(text: string | undefined): boolean {
@@ -1317,7 +1331,7 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   }
   if (unigoxSignInIntent) {
     hints.signInIntent = true;
-    hints.goal = hints.goal || "transfer";
+    hints.goal = hints.goal || "sign_in_only";
   }
   if (hasSavedRecipientLookupIntent(value)) {
     hints.savedOrNew = "saved";
@@ -2690,6 +2704,33 @@ function buildEvmWalletConnectQrDecodeFailurePrompt(message?: string): string {
   ].filter(Boolean).join(" ");
 }
 
+function buildBrowserLoginProtocolMismatchPrompt(choice: AuthChoice | undefined, attemptedProtocol: "tonconnect" | "walletconnect"): string {
+  if ((choice === "evm" || choice === "generated_evm") && attemptedProtocol === "tonconnect") {
+    return [
+      buildBrowserLoginAccessPrompt(choice),
+      "That tc:// link is a TonConnect request, so it belongs to a TON browser-login flow, not this EVM login wallet.",
+      "If you want me to approve that tc:// link here, switch to TON wallet connection or create a dedicated TON wallet first.",
+      "Otherwise send the fresh wc: WalletConnect link or WalletConnect QR from the EVM login flow on unigox.com instead.",
+    ].join(" ");
+  }
+
+  if ((choice === "ton" || choice === "generated_ton") && attemptedProtocol === "walletconnect") {
+    return [
+      buildBrowserLoginAccessPrompt(choice),
+      "That wc: link is a WalletConnect request, so it belongs to an EVM browser-login flow, not this TON login wallet.",
+      "If you want me to approve that wc: link here, switch to EVM wallet connection or create a dedicated EVM wallet first.",
+      "Otherwise send the fresh tc:// TonConnect link or TonConnect QR from the TON login flow on unigox.com instead.",
+    ].join(" ");
+  }
+
+  return [
+    buildBrowserLoginAccessPrompt(choice),
+    attemptedProtocol === "tonconnect"
+      ? "That looks like a TonConnect request."
+      : "That looks like a WalletConnect request.",
+  ].join(" ");
+}
+
 function buildTonConnectStillWaitingPrompt(params: { universalLink: string; expiresAt?: string }): string {
   const expiresIn = params.expiresAt
     ? Math.max(1, Math.round((Date.parse(params.expiresAt) - Date.now()) / 60000))
@@ -2700,6 +2741,22 @@ function buildTonConnectStillWaitingPrompt(params: { universalLink: string; expi
     expiresIn ? `This live request should still be valid for about ${expiresIn} minutes.` : undefined,
     "Approve it in the wallet, then reply: connected",
   ].filter(Boolean).join(" ");
+}
+
+function sessionHasTransferContext(session: TransferSession): boolean {
+  return Boolean(
+    session.recipientName
+    || (session.recipientQuery && !looksLikeGenericLoginRequest(session.recipientQuery))
+    || session.currency
+    || typeof session.amount === "number"
+    || session.payment
+    || session.contactKey
+    || session.remoteSavedContact
+    || Object.keys(session.details || {}).length
+    || session.execution.tradeRequestId
+    || session.execution.tradeId
+    || session.execution.preflight
+  );
 }
 
 function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
@@ -2747,21 +2804,25 @@ function buildGeneratedWalletExportHint(): string {
   return "If you want a portable backup of this login wallet, say 'export this wallet' and I’ll write a local wallet file for you.";
 }
 
-function buildGeneratedEvmWalletReadyPrompt(username: string | undefined): string {
+function buildGeneratedEvmWalletReadyPrompt(username: string | undefined, goal: TransferGoal): string {
   return [
     "I generated a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
     buildGeneratedWalletExportHint(),
-    buildEvmSigningKeyPromptForChoice(username, "generated_evm"),
+    goal === "sign_in_only"
+      ? buildBrowserLoginContinuationPrompt(username, "generated_evm")
+      : buildEvmSigningKeyPromptForChoice(username, "generated_evm"),
   ].filter(Boolean).join(" ");
 }
 
-function buildGeneratedTonWalletReadyPrompt(username: string | undefined): string {
+function buildGeneratedTonWalletReadyPrompt(username: string | undefined, goal: TransferGoal): string {
   return [
     "I generated a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
     "It was created from cryptographic randomness and kept local to this device.",
     buildGeneratedWalletExportHint(),
-    buildEvmSigningKeyPromptForChoice(username, "generated_ton"),
+    goal === "sign_in_only"
+      ? buildBrowserLoginContinuationPrompt(username, "generated_ton")
+      : buildEvmSigningKeyPromptForChoice(username, "generated_ton"),
   ].filter(Boolean).join(" ");
 }
 
@@ -2804,6 +2865,12 @@ function buildEmailOtpOnlyReadyPrompt(username: string | undefined): string {
     "Email OTP works. I can keep using email OTP for onboarding or recovery on this device, but future re-authentication may still need another code.",
     buildMissingSigningKeyPrompt(username, "email"),
   ].filter(Boolean).join(" ");
+}
+
+function buildPostLoginSetupPrompt(session: TransferSession): string {
+  return session.goal === "sign_in_only"
+    ? buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice)
+    : buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice);
 }
 
 async function maybeHydrateAuthIdentity(
@@ -2880,7 +2947,7 @@ async function maybeRefreshStoredAuthState(
   session: TransferSession,
   deps: TransferFlowDeps
 ): Promise<void> {
-  if (session.goal !== "transfer" || session.auth.available) return;
+  if (session.goal === "save_contact_only" || session.auth.available) return;
 
   const auth = resolveInitialAuthState(deps.authState);
   if (!auth.hasReplayableAuth) return;
@@ -3007,7 +3074,7 @@ async function finalizeEvmLoginKey(
     await maybeHydrateAuthIdentity(session, deps);
   }
   session.stage = "awaiting_evm_signing_key";
-  const followUp = buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice);
+  const followUp = buildPostLoginSetupPrompt(session);
   return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
     type: "blocked_missing_auth",
     message: followUp,
@@ -3072,7 +3139,7 @@ async function finalizeTonMnemonic(
 
   if (!session.auth.evmSigningKeyAvailable) {
     session.stage = "awaiting_evm_signing_key";
-  const followUp = ["TON login works.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
+    const followUp = ["TON login works.", buildPostLoginSetupPrompt(session)].filter(Boolean).join(" ");
     return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
       message: followUp,
@@ -3414,7 +3481,7 @@ async function finalizeTonConnectLogin(
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
       session.status = "blocked";
-      const followUp = ["TON login works via TonConnect.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
+      const followUp = ["TON login works via TonConnect.", buildPostLoginSetupPrompt(session)].filter(Boolean).join(" ");
       return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
         type: "blocked_missing_auth",
         message: followUp,
@@ -3476,7 +3543,7 @@ async function finalizeTonPrivateKey(
 
   if (!session.auth.evmSigningKeyAvailable) {
     session.stage = "awaiting_evm_signing_key";
-    const followUp = ["TON login works.", buildEvmSigningKeyPromptForChoice(session.auth.username, session.auth.choice)].filter(Boolean).join(" ");
+    const followUp = ["TON login works.", buildPostLoginSetupPrompt(session)].filter(Boolean).join(" ");
     return reply(withUpdate(session, deps), followUp, undefined, [...prefixEvents, {
       type: "blocked_missing_auth",
       message: followUp,
@@ -3527,7 +3594,7 @@ async function finalizeGeneratedEvmWalletSetup(
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
       session.status = "blocked";
-      const followUp = buildGeneratedEvmWalletReadyPrompt(session.auth.username);
+      const followUp = buildGeneratedEvmWalletReadyPrompt(session.auth.username, session.goal);
       return reply(withUpdate(session, deps), followUp, undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
@@ -3592,7 +3659,7 @@ async function finalizeGeneratedTonWalletSetup(
     if (!session.auth.evmSigningKeyAvailable) {
       session.stage = "awaiting_evm_signing_key";
       session.status = "blocked";
-      const followUp = buildGeneratedTonWalletReadyPrompt(session.auth.username);
+      const followUp = buildGeneratedTonWalletReadyPrompt(session.auth.username, session.goal);
       return reply(withUpdate(session, deps), followUp, undefined, [{
         type: "blocked_missing_auth",
         message: followUp,
@@ -4300,6 +4367,20 @@ async function maybeHandleAuthOnboardingTurn(
     const walletChoice = session.auth.choice;
     const explicitWalletConnectLink = Boolean(parseWalletConnectUriInput(turn.text));
     const explicitTonConnectLink = Boolean(parseTonConnectUniversalLinkInput(turn.text));
+    if (explicitTonConnectLink && (walletChoice === "evm" || walletChoice === "generated_evm")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (explicitWalletConnectLink && (walletChoice === "ton" || walletChoice === "generated_ton")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
     if (explicitWalletConnectLink) {
       const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
       if (walletConnectBrowserLogin) {
@@ -4322,8 +4403,15 @@ async function maybeHandleAuthOnboardingTurn(
       }
     }
 
-    if (!responseText || hinted.signInIntent || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = hinted.signInIntent
+    const authGuidanceTurn = AUTH_STAGE_GUIDANCE_RE.test(responseText)
+      && !looksLikeAttemptedEvmPrivateKeyInput(responseText)
+      && !looksLikeEvmAddress(responseText);
+    const authOnlyShell = !sessionHasTransferContext(session);
+    if (!responseText || hinted.signInIntent || session.goal === "sign_in_only" || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText) || authGuidanceTurn) {
+      if (authOnlyShell && authGuidanceTurn) {
+        session.goal = "sign_in_only";
+      }
+      const prompt = hinted.signInIntent || session.goal === "sign_in_only"
         ? buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice)
         : buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
       return reply(withUpdate(session, deps), prompt, undefined, [{
@@ -7298,7 +7386,7 @@ export async function advanceTransferFlow(
   const explicitWalletConnectLink = Boolean(parseWalletConnectUriInput(normalizedTurn.text));
   const explicitTonConnectLink = Boolean(parseTonConnectUniversalLinkInput(normalizedTurn.text));
   const requestedStoredAuthMode = resolveRequestedStoredAuthMode(hints, explicitWalletConnectLink, explicitTonConnectLink);
-  if (session.goal === "transfer" && session.auth.available && session.auth.availableChoices?.length) {
+  if (session.goal !== "save_contact_only" && session.auth.available && session.auth.availableChoices?.length) {
     const selectedStoredChoice = resolveStoredChoiceForMode(requestedStoredAuthMode, session.auth.availableChoices);
 
     if (selectedStoredChoice) {
@@ -7340,7 +7428,55 @@ export async function advanceTransferFlow(
   const topUpReply = await maybeHandleTopUpTurn(session, normalizedTurn, deps);
   if (topUpReply) return topUpReply;
 
-  if (session.goal === "transfer" && !session.auth.available) {
+  if (session.goal === "sign_in_only" && session.auth.available) {
+    await maybeHydrateAuthIdentity(session, deps);
+    session.status = "blocked";
+    session.stage = "awaiting_evm_signing_key";
+    const walletChoice = session.auth.choice;
+    if (explicitTonConnectLink && (walletChoice === "evm" || walletChoice === "generated_evm")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (explicitWalletConnectLink && (walletChoice === "ton" || walletChoice === "generated_ton")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (explicitWalletConnectLink) {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else if (explicitTonConnectLink) {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
+    } else if (walletChoice === "evm" || walletChoice === "generated_evm") {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
+    }
+
+    const followUp = buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice);
+    return reply(withUpdate(session, deps), followUp, undefined, [{
+      type: "blocked_missing_auth",
+      message: followUp,
+    }]);
+  }
+
+  if (session.goal !== "save_contact_only" && !session.auth.available) {
     session.status = "blocked";
     session.stage = "awaiting_auth_choice";
     if (hints.authChoice) {
@@ -7401,6 +7537,20 @@ export async function advanceTransferFlow(
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";
     const walletChoice = session.auth.choice;
+    if (explicitTonConnectLink && (walletChoice === "evm" || walletChoice === "generated_evm")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
+    if (explicitWalletConnectLink && (walletChoice === "ton" || walletChoice === "generated_ton")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
+      return reply(withUpdate(session, deps), prompt, undefined, [{
+        type: "blocked_missing_auth",
+        message: prompt,
+      }]);
+    }
     if (explicitWalletConnectLink) {
       const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
       if (walletConnectBrowserLogin) {

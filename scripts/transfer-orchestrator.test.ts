@@ -3952,6 +3952,147 @@ test("generated EVM wallet choice creates the wallet directly without asking for
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 });
 
+test("login-only start asks for auth choice instead of falling into the transfer recipient flow", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  const res = await startTransferFlow("I need to sign in to UNIGOX.", deps);
+
+  assert.equal(res.session.goal, "sign_in_only");
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+  assert.match(res.reply, /Which sign-in path would you like to use|Which wallet connection path should I use|Which UNIGOX sign-in path should I set up/i);
+  assert.doesNotMatch(res.reply, /Who do you want to send money to|saved contact|new recipient/i);
+});
+
+test("generated EVM wallet choice in a login-only flow stays focused on browser login before signing-key export", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "evmstarter" });
+  const persisted = { login: [] as string[] };
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+    generateDedicatedEvmWallet: async () => ({
+      address: "0x1111111111111111111111111111111111111111",
+      privateKey: VALID_LOGIN_KEY,
+    }),
+    verifyEvmLoginKey: async () => ({ success: true, username: "evmstarter" }),
+    persistEvmLoginKey: async (loginKey) => {
+      persisted.login.push(loginKey);
+    },
+  });
+
+  let res = await startTransferFlow("I need to sign in to UNIGOX.", deps);
+  assert.equal(res.session.goal, "sign_in_only");
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.auth.mode, "evm");
+  assert.equal(res.session.auth.choice, "generated_evm");
+  assert.match(res.reply, /do not need to export any key yet/i);
+  assert.match(res.reply, /WalletConnect, not TonConnect/i);
+  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
+  assert.doesNotMatch(res.reply, /How to get it: open your UNIGOX account settings and export/i);
+  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
+});
+
+test("stale generated EVM signing-key stage treats generic login phrasing as guidance, not as an invalid private key", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "artistic_osprey_3298" });
+  const deps = makeDeps(file, client, {
+    authState: {
+      hasReplayableAuth: true,
+      authMode: "evm",
+      choice: "generated_evm",
+      username: "artistic_osprey_3298",
+      evmSigningKeyAvailable: false,
+    },
+  });
+
+  const res = await advanceTransferFlow({
+    id: "transfer-stale-login",
+    goal: "transfer",
+    status: "blocked",
+    stage: "awaiting_evm_signing_key",
+    startedAt: "2026-04-07T09:21:48.214Z",
+    updatedAt: "2026-04-07T09:26:16.164Z",
+    details: {},
+    detailCollection: { index: 0 },
+    contactExists: false,
+    contactStale: false,
+    auth: {
+      checked: true,
+      available: true,
+      mode: "evm",
+      choice: "generated_evm",
+      evmSigningKeyAvailable: false,
+      username: "artistic_osprey_3298",
+      startupSnapshotShown: true,
+      totalTradedVolumeUsd: 0,
+      kycStatus: "NOT_VERIFIED",
+      outstandingTradeReminderShown: true,
+    },
+    execution: { confirmed: false },
+    notes: [],
+    recipientQuery: "Let's login",
+    lastPrompt: "old stale prompt",
+  }, "Hey i wanna use agentic payments", deps);
+
+  assert.equal(res.session.goal, "sign_in_only");
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.doesNotMatch(res.reply, /That doesn’t look like a valid EVM private key/i);
+  assert.match(res.reply, /WalletConnect, not TonConnect/i);
+  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
+});
+
+test("generated EVM auth rejects a tc:// browser-login request as the wrong protocol", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient({ username: "artistic_osprey_3298" });
+  const deps = makeDeps(file, client, {
+    authState: {
+      hasReplayableAuth: true,
+      authMode: "evm",
+      choice: "generated_evm",
+      username: "artistic_osprey_3298",
+      evmSigningKeyAvailable: false,
+    },
+  });
+
+  const res = await advanceTransferFlow({
+    id: "transfer-stale-protocol",
+    goal: "transfer",
+    status: "blocked",
+    stage: "awaiting_evm_signing_key",
+    startedAt: "2026-04-07T09:21:48.214Z",
+    updatedAt: "2026-04-07T09:26:16.164Z",
+    details: {},
+    detailCollection: { index: 0 },
+    contactExists: false,
+    contactStale: false,
+    auth: {
+      checked: true,
+      available: true,
+      mode: "evm",
+      choice: "generated_evm",
+      evmSigningKeyAvailable: false,
+      username: "artistic_osprey_3298",
+      startupSnapshotShown: true,
+      totalTradedVolumeUsd: 0,
+      kycStatus: "NOT_VERIFIED",
+      outstandingTradeReminderShown: true,
+    },
+    execution: { confirmed: false },
+    notes: [],
+  }, "tc://?v=2&id=847713b4405340f86154885739ecdc315a8b41cc08f1f03e50b2ad287a091c3d&trace_id=019d6740-73a1-72cb-9878-de6ed7001c1a&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%228a60c2ff7deedf1ee6208c5d882e8a709d289256c5e86fd808f34d525e40f583%22%7D%5D%7D&ret=none", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /WalletConnect, not TonConnect/i);
+  assert.match(res.reply, /Send the fresh wc: WalletConnect link or WalletConnect QR/i);
+  assert.doesNotMatch(res.reply, /TON mnemonic phrase|TON private key/i);
+});
+
 test("email OTP can still generate and link a dedicated EVM wallet locally after OTP verification", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
@@ -4918,8 +5059,8 @@ test("sign-in focused prompt treats an explicit wc link as WalletConnect auth ev
   res = await advanceTransferFlow(res.session, wcLink, deps);
 
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /fresh UNIGOX wc: WalletConnect link here/i);
-  assert.match(res.reply, /exact EVM login wallet on this machine first/i);
+  assert.match(res.reply, /WalletConnect request/i);
+  assert.match(res.reply, /switch to EVM wallet connection or create a dedicated EVM wallet first/i);
   assert.doesNotMatch(res.reply, /doesn’t look like a valid EVM private key/i);
 });
 
