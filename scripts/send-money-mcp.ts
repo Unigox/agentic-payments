@@ -122,7 +122,7 @@ export const ANTHROPIC_MCP_TOOL_DESCRIPTORS: AnthropicMcpToolDescriptor[] = [
   {
     name: SIGN_IN_UNIGOX_TOOL_NAME,
     title: "Sign In to UNIGOX",
-    description: "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, TonConnect QR or tc:// browser-login approval, and exported signing-key setup.",
+    description: "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup.",
   },
   {
     name: CREATE_WALLET_TOOL_NAME,
@@ -142,7 +142,7 @@ export const ANTHROPIC_MCP_TOOL_DESCRIPTORS: AnthropicMcpToolDescriptor[] = [
   {
     name: EXPORT_WALLET_TOOL_NAME,
     title: "Export Generated Wallet",
-    description: "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'backup my generated wallet', or 'send me the wallet file'.",
+    description: "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', 'backup my generated wallet', 'export my EVM wallet', or 'send me the wallet file'.",
   },
 ];
 

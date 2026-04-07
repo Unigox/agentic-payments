@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "agentic-payments-local",
   "display_name": "Agentic Payments",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Local Agentic Payments / UNIGOX send-money connector for Claude Desktop.",
   "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same shared runner used by the other runtime adapters. The Claude extension now exposes multiple entry tools for clearer routing: start a payment, sign in, create a wallet, export a generated wallet backup, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. These tools all dispatch into the same underlying state machine instead of forking payment logic.",
   "author": {
@@ -40,7 +40,7 @@
     },
     {
       "name": "sign_in_unigox",
-      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM or TON wallet connection, email OTP, TonConnect QR or tc:// browser-login approval, and exported signing-key setup."
+      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM or TON wallet connection, email OTP, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup."
     },
     {
       "name": "create_wallet",
@@ -56,7 +56,7 @@
     },
     {
       "name": "export_wallet",
-      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere."
+      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', or 'export my EVM wallet'."
     }
   ],
   "keywords": [

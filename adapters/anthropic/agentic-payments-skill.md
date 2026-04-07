@@ -13,7 +13,7 @@ If the local `Agentic Payments` extension is installed and its local tools are a
 
 - prefer the narrowest matching tool first:
   - `start_send_money` for new transfer requests and normal send-money continuation
-  - `sign_in_unigox` for auth setup, wallet connection, TonConnect login approval, and signing-key setup
+  - `sign_in_unigox` for auth setup, wallet connection, TON TonConnect login approval, and signing-key setup
   - `create_wallet` for dedicated EVM or TON wallet creation
   - `export_wallet` for exporting a generated EVM or TON login wallet into a local file
   - `check_kyc` for KYC threshold questions, early KYC questions, or live KYC-link requests
@@ -31,6 +31,8 @@ If the local `Agentic Payments` extension is installed and its local tools are a
   - `Can I do KYC earlier?`
   - `Create a dedicated TON wallet`
   - `export this wallet`
+  - `export the wallet you created for me`
+  - `export my EVM wallet`
   - `backup my generated wallet`
   - `Help me sign in to UNIGOX`
 - if the user mentions `Agentic Payments` and a local connector/extension/plugin is available, do not search the public registry first
@@ -49,6 +51,7 @@ After calling `send_money_turn`:
 - if the user chooses `Create a dedicated EVM wallet` or `Create a dedicated TON wallet`, do not ask for email unless the tool itself explicitly says email is required
 - if the user asks whether the recipient or payment details are already saved, call the tool again and relay its answer; do not claim the system requires manual IBAN entry every time unless the tool explicitly says no saved details were found
 - if the user asks to export a generated wallet, relay the file path from the tool closely and do not paste the wallet secret back into chat as plain text yourself
+- if the user asks to export the wallet the tool created for them, prefer `export_wallet` and do not reinterpret that as exporting the separate UNIGOX signing key from account settings
 - do not reinterpret a legal-name KYC prompt as if it were the recipient's name, and do not reinterpret a recipient prompt as if it were KYC
 - if the user says `I wanna do KYC`, `give me the KYC link`, `Do I need to do KYC?`, `Can I do KYC earlier?`, or similar, call the tool again and relay the runner's KYC answer directly instead of free-styling whether the next step is legal name, country, whether KYC starts after 100 USD total volume, or whether the link should be repeated
 - prefer the tool's exact flow wording over your own paraphrase when the tool is guiding authentication or wallet setup

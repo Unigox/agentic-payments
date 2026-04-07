@@ -985,8 +985,9 @@ function parseWalletExportIntent(text: string | undefined): WalletExportIntent |
   const mentionsExport = /\b(export|backup|download|write|save|send|give)\b/.test(normalized);
   const mentionsWalletMaterial = /\b(wallet|login wallet|wallet file|key file|private key|backup file|portable backup)\b/.test(normalized);
   const mentionsElsewhereUse = /\b(continue using this wallet elsewhere|use this wallet elsewhere|use elsewhere)\b/.test(normalized);
+  const mentionsCreatedWallet = /\b(created|made|generated)\b.*\b(wallet)\b|\b(wallet)\b.*\b(created|made|generated)\b/.test(normalized);
 
-  if (!((mentionsExport && mentionsWalletMaterial) || mentionsElsewhereUse)) {
+  if (!((mentionsExport && (mentionsWalletMaterial || mentionsCreatedWallet)) || mentionsElsewhereUse)) {
     return undefined;
   }
 
@@ -2213,7 +2214,34 @@ function buildSigningKeyBrowserAccessPrompt(choice?: AuthChoice): string {
     ].join(" ");
   }
 
-  return "To get into unigox.com settings and export it, you can use any of these browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop wallet and log in to UNIGOX directly.";
+  if (choice === "ton") {
+    return "To get into unigox.com settings and export it, you can use any of these TON browser-login paths: 1. scan a fresh UNIGOX TonConnect QR in your wallet, 2. copy the fresh tc:// TonConnect link into your wallet if UNIGOX shows that instead of a QR, or 3. use your mobile or desktop TON wallet and log in to UNIGOX directly.";
+  }
+
+  if (choice === "generated_evm") {
+    return [
+      "To get into unigox.com settings and export it, use the EVM wallet-connection flow for this same wallet on the website.",
+      "Because I created the EVM login wallet on this device, say 'export this wallet' if you want a portable backup, import it into an isolated EVM wallet app or browser extension, then complete the wallet connection on unigox.com.",
+      "If unigox.com shows a WalletConnect-style QR, deep link, or browser-extension approval for that wallet, complete that approval there.",
+    ].join(" ");
+  }
+
+  if (choice === "evm") {
+    return [
+      "To get into unigox.com settings and export it, use the EVM wallet-connection flow for the same EVM wallet you already use on UNIGOX.",
+      "If unigox.com shows a WalletConnect-style QR, deep link, or browser-extension approval, complete that approval in your wallet app or extension there.",
+    ].join(" ");
+  }
+
+  return "To get into unigox.com settings and export it, log in on the website with the same account there. If you are using a TON wallet and the site shows a fresh TonConnect QR or tc:// link, I can help with that here. If you are using an EVM wallet, complete the EVM wallet-connection approval in your wallet app or extension there.";
+}
+
+function buildSigningKeyBrowserApprovalPrompt(choice?: AuthChoice): string | undefined {
+  if (choice === "ton" || choice === "generated_ton") {
+    return buildTonConnectBrowserApprovalPrompt();
+  }
+
+  return undefined;
 }
 
 function buildEvmSigningKeyPromptForChoice(username: string | undefined, choice?: AuthChoice): string {
@@ -2224,7 +2252,7 @@ function buildEvmSigningKeyPromptForChoice(username: string | undefined, choice?
     "Why: wallet login, TON login, or email OTP only gets me signed in. Secure in-app actions like funding trade escrow, confirming fiat received, or releasing escrow require that separate exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
     buildSigningKeyBrowserAccessPrompt(choice),
-    buildTonConnectBrowserApprovalPrompt(),
+    buildSigningKeyBrowserApprovalPrompt(choice),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely for those signed actions.",
   ].filter(Boolean).join(" ");
@@ -2238,7 +2266,7 @@ function buildMissingSigningKeyPrompt(username: string | undefined, choice?: Aut
     "Why: sign-in alone is enough for quotes and some setup, but secure actions like funding trade escrow, confirming fiat received, or releasing escrow still require the exported signing key.",
     "How to get it: open your UNIGOX account settings and export the agentic-payments / signing key, then paste that private key here.",
     buildSigningKeyBrowserAccessPrompt(choice),
-    buildTonConnectBrowserApprovalPrompt(),
+    buildSigningKeyBrowserApprovalPrompt(choice),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely across turns.",
   ].filter(Boolean).join(" ");

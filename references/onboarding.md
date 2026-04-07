@@ -122,6 +122,8 @@ Once they provide the email:
    - save `UNIGOX_EMAIL`
    - explain that this generated key is the **login** key only and was created locally from cryptographic randomness
    - then ask the user to manually export the separate UNIGOX signing key from unigox.com settings and save it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`
+   - for website login, do **not** mention TonConnect; tell the user to use the EVM wallet-connection flow on unigox.com for that same wallet
+   - if they want to use the generated wallet in a browser wallet first, remind them they can say `export this wallet`, import it into an isolated EVM wallet app or extension, complete the WalletConnect-style / browser-wallet approval there, and then export the signing key from settings
    - proceed to Step 3 only after that second step is acknowledged
 7. If generated TON:
    - call `generateAndLinkTonWallet()`
