@@ -8,7 +8,7 @@ import {
   SEND_MONEY_TOOL_NAME,
 } from "./send-money-tool.ts";
 import type { SendMoneyToolInput } from "./send-money-tool.ts";
-import type { TransferFlowDeps, TransferFlowResult } from "./transfer-orchestrator.ts";
+import type { TransferFlowDeps, TransferFlowResult, TransferSession, TransferStage } from "./transfer-orchestrator.ts";
 
 export const SEND_MONEY_MCP_SERVER_NAME = "agentic-payments-local";
 export const SEND_MONEY_MCP_SERVER_VERSION = "1.0.0";
@@ -216,17 +216,117 @@ export function shouldResetForFreshStart(text: string | undefined, reset: boolea
   return freshStartPatterns.some((pattern) => pattern.test(value)) ? true : undefined;
 }
 
+function describeProtocolGuard(choice: string | undefined, mode: string | undefined): string[] {
+  if (choice === "evm" || choice === "generated_evm" || (mode === "evm" && !choice)) {
+    return [
+      "browser_login_protocol: WalletConnect (wc: links, WalletConnect QR)",
+      "FORBIDDEN: TonConnect, tc:// links, TonConnect QR — NEVER mention these for this session",
+    ];
+  }
+  if (choice === "ton" || choice === "generated_ton" || (mode === "ton" && !choice)) {
+    return [
+      "browser_login_protocol: TonConnect (tc:// links, TonConnect QR)",
+      "FORBIDDEN: WalletConnect, wc: links, WalletConnect QR — NEVER mention these for this session",
+    ];
+  }
+  if (choice === "email" || mode === "email") {
+    return ["browser_login_protocol: email OTP (no wallet protocol needed)"];
+  }
+  return [];
+}
+
+function describeNextAction(stage: TransferStage, choice: string | undefined): string {
+  switch (stage) {
+    case "awaiting_auth_profile_choice":
+      return "Ask user to pick a saved auth profile from the options";
+    case "awaiting_auth_choice":
+      return "Ask user to pick an auth method from the options";
+    case "awaiting_evm_login_key":
+      return "Ask user for their EVM private key — NOT a TON key";
+    case "awaiting_evm_signing_key":
+      return choice === "evm" || choice === "generated_evm"
+        ? "Ask user for EVM signing key or WalletConnect link — NOT TonConnect"
+        : "Ask user for the UNIGOX signing key";
+    case "awaiting_evm_wallet_signin":
+      return "Waiting for WalletConnect approval — NOT TonConnect";
+    case "awaiting_ton_address":
+    case "awaiting_ton_address_confirmation":
+      return "Ask user for their TON wallet address";
+    case "awaiting_ton_auth_method":
+      return "Ask user for TON auth method";
+    case "awaiting_ton_private_key":
+    case "awaiting_ton_mnemonic":
+      return "Ask user for TON private key or mnemonic — NOT an EVM key";
+    case "awaiting_tonconnect_completion":
+      return "Waiting for TonConnect approval — NOT WalletConnect";
+    case "awaiting_email_address":
+      return "Ask user for their email address";
+    case "awaiting_email_otp":
+      return "Ask user for the email OTP code";
+    case "awaiting_recipient_name":
+    case "awaiting_recipient_mode":
+      return "Ask user for recipient name";
+    case "awaiting_saved_recipient_confirmation":
+      return "Ask user to confirm the matched recipient";
+    case "awaiting_currency":
+      return "Ask user which currency to send";
+    case "awaiting_amount":
+      return "Ask user for the amount";
+    case "awaiting_payment_method":
+    case "awaiting_payment_network":
+    case "awaiting_payment_details":
+      return "Collect payment method or payout details from options";
+    case "awaiting_confirmation":
+      return "Ask user to confirm the transfer";
+    case "awaiting_receipt_confirmation":
+      return "Ask user to confirm they received payment";
+    case "awaiting_kyc_full_name":
+      return "Ask user for their full legal name for KYC";
+    case "awaiting_kyc_country":
+      return "Ask user for their country for KYC";
+    case "awaiting_kyc_completion":
+      return "Waiting for KYC verification to complete";
+    default:
+      return "Follow the reply below";
+  }
+}
+
+function buildStateBlock(session: TransferSession): string {
+  const { auth, stage, goal } = session;
+  const lines: string[] = [];
+
+  lines.push("=== SESSION STATE (relay the reply below — do not paraphrase or add steps) ===");
+
+  if (auth.username) lines.push(`user: ${auth.username}`);
+  if (auth.choice) lines.push(`auth: ${auth.choice}`);
+  else if (auth.mode) lines.push(`auth_mode: ${auth.mode}`);
+
+  lines.push(...describeProtocolGuard(auth.choice, auth.mode));
+
+  lines.push(`stage: ${stage}`);
+  if (goal && goal !== "transfer") lines.push(`goal: ${goal}`);
+  lines.push(`next: ${describeNextAction(stage, auth.choice)}`);
+
+  lines.push("===");
+
+  return lines.join("\n");
+}
+
 export function formatSendMoneyMcpResult(result: TransferFlowResult): string {
   const reply = result.reply?.trim() || "No reply returned.";
   const options = Array.isArray(result.options)
     ? result.options.filter((value) => typeof value === "string" && value.trim())
     : [];
 
-  if (!options.length) {
-    return reply;
+  const session = result.session;
+  const stateBlock = session ? buildStateBlock(session) : undefined;
+
+  let body = reply;
+  if (options.length) {
+    body += `\n\nOptions:\n${options.map((option) => `- ${option}`).join("\n")}`;
   }
 
-  return `${reply}\n\nOptions:\n${options.map((option) => `- ${option}`).join("\n")}`;
+  return stateBlock ? `${stateBlock}\n\n${body}` : body;
 }
 
 async function runAndFormat(input: SendMoneyToolInput, deps?: TransferFlowDeps) {
