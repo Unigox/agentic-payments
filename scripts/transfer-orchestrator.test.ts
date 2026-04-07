@@ -2270,6 +2270,41 @@ test("awaiting_kyc_completion trusts verified profile even if /kyc still looks a
   assert.match(res.reply, /Reply 'confirm' to place the trade/i);
 });
 
+test("wc: link during awaiting_kyc_completion is handled as a browser-login interrupt and KYC stage is preserved", async () => {
+  const { file } = makeTempContactsFile();
+  const approvedUris: string[] = [];
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    approveEvmWalletConnectLink: async (uri) => {
+      approvedUris.push(uri);
+      return {
+        sessionTopic: "session-topic",
+        pairingTopic: "pairing-topic",
+        requestedChains: ["eip155:1"],
+        approvedChains: ["eip155:1"],
+        requestedMethods: ["eth_accounts"],
+        handledMethods: ["eth_accounts"],
+        requestCount: 1,
+      };
+    },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  // Force the session into KYC completion stage
+  res.session.stage = "awaiting_kyc_completion";
+  res.session.auth.kycVerificationUrl = "https://verify.example/test";
+
+  const wcLink = "wc:abc123@2?relay-protocol=irn&symKey=def456";
+  res = await advanceTransferFlow(res.session, `I'll do KYC later, but approve this WalletConnect first. ${wcLink}`, deps);
+
+  // The wc: link should have been consumed as a browser login
+  assert.deepEqual(approvedUris, [wcLink]);
+  assert.match(res.reply, /approved.*WalletConnect browser-login/i);
+  // The session should return to the KYC stage, not jump to signing key
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+});
+
 test("existing active KYC verification link is reused instead of asking for KYC details again", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({

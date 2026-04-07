@@ -6276,6 +6276,39 @@ async function maybeHandleKycTurn(
     return undefined;
   }
 
+  // Interrupt: handle wc:/tc:// browser-login links even during KYC
+  const interruptWcUri = parseWalletConnectUriInput(turn.text);
+  const interruptTcUri = parseTonConnectUniversalLinkInput(turn.text);
+  if (interruptWcUri || interruptTcUri) {
+    const savedStage = session.stage;
+    const walletChoice = session.auth.choice;
+    if (interruptWcUri && (walletChoice === "ton" || walletChoice === "generated_ton")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
+      return reply(withUpdate(session, deps), prompt);
+    }
+    if (interruptTcUri && (walletChoice === "evm" || walletChoice === "generated_evm")) {
+      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
+      return reply(withUpdate(session, deps), prompt);
+    }
+    if (interruptWcUri) {
+      session.stage = "awaiting_evm_signing_key";
+      const browserLoginResult = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
+      if (browserLoginResult) {
+        browserLoginResult.session.stage = savedStage;
+        return browserLoginResult;
+      }
+    }
+    if (interruptTcUri) {
+      session.stage = "awaiting_evm_signing_key";
+      const browserLoginResult = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
+      if (browserLoginResult) {
+        browserLoginResult.session.stage = savedStage;
+        return browserLoginResult;
+      }
+    }
+    session.stage = savedStage;
+  }
+
   const client = await getExecutionClient(deps, session);
   const existingVerificationResult = await maybeResumeExistingKycVerification(session, deps, client);
   if (existingVerificationResult) {
