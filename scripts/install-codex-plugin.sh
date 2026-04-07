@@ -6,7 +6,8 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 LOCAL_PLUGIN_HOME="${HOME}/plugins"
 PLUGIN_DEST="${LOCAL_PLUGIN_HOME}/agentic-payments"
 MARKETPLACE_PATH="${HOME}/.agents/plugins/marketplace.json"
-LOCAL_CACHE_DEST="${CODEX_HOME}/plugins/cache/local/agentic-payments"
+LOCAL_CACHE_ROOT="${CODEX_HOME}/plugins/cache/local/agentic-payments"
+LOCAL_CACHE_DEST="${LOCAL_CACHE_ROOT}/local"
 SYNC_CACHE_DIR="${CODEX_HOME}/.tmp/plugins"
 SYNC_CACHE_SHA="${CODEX_HOME}/.tmp/plugins.sha"
 LEGACY_CODEX_PLUGIN_DEST="${CODEX_HOME}/plugins/agentic-payments"
@@ -19,6 +20,7 @@ if [[ "${1:-}" == "--force" ]]; then
 fi
 
 mkdir -p "${LOCAL_PLUGIN_HOME}"
+mkdir -p "${LOCAL_CACHE_ROOT}"
 
 if [[ -L "${PLUGIN_DEST}" ]]; then
   CURRENT_TARGET="$(readlink "${PLUGIN_DEST}")"
@@ -35,6 +37,17 @@ elif [[ -e "${PLUGIN_DEST}" ]]; then
 fi
 
 ln -sfn "${ROOT_DIR}" "${PLUGIN_DEST}"
+
+if [[ -L "${LOCAL_CACHE_DEST}" ]]; then
+  CURRENT_CACHE_TARGET="$(readlink "${LOCAL_CACHE_DEST}")"
+  if [[ "${CURRENT_CACHE_TARGET}" != "${ROOT_DIR}" ]]; then
+    rm -f "${LOCAL_CACHE_DEST}"
+  fi
+elif [[ -e "${LOCAL_CACHE_DEST}" ]]; then
+  rm -rf "${LOCAL_CACHE_DEST}"
+fi
+
+ln -sfn "${ROOT_DIR}" "${LOCAL_CACHE_DEST}"
 
 python3 - "${MARKETPLACE_PATH}" <<'PY'
 from pathlib import Path
@@ -130,11 +143,6 @@ else:
 config_path.write_text(text)
 PY
 
-if [[ -d "${LOCAL_CACHE_DEST}" ]]; then
-  rm -rf "${LOCAL_CACHE_DEST}"
-  printf 'Cleared stale Codex plugin cache: %s\n' "${LOCAL_CACHE_DEST}"
-fi
-
 if [[ -d "${SYNC_CACHE_DIR}" ]]; then
   rm -rf "${SYNC_CACHE_DIR}"
   printf 'Cleared stale Codex plugin sync cache: %s\n' "${SYNC_CACHE_DIR}"
@@ -146,6 +154,7 @@ if [[ -f "${SYNC_CACHE_SHA}" ]]; then
 fi
 
 printf 'Installed Codex plugin: %s -> %s\n' "${PLUGIN_DEST}" "${ROOT_DIR}"
+printf 'Installed live Codex runtime path: %s -> %s\n' "${LOCAL_CACHE_DEST}" "${ROOT_DIR}"
 printf 'Updated local marketplace: %s\n' "${MARKETPLACE_PATH}"
 printf 'Enabled plugin key: agentic-payments@local\n'
 printf 'Restart Codex to rebuild the local plugin cache if it is already open.\n'

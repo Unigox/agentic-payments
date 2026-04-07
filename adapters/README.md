@@ -107,5 +107,5 @@ Codex distribution rule:
 - prefer the local plugin wrapper install through `scripts/install-codex-plugin.sh`
 - the plugin wrapper should stay thin and point back to the canonical repo-root `SKILL.md`
 - do not copy the flow engine into a separate Codex-only implementation
-- the installer should clear `~/.codex/plugins/cache/local/agentic-payments` on reinstall so Codex does not keep serving a stale copied snapshot after repo updates
+- the installer should install `~/.codex/plugins/cache/local/agentic-payments/local` as a repo-backed path, because Codex loads enabled local plugins from that installed cache location rather than directly from the marketplace source path
 - the installer should also clear `~/.codex/.tmp/plugins` and `~/.codex/.tmp/plugins.sha` so a restart cannot reuse an old plugin-sync marketplace snapshot that omits the local plugin
