@@ -250,7 +250,13 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
       description: canonical.description,
       inputSchema: sendMoneyMcpInputShape,
     },
-    async (input) => runAndFormat(buildBaseToolInput(input), deps)
+    async (input) => runAndFormat(
+      buildBaseToolInput({
+        ...input,
+        reset: shouldResetForFreshStart(input.text, input.reset, input.session_key),
+      }),
+      deps
+    )
   );
 
   const startTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === START_SEND_MONEY_TOOL_NAME)!;

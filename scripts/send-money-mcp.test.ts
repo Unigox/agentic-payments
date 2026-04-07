@@ -57,6 +57,7 @@ test("fresh Claude start phrasing resets the default local session when no sessi
   assert.equal(shouldResetForFreshStart("/agentic-payments lets start", undefined, undefined), true);
   assert.equal(shouldResetForFreshStart("I want to send money using Agentic Payments.", undefined, undefined), true);
   assert.equal(shouldResetForFreshStart("kick off Agentic Payments", undefined, undefined), true);
+  assert.equal(shouldResetForFreshStart("Let's start and login", undefined, undefined), true);
   assert.equal(shouldResetForFreshStart("continue my UNIGOX payment", undefined, undefined), undefined);
   assert.equal(shouldResetForFreshStart("/agentic-payments lets start", undefined, "chat-123"), undefined);
   assert.equal(shouldResetForFreshStart("/agentic-payments lets start", false, undefined), false);
