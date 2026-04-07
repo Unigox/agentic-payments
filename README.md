@@ -188,6 +188,8 @@ That creates:
 - `~/plugins/agentic-payments -> <repo-root>`
 - `~/.agents/plugins/marketplace.json` entry for `agentic-payments`
 
+It also clears Codex's local plugin cache for `agentic-payments` so a reinstall picks up the current repo instead of a stale copied snapshot.
+
 and enables:
 
 - `[plugins."agentic-payments@local"]`
@@ -212,7 +214,7 @@ If you only want the raw Codex skill without the plugin wrapper, the legacy fall
 bash scripts/install-codex-skill.sh
 ```
 
-After install, restart Codex to pick up the new plugin.
+After install, restart Codex to rebuild the local plugin cache from the current repo.
 
 ### Claude Local MCP Setup
 

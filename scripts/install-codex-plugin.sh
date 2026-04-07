@@ -6,6 +6,7 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 LOCAL_PLUGIN_HOME="${HOME}/plugins"
 PLUGIN_DEST="${LOCAL_PLUGIN_HOME}/agentic-payments"
 MARKETPLACE_PATH="${HOME}/.agents/plugins/marketplace.json"
+LOCAL_CACHE_DEST="${CODEX_HOME}/plugins/cache/local/agentic-payments"
 LEGACY_CODEX_PLUGIN_DEST="${CODEX_HOME}/plugins/agentic-payments"
 LEGACY_SKILL_DEST="${CODEX_HOME}/skills/agentic-payments"
 CONFIG_PATH="${CODEX_HOME}/config.toml"
@@ -127,7 +128,12 @@ else:
 config_path.write_text(text)
 PY
 
+if [[ -d "${LOCAL_CACHE_DEST}" ]]; then
+  rm -rf "${LOCAL_CACHE_DEST}"
+  printf 'Cleared stale Codex plugin cache: %s\n' "${LOCAL_CACHE_DEST}"
+fi
+
 printf 'Installed Codex plugin: %s -> %s\n' "${PLUGIN_DEST}" "${ROOT_DIR}"
 printf 'Updated local marketplace: %s\n' "${MARKETPLACE_PATH}"
 printf 'Enabled plugin key: agentic-payments@local\n'
-printf 'Restart Codex to pick up the new plugin if it is already open.\n'
+printf 'Restart Codex to rebuild the local plugin cache if it is already open.\n'
