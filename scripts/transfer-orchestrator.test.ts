@@ -4901,6 +4901,42 @@ test("natural TON auth-choice phrasing is accepted without forcing the exact but
   assert.match(res.reply, /TON address shown by the wallet/i);
 });
 
+test("user can switch auth method from a stuck TON address step back to auth choice", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+
+  res = await advanceTransferFlow(res.session, "Lets do TON", deps);
+  assert.equal(res.session.stage, "awaiting_ton_address");
+
+  res = await advanceTransferFlow(res.session, "actually use a different wallet", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+  assert.match(res.reply, /different sign-in method/i);
+  assert.equal(res.session.auth.choice, undefined);
+  assert.equal(res.session.auth.mode, undefined);
+});
+
+test("user can go back from EVM signing key step to auth choice", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  });
+
+  let res = await startTransferFlow("send 50 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  res = await advanceTransferFlow(res.session, "go back", deps);
+  assert.equal(res.session.stage, "awaiting_auth_choice");
+  assert.match(res.reply, /different sign-in method/i);
+});
+
 test("raw 0: TON address form is accepted and preserved in the confirmation prompt", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();

@@ -527,6 +527,10 @@ interface ParsedHints {
   authChoice?: AuthChoice;
   changeCurrency?: string;
   changeAmount?: number;
+  changeRecipient?: string;
+  changeMethod?: boolean;
+  switchAuth?: boolean;
+  goBack?: boolean;
   checkStatus?: boolean;
   cancel?: boolean;
   saveContactDecision?: "yes" | "no";
@@ -1359,6 +1363,22 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   }
   if (/^(cancel|stop|nevermind|never mind)$/i.test(value)) {
     hints.cancel = true;
+  }
+  if (/\b(go back|undo|previous step|back up|step back|redo)\b/.test(lower)) {
+    hints.goBack = true;
+  }
+  if (/\b(change (?:payment )?method|different (?:payment )?method|switch (?:payment )?method|try (?:a )?different (?:way|method|option)|another (?:payment )?method|different provider|change provider)\b/.test(lower)) {
+    hints.changeMethod = true;
+  }
+  if (/\b(switch (?:auth|wallet|login)|different (?:auth|wallet|login)|change (?:auth|wallet|login)|use (?:a )?different (?:wallet|auth|login)|try (?:a )?different (?:wallet|auth))\b/.test(lower)) {
+    hints.switchAuth = true;
+  }
+  const changeRecipientMatch = value.match(/\b(?:change|switch|different)\s+(?:recipient|person|payee)\s*(?:to\s+)?(.+)?/i);
+  if (changeRecipientMatch) {
+    hints.changeRecipient = changeRecipientMatch[1]?.trim() || "";
+  }
+  if (/\b(send to someone else|pay someone else|different recipient|different person)\b/.test(lower)) {
+    hints.changeRecipient = hints.changeRecipient ?? "";
   }
   hints.authChoice = parseAuthChoice(value);
   if (CONFIRM_RE.test(value)) {
@@ -3905,6 +3925,29 @@ async function maybeHandleAuthOnboardingTurn(
       return finalizeTonMnemonic(session, normalizedSecret, deps);
     }
     return finalizeEvmSigningKey(session, normalizedSecret, deps);
+  }
+
+  // Escape hatch: allow switching auth method from any auth stage
+  const AUTH_SWITCHABLE_STAGES: TransferStage[] = [
+    "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_evm_signing_key",
+    "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method",
+    "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion",
+    "awaiting_email_address", "awaiting_email_otp", "awaiting_wallet_setup_choice",
+  ];
+  if ((hinted.switchAuth || hinted.goBack) && AUTH_SWITCHABLE_STAGES.includes(session.stage)) {
+    session.auth.choice = undefined;
+    session.auth.mode = undefined;
+    session.auth.pendingSecret = undefined;
+    session.auth.tonAddress = undefined;
+    session.auth.tonAddressDisplay = undefined;
+    session.auth.tonConnect = undefined;
+    session.status = "blocked";
+    session.stage = "awaiting_auth_choice";
+    const prompt = "No problem. Let's pick a different sign-in method. " + getUnigoxWalletConnectionPrompt();
+    return reply(withUpdate(session, deps), prompt, [...AUTH_CHOICE_OPTIONS], [{
+      type: "blocked_missing_auth",
+      message: prompt,
+    }]);
   }
 
   if (session.stage === "awaiting_wallet_setup_choice") {
@@ -6860,6 +6903,20 @@ async function promptForNextField(session: TransferSession, deps: TransferFlowDe
 }
 
 async function collectPaymentDetails(session: TransferSession, turn: TransferTurn, deps: TransferFlowDeps): Promise<TransferFlowResult | undefined> {
+  // Escape hatch: let user change method or go back from payment details collection
+  const detailText = cleanText(turn.text);
+  const detailHints = parseIntentHints(detailText);
+  if (detailHints.changeMethod || detailHints.goBack) {
+    session.payment = undefined;
+    session.details = {};
+    session.detailCollection = { index: 0 };
+    session.stage = "awaiting_payment_method";
+    return reply(
+      withUpdate(session, deps),
+      "No problem. Let's pick a different payment method.",
+    );
+  }
+
   const config = await resolveFieldConfig(session, deps);
   const validate = deps.validatePaymentDetailInput || defaultValidatePaymentDetailInput;
   const options = fieldValidationOptions(config);
@@ -6885,8 +6942,12 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
 
     const partialResult = validate({ [field.field]: provided }, [field], options);
     if (!partialResult.valid) {
+      const hadPreviousError = Boolean(session.detailCollection.lastError);
       session.detailCollection.lastError = partialResult.errors[0]?.message;
-      return reply(withUpdate(session, deps), `${partialResult.errors[0]?.message}. ${currentFieldPrompt(field)}`);
+      const errorHint = hadPreviousError
+        ? " You can also say 'change method' to pick a different payment option."
+        : "";
+      return reply(withUpdate(session, deps), `${partialResult.errors[0]?.message}. ${currentFieldPrompt(field)}${errorHint}`);
     }
 
     const normalizedValue = partialResult.normalizedDetails[field.field] ?? provided.trim();
@@ -7484,6 +7545,51 @@ export async function advanceTransferFlow(
 
   applyHintsToSession(session, stageAwareHints);
   applyMidFlowChanges(session, hints);
+
+  // Mid-flow recipient correction
+  const RECIPIENT_CHANGEABLE_STAGES: TransferStage[] = [
+    "awaiting_currency", "awaiting_amount", "awaiting_payment_method",
+    "awaiting_payment_network", "awaiting_payment_details",
+    "awaiting_save_contact_decision", "awaiting_confirmation",
+  ];
+  if (hints.changeRecipient !== undefined && RECIPIENT_CHANGEABLE_STAGES.includes(session.stage)) {
+    session.recipientName = undefined;
+    session.recipientQuery = undefined;
+    session.contactKey = undefined;
+    session.remoteSavedContact = undefined;
+    session.aliases = [];
+    session.contactExists = false;
+    session.contactStale = false;
+    session.recipientMode = undefined;
+    session.contactSaveAction = undefined;
+    session.currency = undefined;
+    session.amount = undefined;
+    session.payment = undefined;
+    session.details = {};
+    session.detailCollection = { index: 0 };
+    session.execution.confirmed = false;
+    clearExecutionPreflight(session);
+    session.stage = "awaiting_recipient_name";
+    if (hints.changeRecipient) {
+      session.recipientQuery = hints.changeRecipient;
+    }
+    const prompt = hints.changeRecipient
+      ? `Got it, switching recipient to ${hints.changeRecipient}. Let me look them up.`
+      : "No problem. Who should I send to instead?";
+    if (hints.changeRecipient) {
+      session.stage = "resolving";
+    }
+    return reply(withUpdate(session, deps), prompt);
+  }
+
+  // Mid-flow payment method correction from any payment/details stage
+  if (hints.changeMethod && ["awaiting_payment_network", "awaiting_payment_details"].includes(session.stage)) {
+    session.payment = undefined;
+    session.details = {};
+    session.detailCollection = { index: 0 };
+    session.stage = "awaiting_payment_method";
+    return reply(withUpdate(session, deps), "No problem. Let's pick a different payment method.");
+  }
 
   const paymentRouteCorrectionReply = await maybeHandlePaymentRouteCorrection(session, normalizedTurn, deps);
   if (paymentRouteCorrectionReply) return paymentRouteCorrectionReply;
