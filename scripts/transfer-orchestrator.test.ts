@@ -4700,6 +4700,22 @@ test("stored TON auth without a signing key prompts for the UNIGOX signing key i
   assert.doesNotMatch(res.reply, /Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY/i);
 });
 
+test("sign-in focused prompt with stored TON auth stays focused on browser login instead of leading with signing-key export", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+  });
+
+  const res = await startTransferFlow("Use Agentic Payments to sign me in to UNIGOX.", deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /Agent-side login is already set up on this machine/i);
+  assert.match(res.reply, /browser session on unigox\.com/i);
+  assert.match(res.reply, /fresh screenshot of the visible TonConnect QR|fresh tc:\/\/ TonConnect link/i);
+  assert.doesNotMatch(res.reply, /this next step needs the separate UNIGOX EVM signing key/i);
+});
+
 test("stored generated EVM auth without a signing key explains the EVM website login path instead of TonConnect", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
@@ -4766,6 +4782,28 @@ test("missing signing key step accepts a fresh UNIGOX wc: link and approves the 
   assert.match(res.reply, /export the agentic-payments \/ signing key/i);
   assert.deepEqual(approvedUris, [wcLink]);
   assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
+});
+
+test("sign-in focused prompt treats an explicit wc link as WalletConnect auth even when the stored auth path is TON", async () => {
+  const { file } = makeTempContactsFile();
+  const client = makeClient();
+  const deps = makeDeps(file, client, {
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    approveEvmWalletConnectLink: async () => {
+      throw new Error("No EVM wallet configured on this machine yet.");
+    },
+  });
+
+  let res = await startTransferFlow("Use Agentic Payments to sign me in to UNIGOX.", deps);
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+
+  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
+  res = await advanceTransferFlow(res.session, wcLink, deps);
+
+  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /fresh UNIGOX wc: WalletConnect link here/i);
+  assert.match(res.reply, /exact EVM login wallet on this machine first/i);
+  assert.doesNotMatch(res.reply, /doesn’t look like a valid EVM private key/i);
 });
 
 test("missing signing key step accepts a fresh UNIGOX WalletConnect QR screenshot path and decodes it into the same browser-login handoff", async () => {

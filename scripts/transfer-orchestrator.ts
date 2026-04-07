@@ -519,6 +519,7 @@ interface ParsedHints {
   recipient?: string;
   currency?: string;
   amount?: number;
+  signInIntent?: boolean;
   savedOrNew?: "saved" | "new";
   authChoice?: AuthChoice;
   changeCurrency?: string;
@@ -1158,6 +1159,8 @@ function parseIntentHints(text: string | undefined): ParsedHints {
     return {};
   }
   const lower = value.toLowerCase();
+  const unigoxSignInIntent = /(?:\b(?:sign|log)\s+(?:me\s+)?in\b|\bsignin\b|\blogin\b|\bauthenticate\b|\bauth\b)/.test(lower)
+    && /\bunigox\b/.test(lower);
   const amountCurrency = parseAmountAndCurrency(value);
 
   const hints: ParsedHints = {
@@ -1170,6 +1173,10 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   }
   if (/make a transfer|send money|send|transfer|pay /.test(lower) && !hints.goal) {
     hints.goal = "transfer";
+  }
+  if (unigoxSignInIntent) {
+    hints.signInIntent = true;
+    hints.goal = hints.goal || "transfer";
   }
   if (hasSavedRecipientLookupIntent(value)) {
     hints.savedOrNew = "saved";
@@ -2292,6 +2299,17 @@ function buildMissingSigningKeyPrompt(username: string | undefined, choice?: Aut
     buildSigningKeyBrowserApprovalPrompt(choice),
     "If you do not see the export option yet, this beta feature probably is not enabled on your account yet and you likely still need early beta access for agentic payments. Ask UNIGOX via hello@unigox.com or Intercom chat to enable agentic-payments access for your account, then come back and paste the exported key here.",
     "I’ll store it locally on this machine so I can reuse it safely across turns.",
+  ].filter(Boolean).join(" ");
+}
+
+function buildBrowserLoginContinuationPrompt(username: string | undefined, choice?: AuthChoice): string {
+  return [
+    buildUsernameReminder(username),
+    "Agent-side login is already set up on this machine.",
+    "If you need the browser session on unigox.com too, send me the fresh browser login request from that page and I’ll keep this focused on signing you in there.",
+    buildSigningKeyBrowserAccessPrompt(choice),
+    buildSigningKeyBrowserApprovalPrompt(choice),
+    "After the website is logged in, export the separate agentic-payments / signing key from UNIGOX settings if you want secure actions like funding escrow, confirming fiat received, or releasing escrow.",
   ].filter(Boolean).join(" ");
 }
 
@@ -3508,7 +3526,8 @@ async function maybeHandleAuthOnboardingTurn(
   if (session.goal !== "transfer") return undefined;
 
   const responseText = cleanText(turn.option || turn.text);
-  const hintedChoice = parseIntentHints(responseText).authChoice;
+  const hinted = parseIntentHints(responseText);
+  const hintedChoice = hinted.authChoice;
 
   if (session.stage === "awaiting_secret_cleanup_confirmation") {
     session.status = "blocked";
@@ -4043,7 +4062,19 @@ async function maybeHandleAuthOnboardingTurn(
   if (session.stage === "awaiting_evm_signing_key" && !session.auth.evmSigningKeyAvailable) {
     session.status = "blocked";
     const walletChoice = session.auth.choice;
-    if (walletChoice === "evm" || walletChoice === "generated_evm") {
+    const explicitWalletConnectLink = Boolean(parseWalletConnectUriInput(turn.text));
+    const explicitTonConnectLink = Boolean(parseTonConnectUniversalLinkInput(turn.text));
+    if (explicitWalletConnectLink) {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else if (explicitTonConnectLink) {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
+    } else if (walletChoice === "evm" || walletChoice === "generated_evm") {
       const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
       if (walletConnectBrowserLogin) {
         return walletConnectBrowserLogin;
@@ -4056,7 +4087,9 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
+      const prompt = hinted.signInIntent
+        ? buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice)
+        : buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
       return reply(withUpdate(session, deps), prompt, undefined, [{
         type: "blocked_missing_auth",
         message: prompt,
@@ -7108,7 +7141,19 @@ export async function advanceTransferFlow(
     session.status = "blocked";
     session.stage = "awaiting_evm_signing_key";
     const walletChoice = session.auth.choice;
-    if (walletChoice === "evm" || walletChoice === "generated_evm") {
+    const explicitWalletConnectLink = Boolean(parseWalletConnectUriInput(normalizedTurn.text));
+    const explicitTonConnectLink = Boolean(parseTonConnectUniversalLinkInput(normalizedTurn.text));
+    if (explicitWalletConnectLink) {
+      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
+      if (walletConnectBrowserLogin) {
+        return walletConnectBrowserLogin;
+      }
+    } else if (explicitTonConnectLink) {
+      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
+      if (tonConnectBrowserLogin) {
+        return tonConnectBrowserLogin;
+      }
+    } else if (walletChoice === "evm" || walletChoice === "generated_evm") {
       const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
       if (walletConnectBrowserLogin) {
         return walletConnectBrowserLogin;
@@ -7119,7 +7164,9 @@ export async function advanceTransferFlow(
         return tonConnectBrowserLogin;
       }
     }
-    const followUp = buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
+    const followUp = hints.signInIntent
+      ? buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice)
+      : buildMissingSigningKeyPrompt(session.auth.username, session.auth.choice);
     return reply(withUpdate(session, deps), followUp, undefined, [{
       type: "blocked_missing_auth",
       message: followUp,
