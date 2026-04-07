@@ -7,6 +7,8 @@ LOCAL_PLUGIN_HOME="${HOME}/plugins"
 PLUGIN_DEST="${LOCAL_PLUGIN_HOME}/agentic-payments"
 MARKETPLACE_PATH="${HOME}/.agents/plugins/marketplace.json"
 LOCAL_CACHE_DEST="${CODEX_HOME}/plugins/cache/local/agentic-payments"
+SYNC_CACHE_DIR="${CODEX_HOME}/.tmp/plugins"
+SYNC_CACHE_SHA="${CODEX_HOME}/.tmp/plugins.sha"
 LEGACY_CODEX_PLUGIN_DEST="${CODEX_HOME}/plugins/agentic-payments"
 LEGACY_SKILL_DEST="${CODEX_HOME}/skills/agentic-payments"
 CONFIG_PATH="${CODEX_HOME}/config.toml"
@@ -131,6 +133,16 @@ PY
 if [[ -d "${LOCAL_CACHE_DEST}" ]]; then
   rm -rf "${LOCAL_CACHE_DEST}"
   printf 'Cleared stale Codex plugin cache: %s\n' "${LOCAL_CACHE_DEST}"
+fi
+
+if [[ -d "${SYNC_CACHE_DIR}" ]]; then
+  rm -rf "${SYNC_CACHE_DIR}"
+  printf 'Cleared stale Codex plugin sync cache: %s\n' "${SYNC_CACHE_DIR}"
+fi
+
+if [[ -f "${SYNC_CACHE_SHA}" ]]; then
+  rm -f "${SYNC_CACHE_SHA}"
+  printf 'Cleared stale Codex plugin sync fingerprint: %s\n' "${SYNC_CACHE_SHA}"
 fi
 
 printf 'Installed Codex plugin: %s -> %s\n' "${PLUGIN_DEST}" "${ROOT_DIR}"
