@@ -254,7 +254,8 @@ All of those Anthropic tools still dispatch into the same shared runner and stat
 The preferred Anthropic install path is a committed local desktop bundle in this repo:
 
 - `adapters/anthropic/installed.mcpb`
-- `adapters/anthropic/agentic-payments-skill.md` (optional but recommended companion Claude Skill for more reliable natural-language routing)
+- `adapters/anthropic/agentic-payments-skill.zip` (recommended companion Claude Skill package for more reliable natural-language routing)
+- `adapters/anthropic/agentic-payments-skill.md` (source for the packaged Claude Skill)
 
 On macOS, after cloning or downloading the repo, install it with:
 
@@ -264,7 +265,14 @@ open /absolute/path/to/agentic-payments/adapters/anthropic/installed.mcpb
 
 That should hand the bundle to Claude Desktop and open the extension install prompt.
 
-To rebuild the bundle from source on the same commit:
+Then upload the bundled Claude Skill in `Customize > Skills`:
+
+- choose `Upload a skill`
+- select `adapters/anthropic/agentic-payments-skill.zip`
+
+Claude Desktop extensions and Skills are separate install surfaces, so the `.mcpb` cannot auto-install the Skill. This repo ships them as a paired distribution instead: install the extension, then upload the bundled Skill ZIP.
+
+To rebuild the extension bundle and the companion Claude Skill package from source on the same commit:
 
 ```bash
 npm run build:anthropic-bundle --prefix scripts
@@ -365,6 +373,6 @@ MIT
 
 Claude Desktop can still be conservative about natural finance prompts even when the local extension is healthy. If you want prompts like `I want to send money using Agentic Payments` to route more reliably without explicitly naming the tool, also upload the companion Claude Skill from:
 
-- `adapters/anthropic/agentic-payments-skill.md`
+- `adapters/anthropic/agentic-payments-skill.zip`
 
 That skill does not add a second flow engine. It only tells Claude when to call the same local `send_money_turn` tool that the extension already provides.

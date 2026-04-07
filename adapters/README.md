@@ -87,11 +87,18 @@ Anthropic distribution rule:
 
 Current Anthropic bundle path:
 - `adapters/anthropic/installed.mcpb`
-- optional companion Claude Skill for routing:
+- paired companion Claude Skill package for routing:
+  - `adapters/anthropic/agentic-payments-skill.zip`
+- skill source:
   - `adapters/anthropic/agentic-payments-skill.md`
 
 Rebuild command:
 - `npm run build:anthropic-bundle --prefix scripts`
+
+Anthropic packaging rule:
+- Claude Desktop extensions and Claude Skills are separate install surfaces
+- the `.mcpb` bundle should be shipped together with an upload-ready Skill ZIP so end users can install both from the same repo release
+- keep the Skill ZIP aligned with the same repo commit as the `.mcpb`
 
 Claude trigger rule:
 - the local Anthropic descriptions should explicitly teach Claude that `Agentic Payments`, `UNIGOX`, `connector`, `extension`, and `plugin` mentions can all map to the same local `send_money_turn` tool

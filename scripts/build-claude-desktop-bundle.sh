@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUNDLE_BUILD_DIR="${ROOT_DIR}/adapters/anthropic/.mcpb-build"
 SCRIPTS_BUILD_DIR="${BUNDLE_BUILD_DIR}/scripts"
 OUTPUT_FILE="${ROOT_DIR}/adapters/anthropic/installed.mcpb"
+SKILL_BUILD_SCRIPT="${SCRIPT_DIR}/build-claude-skill-package.sh"
 MANIFEST_SOURCE="${ROOT_DIR}/adapters/anthropic/manifest.json"
 
 if [[ ! -f "${MANIFEST_SOURCE}" ]]; then
@@ -16,6 +17,10 @@ fi
 if [[ ! -f "${SCRIPT_DIR}/package.json" ]]; then
   echo "Missing scripts/package.json in ${SCRIPT_DIR}" >&2
   exit 1
+fi
+
+if [[ ! -x "${SKILL_BUILD_SCRIPT}" ]]; then
+  chmod +x "${SKILL_BUILD_SCRIPT}"
 fi
 
 # Clean up stale npm rename-temporary directories left behind by interrupted installs.
@@ -48,5 +53,6 @@ cp "${ROOT_DIR}/README.md" "${BUNDLE_BUILD_DIR}/README.md"
 npx -y @anthropic-ai/mcpb validate "${BUNDLE_BUILD_DIR}/manifest.json" >&2
 npx -y @anthropic-ai/mcpb pack "${BUNDLE_BUILD_DIR}" "${OUTPUT_FILE}" >&2
 npx -y @anthropic-ai/mcpb info "${OUTPUT_FILE}" >&2
+"${SKILL_BUILD_SCRIPT}" >&2
 
 echo "${OUTPUT_FILE}"
