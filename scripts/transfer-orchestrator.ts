@@ -4552,7 +4552,10 @@ function buildConfirmationMessage(session: TransferSession): string {
         assets: session.execution.preflight.walletBalanceAssets,
       }, session.execution.preflight.balanceUsd)
     : undefined;
-  const detailBlock = buildHumanDetailBlock(session.details);
+  const displayDetails = isEurSepaIban(session)
+    ? Object.fromEntries(Object.entries(session.details).filter(([k]) => k !== "bank_name"))
+    : session.details;
+  const detailBlock = buildHumanDetailBlock(displayDetails);
   return [
     buildUsernameReminder(session.auth.username, session.auth.choice),
     balanceLine,
