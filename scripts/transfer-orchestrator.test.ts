@@ -3836,7 +3836,7 @@ test("missing EVM auth asks the user to sign in on unigox.com before requesting 
 
   const afterSignin = await advanceTransferFlow(chooseEvm.session, "done", deps);
   assert.equal(afterSignin.session.stage, "awaiting_evm_login_key");
-  assert.match(afterSignin.reply, /Which wallet key did you use to sign in on UNIGOX/i);
+  assert.match(afterSignin.reply, /account private key for the EVM wallet you used to sign in on UNIGOX/i);
   assert.match(afterSignin.reply, /NEWLY CREATED \/ ISOLATED wallet/i);
   assert.match(afterSignin.reply, /must NOT be your main wallet/i);
 });
@@ -4490,11 +4490,9 @@ test("failed EVM login verification stays on the login-key step and does not ask
   res = await advanceTransferFlow(res.session, "evm", deps);
   res = await advanceTransferFlow(res.session, "done", deps);
   res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-  assert.match(res.reply, /delete the message/i);
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  // No longer blocks for cleanup — proceeds directly with advisory
   assert.equal(res.session.stage, "awaiting_evm_login_key");
+  assert.match(res.reply, /sensitive data/i);
   assert.match(res.reply, /didn't work/i);
   assert.doesNotMatch(res.reply, /UNIGOX EVM signing key/i);
 });
@@ -4519,12 +4517,9 @@ test("successful EVM login verification asks for the separate signing key and th
   res = await advanceTransferFlow(res.session, "done", deps);
   res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
 
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-  assert.match(res.reply, /delete the message/i);
-  assert.deepEqual(persisted.login, []);
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  // No longer blocks for cleanup — proceeds directly with advisory
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /sensitive data/i);
   assert.match(res.reply, /Login works/i);
   assert.match(res.reply, /@grape404/i);
   assert.match(res.reply, /separate UNIGOX EVM signing key/i);
@@ -4535,10 +4530,8 @@ test("successful EVM login verification asks for the separate signing key and th
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 
   res = await advanceTransferFlow(res.session, VALID_SIGNING_KEY, deps);
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-  assert.match(res.reply, /UNIGOX-exported signing key/i);
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  // Signing key also proceeds directly with advisory
+  assert.match(res.reply, /sensitive data/i);
   assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
   assert.equal(res.session.stage, "awaiting_payment_method");
   assert.match(res.reply, /Which payout method should mom receive in EUR/i);
@@ -4701,11 +4694,9 @@ test("successful TON login verification persists TON address and private key, th
   assert.match(res.reply, /TON mnemonic|TON private key|TonConnect/i);
 
   res = await advanceTransferFlow(res.session, VALID_TON_PRIVATE_KEY, deps);
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-  assert.match(res.reply, /delete the message/i);
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  // No longer blocks for cleanup — proceeds directly with advisory
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /sensitive data/i);
   assert.match(res.reply, /TON login works/i);
   assert.match(res.reply, /UNIGOX EVM signing key/i);
   assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
@@ -4721,9 +4712,7 @@ test("successful TON login verification persists TON address and private key, th
   assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
 
   res = await advanceTransferFlow(res.session, ANOTHER_VALID_KEY, deps);
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  assert.match(res.reply, /sensitive data/i);
   assert.deepEqual(persisted.signing, [ANOTHER_VALID_KEY]);
   assert.equal(res.session.stage, "awaiting_payment_method");
 });
@@ -4760,11 +4749,9 @@ test("successful TON mnemonic verification persists the exact TON address and ma
   assert.match(res.reply, /TON mnemonic|TonConnect/i);
 
   res = await advanceTransferFlow(res.session, VALID_TON_MNEMONIC, deps);
-  assert.equal(res.session.stage, "awaiting_secret_cleanup_confirmation");
-  assert.match(res.reply, /delete the message/i);
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
+  // No longer blocks for cleanup — proceeds directly with advisory
   assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.match(res.reply, /sensitive data/i);
   assert.match(res.reply, /TON login works/i);
   assert.match(res.reply, /TonConnect QR/i);
   assert.match(res.reply, /tc:\/\//i);

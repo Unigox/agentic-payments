@@ -2436,17 +2436,25 @@ function buildWalletSetupChoicePrompt(emailAddress?: string): string {
 function buildEvmLoginKeyPrompt(): string {
   return [
     buildEvmKeySecurityWarning("evm_login_key"),
-    "Great. Which wallet key did you use to sign in on UNIGOX? Paste the login wallet private key and I’ll verify login with that key first.",
+    "I need the account private key for the EVM wallet you used to sign in on UNIGOX.",
+    "This is the private key for that specific account — not the wallet’s seed phrase or mnemonic.",
+    "In MetaMask: click the ⋮ menu on the account → Account details → Show private key. In Phantom or other wallets, look for ‘Export private key’ in the account settings.",
+    "It starts with 0x and is 64 hex characters long (66 with the 0x prefix).",
+    "Paste it here and I’ll verify login with that key.",
   ].join(" ");
 }
 
 function buildInvalidEvmKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string, choice?: AuthChoice): string {
   const followUp = kind === "evm_login_key" ? buildEvmLoginKeyPrompt() : buildMissingSigningKeyPrompt(username, choice);
+  const mnemonicHint = kind === "evm_login_key"
+    ? " If you pasted a mnemonic / seed phrase, that’s not what I need here — I need the account private key, not the wallet recovery phrase."
+    : "";
   return [
     "That doesn’t look like a valid EVM private key.",
-    "I accept the key with or without 0x, but it must be the full 32-byte private key, not the wallet address.",
+    "I accept the key with or without 0x, but it must be the full 32-byte private key (64 hex characters), not the wallet address.",
+    mnemonicHint,
     followUp,
-  ].join(" ");
+  ].filter(Boolean).join(" ");
 }
 
 function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key" | "evm_signing_key", username?: string, choice?: AuthChoice): string {
@@ -2825,6 +2833,17 @@ function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
   ].filter(Boolean).join(" ");
 }
 
+function buildSecretCleanupAdvisory(kind: SecretKind): string {
+  const label = kind === "evm_login_key"
+    ? "login wallet key"
+    : kind === "evm_signing_key"
+      ? "UNIGOX-exported signing key"
+      : kind === "ton_private_key"
+        ? "TON private key"
+        : "TON mnemonic";
+  return `⚠️ You just shared sensitive data (${label}). It is advised to delete or archive the messages containing sensitive information, depending on the platform you are using.`;
+}
+
 function getStoredEmailAddress(deps: TransferFlowDeps): string | undefined {
   if (deps.clientConfig?.email) return deps.clientConfig.email;
   return loadEnvValue("UNIGOX_EMAIL");
@@ -3046,22 +3065,17 @@ async function maybeHandleSensitiveInput(
   secret: string,
   turn: TransferTurn,
   deps: TransferFlowDeps
-): Promise<{ needsManualCleanup: boolean; note?: string; deleted?: boolean }> {
+): Promise<{ needsManualCleanup: boolean; note?: string; deleted?: boolean; advisory?: string }> {
   const result = await deps.handleSensitiveInput?.({ kind, secret, turn, session });
   if (result?.deleted) {
     return { needsManualCleanup: false, deleted: true, note: result.note || "✅ I deleted that key-containing message from the chat before continuing." };
   }
 
-  session.auth.pendingSecret = {
-    kind,
-    value: secret,
-    note: result?.note,
-  };
-  session.stage = "awaiting_secret_cleanup_confirmation";
-  session.status = "blocked";
+  // No longer block for manual cleanup confirmation — proceed with an informational advisory instead
   return {
-    needsManualCleanup: true,
+    needsManualCleanup: false,
     note: result?.note,
+    advisory: buildSecretCleanupAdvisory(kind),
   };
 }
 
@@ -4197,18 +4211,15 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     const secretHandling = await maybeHandleSensitiveInput(session, "evm_login_key", loginKey, turn, deps);
-    if (secretHandling.needsManualCleanup) {
-      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-        type: "secret_cleanup_required",
-        message: prompt,
-      }]);
+    const events: TransferFlowEvent[] = [];
+    if (secretHandling.deleted) {
+      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the login-key message from chat." });
     }
-
-    const events = secretHandling.deleted
-      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the login-key message from chat." } as TransferFlowEvent]
-      : [];
-    return finalizeEvmLoginKey(session, loginKey, deps, events);
+    const result = await finalizeEvmLoginKey(session, loginKey, deps, events);
+    if (secretHandling.advisory) {
+      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+    }
+    return result;
   }
 
   if (session.stage === "awaiting_ton_address") {
@@ -4295,35 +4306,29 @@ async function maybeHandleAuthOnboardingTurn(
     const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
     if (mnemonic) {
       const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
-      if (secretHandling.needsManualCleanup) {
-        const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-        return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-          type: "secret_cleanup_required",
-          message: prompt,
-        }]);
+      const events: TransferFlowEvent[] = [];
+      if (secretHandling.deleted) {
+        events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." });
       }
-
-      const events = secretHandling.deleted
-        ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." } as TransferFlowEvent]
-        : [];
-      return finalizeTonMnemonic(session, mnemonic, deps, events);
+      const result = await finalizeTonMnemonic(session, mnemonic, deps, events);
+      if (secretHandling.advisory) {
+        result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+      }
+      return result;
     }
 
     const tonPrivateKey = await normalizeSecretInput("ton_private_key", responseText);
     if (tonPrivateKey) {
       const secretHandling = await maybeHandleSensitiveInput(session, "ton_private_key", tonPrivateKey, turn, deps);
-      if (secretHandling.needsManualCleanup) {
-        const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-        return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-          type: "secret_cleanup_required",
-          message: prompt,
-        }]);
+      const events: TransferFlowEvent[] = [];
+      if (secretHandling.deleted) {
+        events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." });
       }
-
-      const events = secretHandling.deleted
-        ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." } as TransferFlowEvent]
-        : [];
-      return finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+      const result = await finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+      if (secretHandling.advisory) {
+        result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+      }
+      return result;
     }
 
     if (explicitMethod === "mnemonic") {
@@ -4373,18 +4378,15 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
-    if (secretHandling.needsManualCleanup) {
-      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-        type: "secret_cleanup_required",
-        message: prompt,
-      }]);
+    const events: TransferFlowEvent[] = [];
+    if (secretHandling.deleted) {
+      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." });
     }
-
-    const events = secretHandling.deleted
-      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." } as TransferFlowEvent]
-      : [];
-    return finalizeTonMnemonic(session, mnemonic, deps, events);
+    const result = await finalizeTonMnemonic(session, mnemonic, deps, events);
+    if (secretHandling.advisory) {
+      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+    }
+    return result;
   }
 
   if (session.stage === "awaiting_ton_private_key") {
@@ -4413,18 +4415,15 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     const secretHandling = await maybeHandleSensitiveInput(session, "ton_private_key", tonPrivateKey, turn, deps);
-    if (secretHandling.needsManualCleanup) {
-      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-        type: "secret_cleanup_required",
-        message: prompt,
-      }]);
+    const events: TransferFlowEvent[] = [];
+    if (secretHandling.deleted) {
+      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." });
     }
-
-    const events = secretHandling.deleted
-      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." } as TransferFlowEvent]
-      : [];
-    return finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+    const result = await finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
+    if (secretHandling.advisory) {
+      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+    }
+    return result;
   }
 
   if (session.stage === "awaiting_tonconnect_completion") {
@@ -4505,18 +4504,15 @@ async function maybeHandleAuthOnboardingTurn(
     }
 
     const secretHandling = await maybeHandleSensitiveInput(session, "evm_signing_key", signingKey, turn, deps);
-    if (secretHandling.needsManualCleanup) {
-      const prompt = buildSecretCleanupPrompt(session.auth.pendingSecret!);
-      return reply(withUpdate(session, deps), prompt, ["deleted"], [{
-        type: "secret_cleanup_required",
-        message: prompt,
-      }]);
+    const events: TransferFlowEvent[] = [];
+    if (secretHandling.deleted) {
+      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the signing-key message from chat." });
     }
-
-    const events = secretHandling.deleted
-      ? [{ type: "secret_message_deleted", message: secretHandling.note || "Deleted the signing-key message from chat." } as TransferFlowEvent]
-      : [];
-    return finalizeEvmSigningKey(session, signingKey, deps, events);
+    const result = await finalizeEvmSigningKey(session, signingKey, deps, events);
+    if (secretHandling.advisory) {
+      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
+    }
+    return result;
   }
 
   return undefined;
