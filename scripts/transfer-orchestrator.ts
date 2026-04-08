@@ -5243,6 +5243,18 @@ function isBankLikeMethod(method: PaymentMethodInfo): boolean {
   return /bank|iban|sepa|wise|revolut/.test(haystack);
 }
 
+/** EUR + SEPA/IBAN route — bank_name is redundant because SEPA always clears via the IBAN. */
+function isEurSepaIban(session: TransferSession): boolean {
+  if (session.currency?.toUpperCase() !== "EUR") return false;
+  const haystack = [
+    session.payment?.networkName,
+    session.payment?.networkSlug,
+    session.payment?.methodName,
+    session.payment?.methodSlug,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /sepa|iban/.test(haystack);
+}
+
 function buildPaymentMethodPrompt(session: TransferSession, currencyData: CurrencyPaymentData, ambiguity?: string): string {
   const suggestions = currencyData.paymentMethods.slice(0, 6).map((method) => method.name);
   const bankLikeExamples = currencyData.paymentMethods.filter(isBankLikeMethod).slice(0, 4).map((method) => method.name);
@@ -5265,13 +5277,16 @@ function buildPaymentNetworkPrompt(method: PaymentMethodInfo, currency: string):
   return `${method.name} has multiple payout routes for ${currency}: ${networkNames}. Which one should I use? ${clarification}`;
 }
 
-function currentFieldPrompt(field: NetworkFieldConfig): string {
+function currentFieldPrompt(field: NetworkFieldConfig, session?: TransferSession): string {
   const optional = field.required ? "" : " Optional — you can say 'skip'.";
   if (field.field === "bank_name") {
     return `Which bank should receive this payout? Please provide the bank name.${optional}`.trim();
   }
   if (field.field === "iban") {
-    return `Please provide the recipient's IBAN / bank account for this payout.${optional}`.trim();
+    const sepaNote = session && isEurSepaIban(session)
+      ? " This is a SEPA IBAN transfer."
+      : "";
+    return `Please provide the recipient's IBAN for this payout.${sepaNote}${optional}`.trim();
   }
   const hint = field.placeholder ? ` ${field.placeholder}.` : field.description ? ` ${field.description}.` : "";
   return `Please provide ${field.label || field.field}.${hint}${optional}`.trim();
@@ -6886,14 +6901,19 @@ async function promptForNextField(session: TransferSession, deps: TransferFlowDe
   const fields = config.fields;
   while (session.detailCollection.index < fields.length) {
     const field = fields[session.detailCollection.index];
+    // Skip bank_name for EUR SEPA/IBAN — it's redundant; SEPA clears via IBAN alone
+    if (field.field === "bank_name" && isEurSepaIban(session)) {
+      session.detailCollection.index += 1;
+      continue;
+    }
     if (field.required) {
-      return reply(withUpdate(session, deps), currentFieldPrompt(field));
+      return reply(withUpdate(session, deps), currentFieldPrompt(field, session));
     }
     if (typeof session.details[field.field] === "string") {
       session.detailCollection.index += 1;
       continue;
     }
-    return reply(withUpdate(session, deps), currentFieldPrompt(field));
+    return reply(withUpdate(session, deps), currentFieldPrompt(field, session));
   }
   return reply(withUpdate(session, deps), "Payment details captured.");
 }
@@ -6921,12 +6941,19 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
 
   while (session.detailCollection.index < fields.length) {
     const field = fields[session.detailCollection.index];
+
+    // Skip bank_name for EUR SEPA/IBAN — SEPA clears via IBAN alone, no bank name needed
+    if (field.field === "bank_name" && isEurSepaIban(session)) {
+      session.detailCollection.index += 1;
+      continue;
+    }
+
     const structuredValue = maybeConsumeStructuredFieldValue(turn, field);
     const textValue = !consumedText ? cleanText(turn.text) : "";
     const provided = structuredValue ?? (textValue || undefined);
 
     if (!provided) {
-      return reply(withUpdate(session, deps), currentFieldPrompt(field));
+      return reply(withUpdate(session, deps), currentFieldPrompt(field, session));
     }
 
     if (!structuredValue) consumedText = true;
@@ -6943,7 +6970,7 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
       const errorHint = hadPreviousError
         ? " You can also say 'change method' to pick a different payment option."
         : "";
-      return reply(withUpdate(session, deps), `${partialResult.errors[0]?.message}. ${currentFieldPrompt(field)}${errorHint}`);
+      return reply(withUpdate(session, deps), `${partialResult.errors[0]?.message}. ${currentFieldPrompt(field, session)}${errorHint}`);
     }
 
     const normalizedValue = partialResult.normalizedDetails[field.field] ?? provided.trim();
@@ -6951,14 +6978,15 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
     session.detailCollection.index += 1;
   }
 
-  const fullValidation = validate(session.details, fields, options);
+  const effectiveFields = isEurSepaIban(session) ? fields.filter((f) => f.field !== "bank_name") : fields;
+  const fullValidation = validate(session.details, effectiveFields, options);
   session.details = { ...session.details, ...fullValidation.normalizedDetails };
   if (!fullValidation.valid) {
     const firstError = fullValidation.errors[0];
     const fieldIndex = Math.max(0, fields.findIndex((field) => field.field === firstError.field));
     session.detailCollection.index = fieldIndex;
     session.detailCollection.lastError = firstError.message;
-    return reply(withUpdate(session, deps), `${firstError.message}. ${currentFieldPrompt(fields[fieldIndex])}`);
+    return reply(withUpdate(session, deps), `${firstError.message}. ${currentFieldPrompt(fields[fieldIndex], session)}`);
   }
 
   session.payment = {

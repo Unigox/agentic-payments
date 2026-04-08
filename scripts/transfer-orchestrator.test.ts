@@ -2857,14 +2857,15 @@ test("payment method collection stays stepwise for providers with multiple payou
 
   res = await advanceTransferFlow(res.session, "European Transfer (SEPA)", deps);
   assert.equal(res.session.stage, "awaiting_payment_details");
-  assert.match(res.reply, /IBAN \/ bank account/i);
+  assert.match(res.reply, /IBAN/i);
+  assert.match(res.reply, /SEPA IBAN transfer/i);
 
   res = await advanceTransferFlow(res.session, "EE382200221020145685", deps);
   assert.equal(res.session.stage, "awaiting_payment_details");
   assert.match(res.reply, /Full Name/i);
 });
 
-test("bank-style SEPA flows collect bank name when required", async () => {
+test("EUR SEPA flows skip bank_name — SEPA clears via IBAN alone", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
   const deps = makeDeps(file, client);
@@ -2876,15 +2877,17 @@ test("bank-style SEPA flows collect bank name when required", async () => {
   res = await advanceTransferFlow(res.session, "Other Bank", deps);
 
   assert.equal(res.session.stage, "awaiting_payment_details");
-  assert.match(res.reply, /IBAN \/ bank account/i);
+  assert.match(res.reply, /IBAN/i);
+  assert.match(res.reply, /SEPA IBAN transfer/i);
 
   res = await advanceTransferFlow(res.session, "EE382200221020145685", deps);
   assert.equal(res.session.stage, "awaiting_payment_details");
   assert.match(res.reply, /Full Name/i);
 
+  // bank_name should be skipped for EUR SEPA — goes straight to save contact decision
   res = await advanceTransferFlow(res.session, "Bank Person", deps);
-  assert.equal(res.session.stage, "awaiting_payment_details");
-  assert.match(res.reply, /Which bank should receive this payout/i);
+  assert.equal(res.session.stage, "awaiting_save_contact_decision");
+  assert.doesNotMatch(res.reply, /Which bank should receive/i);
 });
 
 test("awaiting confirmation re-resolves a natural bank or provider correction before trade placement", async () => {
@@ -2904,7 +2907,7 @@ test("awaiting confirmation re-resolves a natural bank or provider correction be
   res = await advanceTransferFlow(res.session, "Other Bank", deps);
   res = await advanceTransferFlow(res.session, "BE70967067003825", deps);
   res = await advanceTransferFlow(res.session, "Aleksandr Vinogradov", deps);
-  res = await advanceTransferFlow(res.session, "Example Bank", deps);
+  // bank_name is skipped for EUR SEPA — details collection is now complete
   res = await advanceTransferFlow(res.session, "no", deps);
   res = await advanceTransferFlow(res.session, "50", deps);
 
