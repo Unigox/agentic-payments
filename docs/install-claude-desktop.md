@@ -14,6 +14,12 @@ Claude Desktop requires **two install steps**, then a **restart**:
 
 > Both steps are required. The `.mcpb` registers the local MCP server that runs the payment engine. The Skill ZIP teaches Claude *when* to call that server. Without the Skill, Claude may not route payment requests to the local tools reliably.
 
+## Video Tutorial
+
+If you want to follow the install visually, watch:
+
+- [Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)
+
 ---
 
 ## Step 1: Install the Extension (.mcpb)

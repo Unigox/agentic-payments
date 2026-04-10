@@ -32,6 +32,8 @@ EUR, GBP, USD, AUD, NGN, KES, GHS, INR, ZAR, UGX, ARS, ETB, RWF, XAF, KWD, EGP, 
 
 After installing, set up authentication: **[Authentication & Wallet Setup](docs/authentication.md)**
 
+Need a walkthrough? Watch the tutorial: **[Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)**
+
 ---
 
 ## Getting Started
@@ -49,6 +51,8 @@ Email **hello@unigox.com** with your UNIGOX username to get agentic-payments ena
 ### 3. Install on your platform
 
 Pick your platform from the [install table above](#install) and follow the guide.
+
+If you want to follow along visually, use the tutorial: **[Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)**
 
 ### 4. Fund your wallet
 

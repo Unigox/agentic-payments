@@ -9,6 +9,10 @@ Agentic Payments needs two things to work:
 
 On first run, the skill walks you through both. This page explains the options.
 
+If you want a visual walkthrough of the setup flow, watch:
+
+- [Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)
+
 ---
 
 ## Sign-In Methods
