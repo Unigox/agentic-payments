@@ -202,7 +202,6 @@ function writeLoginWalletExportFile(dirPath: string, wallet: LoginWalletExportRe
     mnemonic: wallet.mnemonic,
     notes: [
       "This file contains plain-text secret material for the locally generated UNIGOX login wallet.",
-      "This is not the separate UNIGOX-exported EVM signing key used for secure send-money actions.",
       "Move this file into secure storage, then delete the local copy when you no longer need it.",
     ],
   };
@@ -292,11 +291,6 @@ function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
       });
     },
     exportLoginWalletFile: async (wallet) => writeLoginWalletExportFile(exportDir, wallet),
-    persistEvmSigningKey: async (signingKey) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_EVM_SIGNING_PRIVATE_KEY: signingKey,
-      });
-    },
     persistTonPrivateKey: async (tonPrivateKey) => {
       upsertEnvAssignments(envPath, {
         UNIGOX_AUTH_MODE: "ton",
