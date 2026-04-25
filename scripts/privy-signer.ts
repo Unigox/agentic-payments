@@ -17,7 +17,7 @@
  * Auth: Authorization: Bearer <idToken>; Content-Type: application/json
  */
 
-const DEFAULT_PRIVY_SIGNING_URL = "https://privy-signing-prod-at922.ondigitalocean.app";
+const DEFAULT_PRIVY_SIGNING_URL = "https://privy-signing-prod-at922.ondigitalocean.app/api/v1";
 const TIMEOUT_MS = 30_000;
 
 export type IdTokenProvider = () => Promise<string> | string;
