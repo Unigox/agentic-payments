@@ -36,7 +36,7 @@ Examples of triggers:
 The extension also exposes narrower entry tools as optional shortcuts. They all dispatch into the same underlying runner — choosing the wrong one is harmless, but choosing the right one can improve discoverability:
 
 - `start_send_money` — new transfer or continuation (optional shortcut for `send_money_turn`)
-- `sign_in_unigox` — auth setup, wallet connection, browser-login approval, signing-key setup
+- `sign_in_unigox` — auth setup, wallet connection, browser-login approval
 - `create_wallet` — generate a dedicated local EVM or TON wallet
 - `export_wallet` — export a generated login wallet to a local file
 - `check_kyc` — KYC threshold questions, early KYC, or live KYC-link requests
@@ -63,7 +63,7 @@ Specific constraints:
 1. **Never guess about flow state.** If the user asks anything about auth method, balance, username, why a step is needed, or what happened — call the tool with the user's question as `text` and relay the answer. The tool has the session state; you do not. Prior tool results may be stale.
 2. **Never add steps the tool didn't ask for.** Do not add an email request, a key request, or an extra confirmation unless the tool's reply explicitly includes it.
 3. **Never paraphrase protocol names.** When the tool says "WalletConnect" or "wc:", relay exactly that — do not substitute "TonConnect" or "tc://". When the tool says "TonConnect" or "tc://", do not substitute "WalletConnect" or "wc:". These are different protocols for different wallet types (EVM vs TON).
-4. **Never reinterpret field context.** A KYC legal-name prompt is not a recipient name. A recipient prompt is not KYC. A generated-wallet export is not the UNIGOX signing key export from account settings.
+4. **Never reinterpret field context.** A KYC legal-name prompt is not a recipient name. A recipient prompt is not KYC.
 5. **When in doubt, call the tool again.** The cost of an extra tool call is near zero. The cost of a wrong freestyle answer breaks trust.
 
 ## Tool usage

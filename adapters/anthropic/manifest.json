@@ -40,7 +40,7 @@
     },
     {
       "name": "sign_in_unigox",
-      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup."
+      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, and TON TonConnect QR or tc:// browser-login approval."
     },
     {
       "name": "create_wallet",

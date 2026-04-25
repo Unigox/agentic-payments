@@ -16,11 +16,10 @@ This document defines the higher-level chat/orchestration flow implemented in `s
      - **TON wallet connection**
      - fallback: **email OTP**
    - If the user chooses **EVM**, first confirm they have already signed in on unigox.com with that wallet (and stop there if they have not).
-   - Before requesting **either** EVM key, show the isolated-wallet warning: newly created / isolated wallet only, never the user's main wallet.
-   - After the user pastes either EVM key, try to delete that message if the runtime/channel supports it.
+   - Before requesting the EVM login key, show the isolated-wallet warning: newly created / isolated wallet only, never the user's main wallet.
+   - After the user pastes the EVM login key, try to delete that message if the runtime/channel supports it.
    - If automatic deletion is unavailable, block the flow, tell the user to delete the key-containing message themselves, and require explicit `deleted` confirmation before continuing.
-   - Verify the **login wallet key**, surface the current UNIGOX username, and only then ask for the separate **UNIGOX-exported EVM signing key**.
-   - If EVM login is configured but the exported signing key is still missing, ask only for that missing signing key instead of restarting auth-path selection.
+   - Verify the **login wallet key** and surface the current UNIGOX username.
    - Do not continue to execution until auth/onboarding is completed.
 
 3. **Recipient gate**
@@ -107,9 +106,8 @@ This document defines the higher-level chat/orchestration flow implemented in `s
 
 ### Missing auth
 - Block execution and ask for wallet sign-in path before continuing.
-- For EVM, first confirm the user has already signed in on unigox.com with that wallet, then show the isolated-wallet warning, collect the login wallet key, verify login, surface the username, and only after that ask for the separate exported signing key.
-- After either EVM key is pasted, try to delete that message; if the runtime cannot do it, require the user to delete it manually before continuing.
-- If the exported signing key is missing, keep the flow blocked before execution.
+- For EVM, first confirm the user has already signed in on unigox.com with that wallet, then show the isolated-wallet warning, collect the login wallet key, verify login, and surface the username.
+- After the EVM login key is pasted, try to delete that message; if the runtime cannot do it, require the user to delete it manually before continuing.
 
 ### Invalid field
 - Re-prompt on the exact field that failed validation.

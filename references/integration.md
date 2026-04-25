@@ -27,7 +27,6 @@ function loadEnvValue(key: string): string | undefined {
 
 function loadUnigoxConfig(): UnigoxClientConfig {
   const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
-  const evmSigningPrivateKey = loadEnvValue("UNIGOX_EVM_SIGNING_PRIVATE_KEY") || loadEnvValue("UNIGOX_PRIVATE_KEY");
   const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
   const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
   const tonWalletVersion = loadEnvValue("UNIGOX_TON_WALLET_VERSION");
@@ -37,7 +36,6 @@ function loadUnigoxConfig(): UnigoxClientConfig {
     return {
       authMode: "evm",
       evmLoginPrivateKey,
-      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
       ...(email && { email }),
     };
   }
@@ -51,20 +49,11 @@ function loadUnigoxConfig(): UnigoxClientConfig {
       ...(tonWalletVersion && { tonWalletVersion }),
       tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
       ...(email && { email }),
-      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
     };
   }
 
   if (email) {
-    return {
-      email,
-      authMode: "email",
-      ...(evmSigningPrivateKey && { evmSigningPrivateKey }),
-    };
-  }
-
-  if (evmSigningPrivateKey) {
-    return { privateKey: evmSigningPrivateKey, authMode: "evm" };
+    return { email, authMode: "email" };
   }
 
   throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
@@ -99,10 +88,8 @@ For EVM, use this exact order:
 3. Only after they confirm the wallet sign-in already happened, ask for the **wallet key they used to sign in on UNIGOX**.
 4. Save it as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
 5. Call `client.login()` to verify that login works.
-6. Only after login succeeds, ask for the separate **UNIGOX-exported EVM signing key**.
-7. Save that second key as `UNIGOX_EVM_SIGNING_PRIVATE_KEY` (legacy `UNIGOX_PRIVATE_KEY` still works).
 
-Important: the current integration does **not** expose a backend/client API to export that second key automatically. The user still has to export it manually from unigox.com settings.
+Once login succeeds, signed actions are handled server-side by the privy-signing backend using the Auth0 idToken from the active UNIGOX session — no additional key collection step.
 
 ## Email → TON linking
 
@@ -271,16 +258,18 @@ if (trade?.id) {
 
 Important: for `send-money`, escrow funding means sending the matched amount to the live trade's `escrow_address`. Do not use automated escrow deposit / withdraw helpers as part of this flow.
 
+## Server-side signing
+
+Once the user is signed in (SIWE / TON proof / email OTP), the client captures the Auth0 idToken from the active UNIGOX session and forwards it as `Authorization: Bearer <idToken>` to the privy-signing backend (default `https://privy-signing-prod-at922.ondigitalocean.app`, override with `PRIVY_SIGNING_URL`). All on-chain signing for `fundTradeEscrow()`, `confirmFiatReceived()`, `bridgeOut()`, and similar signed actions is performed there. The relevant endpoints:
+
+- `POST /sign/forward-request` — XAI Forwarder ForwardRequest (escrow funding, generic forwarded calls)
+- `POST /sign/safe-tx` — XAI Gnosis SafeTx (escrow release / trade actions)
+- `POST /sign/permit` — Arbitrum USDC EIP-3009
+- `POST /sign/typed-data` — generic EIP-712 fallback
+
+TON auth covers login / JWT acquisition; signed actions follow the same backend path through the captured idToken.
+
 ## Important limitations
-
-TON auth only covers login / JWT acquisition. Methods that sign EVM transactions still require the exported signing key (`UNIGOX_EVM_SIGNING_PRIVATE_KEY` or legacy `UNIGOX_PRIVATE_KEY`):
-- `fundTradeEscrow()`
-- `bridgeOut()`
-- `confirmFiatReceived()`
-
-Likewise, EVM login and EVM signing are now modeled separately:
-- `UNIGOX_EVM_LOGIN_PRIVATE_KEY` -> wallet login / SIWE replay (`linked_wallet_address`)
-- `UNIGOX_EVM_SIGNING_PRIVATE_KEY` -> internal UNIGOX / Privy wallet signing (`evm_address`)
 
 Dispute handling is intentionally deferred in this phase of the skill.
 If the user says anything other than explicit `received` / `not received`, or if the trade moves into an unsupported post-match status such as dispute-related states, the orchestrator keeps escrow untouched and routes to a safe deferred/manual follow-up placeholder instead of inventing a dispute workflow.

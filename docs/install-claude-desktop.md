@@ -127,4 +127,4 @@ This produces:
 
 ## Next Steps
 
-- [Configure authentication](authentication.md) (wallet setup, signing keys)
+- [Configure authentication](authentication.md) (wallet setup, sign-in paths)

@@ -2,12 +2,11 @@
 
 ## Overview
 
-Agentic Payments needs two things to work:
+Agentic Payments needs one thing to work: a way to sign in to UNIGOX on behalf of your agent. On first run, the skill walks you through it. This page explains the options.
 
-1. **A login wallet** — to sign in to UNIGOX on behalf of your agent
-2. **A signing key** — exported from UNIGOX settings, used for secure actions (funding escrow, confirming receipts)
+## How signing works
 
-On first run, the skill walks you through both. This page explains the options.
+Once you're signed in (SIWE / TON proof / email OTP), the skill captures the Auth0 idToken from your UNIGOX session and forwards it to the **privy-signing backend** at `https://privy-signing-prod-at922.ondigitalocean.app`. That backend handles all on-chain signing for you — funding trade escrow, releasing escrow, and any other signed action — using your idToken as Bearer auth. There is no second key for you to manage. If you need to point the skill at a different signing backend, set `PRIVY_SIGNING_URL`.
 
 If you want a visual walkthrough of the setup flow, watch:
 
@@ -65,24 +64,9 @@ Useful for onboarding when no wallet is ready. You can link a wallet later.
 
 ---
 
-## UNIGOX Signing Key
+## Browser login helper
 
-This is a **separate** key from the login wallet. It is exported from your UNIGOX account settings and is required for secure actions like funding escrow and confirming receipts.
-
-### How to get it
-
-1. Log in to [unigox.com](https://www.unigox.com) using the same wallet/method your agent uses
-2. Go to **Account Settings**
-3. Look for the option to **export your agentic-payments / signing key**
-4. Paste the key when the skill asks for it
-
-The skill stores it as `UNIGOX_EVM_SIGNING_PRIVATE_KEY`.
-
-> If you don't see the export option, agentic-payments beta may not be enabled on your account yet. Email **hello@unigox.com** or use UNIGOX Intercom chat to request access.
-
-### Browser login helper
-
-If the site shows a login QR or link while you're trying to reach settings:
+If unigox.com shows a login QR or link while you're trying to use the site directly:
 - **EVM wallet**: paste the `wc:` WalletConnect link or share a QR screenshot — the skill can approve the browser login locally
 - **TON wallet**: paste the `tc://` TonConnect link or share a QR screenshot — the skill can approve the browser login locally
 
@@ -92,9 +76,8 @@ If the site shows a login QR or link while you're trying to reach settings:
 
 - Use a **newly created / isolated wallet** for UNIGOX. Never use your main wallet.
 - Do not hold large amounts. Treat it as a spending wallet, not a vault.
-- Secure your login key and signing key. Anyone with access can authenticate as the agent.
+- Secure your login key. Anyone with access can authenticate as the agent.
 - After pasting a key in chat, delete that message if your platform supports it.
-- The signing key cannot be auto-exported yet — the manual export from unigox.com is required.
 
 ---
 
@@ -103,15 +86,16 @@ If the site shows a login QR or link while you're trying to reach settings:
 | Variable | Description |
 |----------|-------------|
 | `UNIGOX_EVM_LOGIN_PRIVATE_KEY` | EVM login wallet private key |
-| `UNIGOX_EVM_SIGNING_PRIVATE_KEY` | Exported UNIGOX signing key |
-| `UNIGOX_PRIVATE_KEY` | Legacy alias for signing key |
 | `UNIGOX_EVM_LOGIN_WALLET_ORIGIN` | Auth origin (`evm` or `generated_evm`) |
 | `UNIGOX_TON_PRIVATE_KEY` | TON wallet private key |
 | `UNIGOX_TON_ADDRESS` | TON wallet address |
 | `UNIGOX_TON_MNEMONIC` | TON wallet mnemonic (alternative to private key) |
 | `UNIGOX_TON_WALLET_VERSION` | Matched TON wallet version |
+| `UNIGOX_TON_NETWORK` | TON network id (defaults to `-239` mainnet) |
 | `UNIGOX_TON_LOGIN_WALLET_ORIGIN` | Auth origin (`ton` or `generated_ton`) |
+| `UNIGOX_LOGIN_WALLET_ORIGIN` | Combined login-wallet origin marker |
 | `UNIGOX_EMAIL` | Email for OTP auth |
 | `WALLETCONNECT_PROJECT_ID` | Optional WalletConnect project ID override |
+| `PRIVY_SIGNING_URL` | Optional override for the privy-signing backend; defaults to `https://privy-signing-prod-at922.ondigitalocean.app` |
 
 These are stored in `.env` in the project root (or `~/.openclaw/.env` as fallback).
