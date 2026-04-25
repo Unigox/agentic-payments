@@ -969,7 +969,7 @@ function makeClient(options: {
 function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>, overrides: Partial<TransferFlowDeps> = {}): TransferFlowDeps {
   return {
     contactsFilePath,
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: true },
+    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true },
     client,
     waitForSettlementTimeoutMs: 1,
     receiptConfirmationHandoffTimeoutMs: 1,
@@ -2275,7 +2275,7 @@ test("wc: link during awaiting_kyc_completion is handled as a browser-login inte
   const approvedUris: string[] = [];
   const client = makeClient();
   const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false },
     approveEvmWalletConnectLink: async (uri) => {
       approvedUris.push(uri);
       return {
@@ -3572,27 +3572,10 @@ test("no vendor match lands in explicit retry/change branch", async () => {
   assert.ok(res.events.some((event) => event.type === "blocked_no_vendor_match"));
 });
 
-test("detectAuthState recognizes split EVM login and signing keys", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, () => detectAuthState());
-
-  assert.equal(result.hasReplayableAuth, true);
-  assert.equal(result.authMode, "evm");
-  assert.equal(result.evmSigningKeyAvailable, true);
-  assert.equal(result.emailFallbackAvailable, true);
-});
 
 test("detectAuthState recognizes TON private-key auth without requiring mnemonic env", () => {
   const result = withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
     UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_EMAIL: "agent@example.com",
@@ -3600,7 +3583,6 @@ test("detectAuthState recognizes TON private-key auth without requiring mnemonic
 
   assert.equal(result.hasReplayableAuth, true);
   assert.equal(result.authMode, "ton");
-  assert.equal(result.evmSigningKeyAvailable, true);
   assert.equal(result.emailFallbackAvailable, true);
 });
 
@@ -3640,27 +3622,10 @@ test("detectAuthState keeps EVM and TON stored wallet origins separate when both
   assert.equal(result.emailFallbackAvailable, true);
 });
 
-test("loadUnigoxConfigFromEnv returns split EVM config when both EVM keys are available", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, () => loadUnigoxConfigFromEnv());
-
-  assert.equal(result.authMode, "evm");
-  assert.equal(result.evmLoginPrivateKey, "0xlogin");
-  assert.equal(result.evmSigningPrivateKey, "0xsign");
-  assert.equal(result.email, "agent@example.com");
-});
 
 test("loadUnigoxConfigFromEnv prefers TON private-key auth when present", () => {
   const result = withEnv({
     UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
     UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
     UNIGOX_TON_MNEMONIC: undefined,
     UNIGOX_TON_ADDRESS: "0:abcd",
@@ -3672,7 +3637,6 @@ test("loadUnigoxConfigFromEnv prefers TON private-key auth when present", () => 
   assert.equal(result.tonPrivateKey, VALID_TON_PRIVATE_KEY);
   assert.equal(result.tonAddress, "0:abcd");
   assert.equal(result.tonWalletVersion, "v5r1");
-  assert.equal(result.evmSigningPrivateKey, "0xsign");
   assert.equal(result.email, "agent@example.com");
 });
 
@@ -3700,74 +3664,7 @@ test("stored split EVM auth overrides stale injected auth state and shows userna
   assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
 });
 
-test("stored EVM login without signing key skips auth-choice questions and asks only for the missing key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
 
-  const res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, async () => startTransferFlow("Hey I want to make a transfer", makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  })));
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /@stateful/i);
-  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
-  assert.match(res.reply, /USDC: 200\.00 USD/i);
-  assert.match(res.reply, /USDT: 50\.00 USD/i);
-  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
-  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
-  assert.match(res.reply, /early beta access for agentic payments/i);
-  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
-  assert.match(res.reply, /beta feature/i);
-  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
-  assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
-});
-
-test("when both stored login profiles exist, the flow asks which saved account to use before replaying browser-login guidance", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
-
-  const start = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: "generated_evm",
-    UNIGOX_TON_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, async () => startTransferFlow("Hey I want to make a transfer", makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  })));
-
-  assert.equal(start.session.stage, "awaiting_auth_profile_choice");
-  assert.match(start.reply, /saved EVM account/i);
-  assert.match(start.reply, /saved TON account/i);
-  assert.doesNotMatch(start.reply, /TonConnect|WalletConnect/i);
-
-  const tonSelected = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: "generated_evm",
-    UNIGOX_TON_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, async () => advanceTransferFlow(start.session, "Use saved TON account", makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  })));
-
-  assert.equal(tonSelected.session.auth.choice, "generated_ton");
-  assert.equal(tonSelected.session.stage, "awaiting_evm_signing_key");
-  assert.match(tonSelected.reply, /fresh screenshot of the visible TonConnect QR|fresh tc:\/\/ TonConnect link/i);
-  assert.doesNotMatch(tonSelected.reply, /WalletConnect|wc:/i);
-});
 
 test("stored auth added after a session starts still skips onboarding on the next turn", async () => {
   const { file } = makeTempContactsFile({
@@ -3974,15 +3871,9 @@ test("generated EVM wallet choice creates the wallet directly without asking for
   assert.equal(res.session.stage, "awaiting_auth_choice");
 
   res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.equal(res.session.auth.mode, "evm");
   assert.equal(res.session.auth.choice, "generated_evm");
-  assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
-  assert.match(res.reply, /use the EVM wallet-connection flow.*for this same wallet on the website/i);
-  assert.match(res.reply, /say 'export this wallet'/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
-  assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.match(res.reply, /Do not use TonConnect/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.equal(client.calls.includes("requestEmailOTP"), false);
   assert.equal(client.calls.includes("generateAndLinkWallet"), false);
@@ -4025,64 +3916,12 @@ test("generated EVM wallet choice in a login-only flow stays focused on browser 
   assert.equal(res.session.stage, "awaiting_auth_choice");
 
   res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.equal(res.session.auth.mode, "evm");
   assert.equal(res.session.auth.choice, "generated_evm");
-  assert.match(res.reply, /do not need to export any key yet/i);
-  assert.match(res.reply, /WalletConnect, not TonConnect/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
   assert.doesNotMatch(res.reply, /How to get it: open your UNIGOX account settings and export/i);
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
 });
 
-test("stale generated EVM signing-key stage treats generic login phrasing as guidance, not as an invalid private key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "artistic_osprey_3298" });
-  const deps = makeDeps(file, client, {
-    authState: {
-      hasReplayableAuth: true,
-      authMode: "evm",
-      choice: "generated_evm",
-      username: "artistic_osprey_3298",
-      evmSigningKeyAvailable: false,
-    },
-  });
-
-  const res = await advanceTransferFlow({
-    id: "transfer-stale-login",
-    goal: "transfer",
-    status: "blocked",
-    stage: "awaiting_evm_signing_key",
-    startedAt: "2026-04-07T09:21:48.214Z",
-    updatedAt: "2026-04-07T09:26:16.164Z",
-    details: {},
-    detailCollection: { index: 0 },
-    contactExists: false,
-    contactStale: false,
-    auth: {
-      checked: true,
-      available: true,
-      mode: "evm",
-      choice: "generated_evm",
-      evmSigningKeyAvailable: false,
-      username: "artistic_osprey_3298",
-      startupSnapshotShown: true,
-      totalTradedVolumeUsd: 0,
-      kycStatus: "NOT_VERIFIED",
-      outstandingTradeReminderShown: true,
-    },
-    execution: { confirmed: false },
-    notes: [],
-    recipientQuery: "Let's login",
-    lastPrompt: "old stale prompt",
-  }, "Hey i wanna use agentic payments", deps);
-
-  assert.equal(res.session.goal, "sign_in_only");
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.doesNotMatch(res.reply, /That doesn’t look like a valid EVM private key/i);
-  assert.match(res.reply, /WalletConnect, not TonConnect/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
-});
 
 test("generated EVM auth rejects a tc:// browser-login request as the wrong protocol", async () => {
   const { file } = makeTempContactsFile();
@@ -4093,15 +3932,14 @@ test("generated EVM auth rejects a tc:// browser-login request as the wrong prot
       authMode: "evm",
       choice: "generated_evm",
       username: "artistic_osprey_3298",
-      evmSigningKeyAvailable: false,
     },
   });
 
   const res = await advanceTransferFlow({
     id: "transfer-stale-protocol",
-    goal: "transfer",
+    goal: "sign_in_only",
     status: "blocked",
-    stage: "awaiting_evm_signing_key",
+    stage: "resolving",
     startedAt: "2026-04-07T09:21:48.214Z",
     updatedAt: "2026-04-07T09:26:16.164Z",
     details: {},
@@ -4113,7 +3951,6 @@ test("generated EVM auth rejects a tc:// browser-login request as the wrong prot
       available: true,
       mode: "evm",
       choice: "generated_evm",
-      evmSigningKeyAvailable: false,
       username: "artistic_osprey_3298",
       startupSnapshotShown: true,
       totalTradedVolumeUsd: 0,
@@ -4124,7 +3961,6 @@ test("generated EVM auth rejects a tc:// browser-login request as the wrong prot
     notes: [],
   }, "tc://?v=2&id=847713b4405340f86154885739ecdc315a8b41cc08f1f03e50b2ad287a091c3d&trace_id=019d6740-73a1-72cb-9878-de6ed7001c1a&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%228a60c2ff7deedf1ee6208c5d882e8a709d289256c5e86fd808f34d525e40f583%22%7D%5D%7D&ret=none", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
   assert.match(res.reply, /WalletConnect, not TonConnect/i);
   assert.match(res.reply, /Send the fresh wc: WalletConnect link or WalletConnect QR/i);
   assert.doesNotMatch(res.reply, /TON mnemonic phrase|TON private key/i);
@@ -4157,11 +3993,9 @@ test("email OTP can still generate and link a dedicated EVM wallet locally after
   assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
 
   res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.equal(res.session.auth.mode, "evm");
   assert.equal(res.session.auth.choice, "generated_evm");
-  assert.match(res.reply, /generated a dedicated EVM login wallet locally/i);
-  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
   assert.ok(client.calls.includes("generateAndLinkWallet"));
   assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
@@ -4197,14 +4031,9 @@ test("generated TON wallet choice creates the wallet directly without asking for
   assert.equal(res.session.stage, "awaiting_auth_choice");
 
   res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
-  assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
-  assert.match(res.reply, /do not try to scan the UNIGOX QR in another wallet app/i);
-  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
-  assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /mobile or desktop wallet and log in to UNIGOX directly/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.equal(client.calls.includes("requestEmailOTP"), false);
   assert.equal(client.calls.includes("generateAndLinkTonWallet"), false);
@@ -4264,13 +4093,12 @@ test("generated TON wallet can be exported into a local wallet file without expo
   }, async () => {
     let res = await startTransferFlow("send 20 EUR to mom", deps);
     res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
-    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+    assert.equal(res.session.stage, "awaiting_payment_method");
 
     res = await advanceTransferFlow(res.session, "export this wallet", deps);
-    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+    assert.equal(res.session.stage, "awaiting_payment_method");
     assert.match(res.reply, /wrote your dedicated TON login wallet to a local file/i);
     assert.match(res.reply, /\/tmp\/generated-ton-wallet\.json/i);
-    assert.match(res.reply, /not the separate UNIGOX-exported EVM signing key/i);
     assert.ok(res.events.some((event) => event.type === "wallet_exported"));
   });
 
@@ -4318,10 +4146,10 @@ test("generated EVM wallet export works for natural phrasing about the wallet cr
   }, async () => {
     let res = await startTransferFlow("send 20 EUR to mom", deps);
     res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+    assert.equal(res.session.stage, "awaiting_payment_method");
 
     res = await advanceTransferFlow(res.session, "I am asking you to export the wallet you created for me", deps);
-    assert.equal(res.session.stage, "awaiting_evm_signing_key");
+    assert.equal(res.session.stage, "awaiting_payment_method");
     assert.match(res.reply, /wrote your dedicated EVM login wallet to a local file/i);
     assert.match(res.reply, /\/tmp\/generated-evm-wallet\.json/i);
     assert.ok(res.events.some((event) => event.type === "wallet_exported"));
@@ -4338,7 +4166,7 @@ test("manual wallet auth cannot be auto-exported as a generated wallet backup", 
   const { file } = makeTempContactsFile();
   const client = makeClient({ username: "manualuser" });
   const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", choice: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
+    authState: { hasReplayableAuth: true, authMode: "ton", choice: "ton", emailFallbackAvailable: false },
   });
 
   await withEnv({
@@ -4384,10 +4212,9 @@ test("generated TON wallet choice overrides a stale email-address step instead o
   assert.equal(res.session.stage, "awaiting_email_address");
 
   res = await advanceTransferFlow(res.session, "Create dedicated TON wallet on this device", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
-  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
   assert.doesNotMatch(res.reply, /What email address should I use/i);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
   assert.deepEqual(persisted.tonAddress, ["0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
@@ -4428,11 +4255,9 @@ test("email OTP can still generate and link a dedicated TON wallet locally after
 
   res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.equal(res.session.auth.mode, "ton");
   assert.equal(res.session.auth.choice, "generated_ton");
-  assert.match(res.reply, /generated a dedicated TON login wallet locally/i);
-  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
   assert.ok(client.calls.includes("generateAndLinkTonWallet"));
   assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
   assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
@@ -4441,44 +4266,7 @@ test("email OTP can still generate and link a dedicated TON wallet locally after
   assert.deepEqual(persisted.authChoice, ["generated_ton"]);
 });
 
-test("email OTP can stay email-only for now and then ask for the exported signing key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
 
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "email OTP", deps);
-  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
-  res = await advanceTransferFlow(res.session, "123456", deps);
-  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
-
-  res = await advanceTransferFlow(res.session, "Stay on email OTP for now", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.equal(res.session.auth.mode, "email");
-  assert.match(res.reply, /keep using email OTP/i);
-  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
-});
-
-test("EVM login without exported signing key blocks before transfer execution", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: {
-      hasReplayableAuth: true,
-      authMode: "evm",
-      emailFallbackAvailable: true,
-      evmSigningKeyAvailable: false,
-    },
-  });
-
-  const res = await startTransferFlow("send 50 EUR to mom", deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
-  assert.ok(res.events.some((event) => event.type === "blocked_missing_auth"));
-});
 
 
 test("failed EVM login verification stays on the login-key step and does not ask for the signing key", async () => {
@@ -4500,66 +4288,7 @@ test("failed EVM login verification stays on the login-key step and does not ask
   assert.doesNotMatch(res.reply, /UNIGOX EVM signing key/i);
 });
 
-test("successful EVM login verification asks for the separate signing key and then resumes the transfer flow", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { login: [] as string[], signing: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === VALID_LOGIN_KEY }),
-    persistEvmLoginKey: async (loginKey) => {
-      persisted.login.push(loginKey);
-    },
-    persistEvmSigningKey: async (signingKey) => {
-      persisted.signing.push(signingKey);
-    },
-  });
 
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "evm", deps);
-  res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
-
-  // No longer blocks for cleanup — proceeds directly with advisory
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /sensitive data/i);
-  assert.match(res.reply, /Login works/i);
-  assert.match(res.reply, /@grape404/i);
-  assert.match(res.reply, /separate UNIGOX EVM signing key/i);
-  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
-  assert.match(res.reply, /early beta access for agentic payments/i);
-  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
-  assert.match(res.reply, /must NOT be your main wallet/i);
-  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-
-  res = await advanceTransferFlow(res.session, VALID_SIGNING_KEY, deps);
-  // Signing key also proceeds directly with advisory
-  assert.match(res.reply, /sensitive data/i);
-  assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.match(res.reply, /Which payout method should mom receive in EUR/i);
-});
-
-test("invalid text at the signing-key step is rejected instead of being stored as a private key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { signing: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
-    persistEvmSigningKey: async (signingKey) => {
-      persisted.signing.push(signingKey);
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
-  assert.deepEqual(persisted.signing, []);
-  assert.equal(res.session.auth.pendingSecret, undefined);
-});
 
 test("invalid text at the login-key step is rejected before secret-cleanup handling", async () => {
   const { file } = makeTempContactsFile();
@@ -4580,61 +4309,18 @@ test("invalid text at the login-key step is rejected before secret-cleanup handl
   assert.equal(res.session.auth.pendingSecret, undefined);
 });
 
-test("address-like input at the signing-key step is explained as an address, not a missing 0x prefix", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
-  });
 
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  res = await advanceTransferFlow(res.session, "0x50443A732F5766270427C14C652243D3e09B84E2", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /looks like an EVM address, not a private key/i);
-  assert.match(res.reply, /with or without 0x/i);
-  assert.equal(res.session.auth.pendingSecret, undefined);
-});
-
-test("invalid pending signing key is rejected at cleanup confirmation instead of being persisted", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { signing: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true, evmSigningKeyAvailable: false },
-    persistEvmSigningKey: async (signingKey) => {
-      persisted.signing.push(signingKey);
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res.session.stage = "awaiting_secret_cleanup_confirmation";
-  res.session.auth.pendingSecret = {
-    kind: "evm_signing_key",
-    value: "deleted",
-  };
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
-  assert.deepEqual(persisted.signing, []);
-  assert.equal(res.session.auth.pendingSecret, undefined);
-});
 
 
 test("automatic secret deletion hook skips manual cleanup confirmation", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const persisted = { login: [] as string[], signing: [] as string[] };
+  const persisted = { login: [] as string[] };
   const deps = makeDeps(file, client, {
     authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
     verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === VALID_LOGIN_KEY, username: "autodelete" }),
     persistEvmLoginKey: async (loginKey) => {
       persisted.login.push(loginKey);
-    },
-    persistEvmSigningKey: async (signingKey) => {
-      persisted.signing.push(signingKey);
     },
     handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
   });
@@ -4644,126 +4330,12 @@ test("automatic secret deletion hook skips manual cleanup confirmation", async (
   res = await advanceTransferFlow(res.session, "done", deps);
   res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
   assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-
-  res = await advanceTransferFlow(res.session, VALID_SIGNING_KEY, deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
-  assert.deepEqual(persisted.signing, [VALID_SIGNING_KEY]);
 });
 
-test("successful TON login verification persists TON address and private key, then asks for the EVM signing key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { tonAddress: [] as string[], tonPrivateKey: [] as string[], tonWalletVersion: [] as string[], signing: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyTonLogin: async ({ tonPrivateKey, tonAddress }) => ({
-      success: tonPrivateKey === VALID_TON_PRIVATE_KEY && tonAddress?.includes("0:"),
-      username: "tonuser",
-      tonWalletVersion: "v5r1",
-    }),
-    persistTonAddress: async (tonAddress) => {
-      persisted.tonAddress.push(tonAddress);
-    },
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      persisted.tonPrivateKey.push(tonPrivateKey);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-    persistEvmSigningKey: async (signingKey) => {
-      persisted.signing.push(signingKey);
-    },
-  });
 
-  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "ton", deps);
-  assert.equal(res.session.stage, "awaiting_ton_address");
-  assert.match(res.reply, /TON address shown by the wallet/i);
-
-  res = await advanceTransferFlow(res.session, tonAddress, deps);
-  assert.equal(res.session.stage, "awaiting_ton_address_confirmation");
-  assert.match(res.reply, /I’ll use this exact TON address/i);
-  assert.ok(res.reply.includes(tonAddress));
-  assert.equal(res.session.auth.tonAddressDisplay, tonAddress);
-
-  res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  assert.equal(res.session.stage, "awaiting_ton_auth_method");
-  assert.match(res.reply, /TON mnemonic|TON private key|TonConnect/i);
-
-  res = await advanceTransferFlow(res.session, VALID_TON_PRIVATE_KEY, deps);
-  // No longer blocks for cleanup — proceeds directly with advisory
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /sensitive data/i);
-  assert.match(res.reply, /TON login works/i);
-  assert.match(res.reply, /UNIGOX EVM signing key/i);
-  assert.match(res.reply, /funding trade escrow|confirming fiat received|releasing escrow/i);
-  assert.match(res.reply, /TonConnect QR/i);
-  assert.match(res.reply, /tc:\/\//i);
-  assert.match(res.reply, /mobile or desktop TON wallet/i);
-  assert.match(res.reply, /early beta access for agentic payments/i);
-  assert.match(res.reply, /hello@unigox\.com|Intercom chat/i);
-  assert.match(res.reply, /@tonuser/i);
-  assert.equal(persisted.tonAddress.length, 1);
-  assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
-  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
-
-  res = await advanceTransferFlow(res.session, ANOTHER_VALID_KEY, deps);
-  assert.match(res.reply, /sensitive data/i);
-  assert.deepEqual(persisted.signing, [ANOTHER_VALID_KEY]);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-});
-
-test("successful TON mnemonic verification persists the exact TON address and matched wallet version, then asks for the EVM signing key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { tonAddress: [] as string[], tonMnemonic: [] as string[], tonWalletVersion: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
-      success: mnemonic === VALID_TON_MNEMONIC && tonAddress?.includes("0:"),
-      username: "tonuser",
-      tonWalletVersion: "v4",
-    }),
-    persistTonAddress: async (tonAddress) => {
-      persisted.tonAddress.push(tonAddress);
-    },
-    persistTonMnemonic: async (mnemonic) => {
-      persisted.tonMnemonic.push(mnemonic);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-  });
-
-  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "ton", deps);
-  res = await advanceTransferFlow(res.session, tonAddress, deps);
-  res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  assert.equal(res.session.stage, "awaiting_ton_auth_method");
-  assert.match(res.reply, /TON mnemonic|TonConnect/i);
-
-  res = await advanceTransferFlow(res.session, VALID_TON_MNEMONIC, deps);
-  // No longer blocks for cleanup — proceeds directly with advisory
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /sensitive data/i);
-  assert.match(res.reply, /TON login works/i);
-  assert.match(res.reply, /TonConnect QR/i);
-  assert.match(res.reply, /tc:\/\//i);
-  assert.equal(res.session.auth.tonWalletVersion, "v4");
-  assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
-  assert.equal(persisted.tonAddress.length, 1);
-  assert.ok(persisted.tonAddress[0]?.startsWith("0:"));
-});
 
 test("legacy pending TON mnemonic still finalizes correctly after cleanup confirmation", async () => {
   const { file } = makeTempContactsFile();
@@ -4793,9 +4365,7 @@ test("legacy pending TON mnemonic still finalizes correctly after cleanup confir
   };
 
   res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /TON login works/i);
-  assert.match(res.reply, /mobile or desktop TON wallet/i);
+  assert.equal(res.session.stage, "awaiting_payment_method");
   assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
   assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
   assert.equal(res.session.auth.pendingSecret, undefined);
@@ -4911,21 +4481,6 @@ test("user can switch auth method from a stuck TON address step back to auth cho
   assert.equal(res.session.auth.mode, undefined);
 });
 
-test("user can go back from EVM signing key step to auth choice", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  res = await advanceTransferFlow(res.session, "go back", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-  assert.match(res.reply, /different sign-in method/i);
-});
 
 test("raw 0: TON address form is accepted and preserved in the confirmation prompt", async () => {
   const { file } = makeTempContactsFile();
@@ -4946,388 +4501,18 @@ test("raw 0: TON address form is accepted and preserved in the confirmation prom
   assert.equal(res.session.auth.tonAddress, rawTonAddress);
 });
 
-test("stored TON auth without a signing key prompts for the UNIGOX signing key instead of failing later", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-  });
 
-  const res = await startTransferFlow("send 50 EUR to mom", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /UNIGOX-exported EVM signing key/i);
-  assert.match(res.reply, /send me either: 1\. a fresh screenshot of the visible TonConnect QR, or 2\. the fresh tc:\/\/ TonConnect link/i);
-  assert.doesNotMatch(res.reply, /mobile or desktop wallet and log in to UNIGOX directly/i);
-  assert.doesNotMatch(res.reply, /Save it as UNIGOX_EVM_SIGNING_PRIVATE_KEY/i);
-});
 
-test("sign-in focused prompt with stored TON auth stays focused on browser login instead of leading with signing-key export", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-  });
 
-  const res = await startTransferFlow("Use Agentic Payments to sign me in to UNIGOX.", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /Agent-side login is already set up on this machine/i);
-  assert.match(res.reply, /do not need to export any key yet/i);
-  assert.match(res.reply, /TonConnect/i);
-  assert.doesNotMatch(res.reply, /WalletConnect/i);
-  assert.match(res.reply, /fresh screenshot of the visible TonConnect QR|fresh tc:\/\/ TonConnect link/i);
-  assert.doesNotMatch(res.reply, /this next step needs the separate UNIGOX EVM signing key/i);
-});
 
-test("sign-in focused prompt with stored generated EVM auth stays focused on WalletConnect browser login instead of TonConnect", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-  });
 
-  const res = await startTransferFlow("Use Agentic Payments to sign me in to UNIGOX.", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /do not need to export any key yet/i);
-  assert.match(res.reply, /WalletConnect, not TonConnect/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
-  assert.doesNotMatch(res.reply, /fresh tc:\/\/ TonConnect link|TonConnect QR/i);
-});
 
-test("stored generated EVM auth without a signing key explains the EVM website login path instead of TonConnect", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-  });
 
-  const res = await startTransferFlow("send 50 EUR to mom", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /use the EVM wallet-connection flow.*for this same wallet on the website/i);
-  assert.match(res.reply, /say 'export this wallet'/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
-  assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.match(res.reply, /Do not use TonConnect/i);
-});
 
-test("stored direct EVM auth without a signing key keeps the browser-login guidance on the EVM wallet path", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-  });
 
-  const res = await startTransferFlow("send 50 EUR to mom", deps);
 
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /use the EVM wallet-connection flow.*for the same EVM wallet you already use on UNIGOX/i);
-  assert.match(res.reply, /fresh WalletConnect QR or wc: link/i);
-  assert.match(res.reply, /approve that live browser-login request locally/i);
-  assert.match(res.reply, /Do not use TonConnect/i);
-});
 
-test("missing signing key step accepts a fresh UNIGOX wc: link and approves the browser login with the local EVM wallet", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedUris: string[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    approveEvmWalletConnectLink: async (uri) => {
-      approvedUris.push(uri);
-      return {
-        sessionTopic: "session-topic",
-        pairingTopic: "pairing-topic",
-        requestedChains: ["eip155:1"],
-        approvedChains: ["eip155:1"],
-        requestedMethods: ["eth_accounts"],
-        handledMethods: ["eth_accounts"],
-        requestCount: 1,
-      };
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
-  res = await advanceTransferFlow(res.session, wcLink, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
-  assert.match(res.reply, /export the agentic-payments \/ signing key/i);
-  assert.deepEqual(approvedUris, [wcLink]);
-  assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
-});
-
-test("fresh wc link auto-selects the saved EVM profile when both EVM and TON login wallets exist", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedUris: string[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    approveEvmWalletConnectLink: async (uri) => {
-      approvedUris.push(uri);
-      return {
-        sessionTopic: "session-topic",
-        pairingTopic: "pairing-topic",
-        requestedChains: ["eip155:1"],
-        approvedChains: ["eip155:1"],
-        requestedMethods: ["eth_accounts"],
-        handledMethods: ["eth_accounts"],
-        requestCount: 1,
-      };
-    },
-  });
-
-  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
-  const res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: "generated_evm",
-    UNIGOX_TON_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, async () => startTransferFlow(wcLink, deps));
-
-  assert.equal(res.session.auth.choice, "generated_evm");
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /TonConnect|tc:\/\//i);
-  assert.deepEqual(approvedUris, [wcLink]);
-});
-
-test("sign-in focused prompt treats an explicit wc link as WalletConnect auth even when the stored auth path is TON", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    approveEvmWalletConnectLink: async () => {
-      throw new Error("No EVM wallet configured on this machine yet.");
-    },
-  });
-
-  let res = await startTransferFlow("Use Agentic Payments to sign me in to UNIGOX.", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
-  res = await advanceTransferFlow(res.session, wcLink, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /WalletConnect request/i);
-  assert.match(res.reply, /switch to EVM wallet connection or create a dedicated EVM wallet first/i);
-  assert.doesNotMatch(res.reply, /doesn’t look like a valid EVM private key/i);
-});
-
-test("missing signing key step accepts a fresh UNIGOX WalletConnect QR screenshot path and decodes it into the same browser-login handoff", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedUris: string[] = [];
-  const wcLink = "wc:266081884b684924211ce2e68e0808e18c6c7f82cda45dcf59837aca50979a05@2?relay-protocol=irn&symKey=6fba76027bd0bc22245b7c5223201ee3e07ac3856e02224ab0c6a4a7f498abe2";
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    decodeEvmWalletConnectQr: async (imagePath) => {
-      assert.equal(imagePath, "/tmp/unigox-walletconnect-qr.png");
-      return wcLink;
-    },
-    approveEvmWalletConnectLink: async (uri) => {
-      approvedUris.push(uri);
-      return {
-        sessionTopic: "session-topic",
-        pairingTopic: "pairing-topic",
-        requestedChains: ["eip155:1"],
-        approvedChains: ["eip155:1"],
-        requestedMethods: ["eth_accounts"],
-        handledMethods: ["eth_accounts"],
-        requestCount: 1,
-      };
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-walletconnect-qr.png" }, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX WalletConnect browser-login request locally/i);
-  assert.deepEqual(approvedUris, [wcLink]);
-});
-
-test("missing signing key step tells the user when a WalletConnect QR screenshot did not contain a valid wc: request", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    decodeEvmWalletConnectQr: async () => undefined,
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-walletconnect-qr.png" }, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /couldn’t read a valid fresh UNIGOX WalletConnect QR from that image/i);
-  assert.match(res.reply, /paste the fresh wc: link directly/i);
-});
-
-test("missing signing key step accepts a fresh UNIGOX tc:// link and approves the browser login with the local TON key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedLinks: string[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    approveTonConnectLink: async (universalLink) => {
-      approvedLinks.push(universalLink);
-      return {
-        bridgeUrl: "https://bridge.tonapi.io/bridge",
-        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
-        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-        tonProofPayload: "proof-hash",
-      };
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
-  res = await advanceTransferFlow(res.session, tcLink, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
-  assert.match(res.reply, /export the agentic-payments \/ signing key/i);
-  assert.deepEqual(approvedLinks, [tcLink]);
-  assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
-});
-
-test("fresh turn with stored TON auth and only a missing signing key still accepts a tc:// link immediately", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedLinks: string[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    approveTonConnectLink: async (universalLink) => {
-      approvedLinks.push(universalLink);
-      return {
-        bridgeUrl: "https://bridge.tonapi.io/bridge",
-        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
-        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-        tonProofPayload: "proof-hash",
-      };
-    },
-  });
-
-  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
-  const res = await startTransferFlow(tcLink, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.equal(res.session.amount, undefined);
-  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
-  assert.deepEqual(approvedLinks, [tcLink]);
-  assert.ok(res.events.some((event) => event.type === "browser_login_handoff"));
-});
-
-test("fresh tc:// link auto-selects the saved TON profile when both EVM and TON login wallets exist", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedLinks: string[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    approveTonConnectLink: async (universalLink) => {
-      approvedLinks.push(universalLink);
-      return {
-        bridgeUrl: "https://bridge.tonapi.io/bridge",
-        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
-        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-        tonProofPayload: "proof-hash",
-      };
-    },
-  });
-
-  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
-  const res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: "generated_evm",
-    UNIGOX_TON_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, async () => startTransferFlow(tcLink, deps));
-
-  assert.equal(res.session.auth.choice, "generated_ton");
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
-  assert.doesNotMatch(res.reply, /WalletConnect|wc:/i);
-  assert.deepEqual(approvedLinks, [tcLink]);
-});
-
-test("missing signing key step explains that a fresh tc:// link still needs local TON key material if approval fails for missing TON auth", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    approveTonConnectLink: async () => {
-      throw new Error("TON auth requires tonPrivateKey or legacy tonMnemonic");
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
-  res = await advanceTransferFlow(res.session, tcLink, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /still need TON key material for that exact wallet on this machine first/i);
-  assert.match(res.reply, /send the TON mnemonic phrase or TON private key/i);
-});
-
-test("missing signing key step accepts a fresh UNIGOX QR screenshot path and decodes it into the same browser-login handoff", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const approvedLinks: string[] = [];
-  const tcLink = "tc://?v=2&id=17051a42b960dd99f0a75589efb2210371230a7d274246bc48073e89e661ca5e&trace_id=019d510c-b56a-75ee-99e8-926b5aaaf916&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%22e72b645a2904fe70a743c8a1f2d82979cecfe66f443109b493074bf5ae9ca22f%22%7D%5D%7D&ret=none";
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    decodeTonConnectQr: async (imagePath) => {
-      assert.equal(imagePath, "/tmp/unigox-qr.png");
-      return tcLink;
-    },
-    approveTonConnectLink: async (universalLink) => {
-      approvedLinks.push(universalLink);
-      return {
-        bridgeUrl: "https://bridge.tonapi.io/bridge",
-        walletAddress: "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e",
-        manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-        tonProofPayload: "proof-hash",
-      };
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-
-  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-qr.png" }, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /approved that fresh UNIGOX TonConnect browser-login request locally/i);
-  assert.deepEqual(approvedLinks, [tcLink]);
-});
-
-test("missing signing key step tells the user when a QR screenshot did not contain a valid TonConnect request", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", emailFallbackAvailable: false, evmSigningKeyAvailable: false },
-    decodeTonConnectQr: async () => undefined,
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, { imagePath: "/tmp/unigox-qr.png" }, deps);
-
-  assert.equal(res.session.stage, "awaiting_evm_signing_key");
-  assert.match(res.reply, /couldn’t read a valid fresh UNIGOX TonConnect QR from that image/i);
-  assert.match(res.reply, /paste the fresh tc:\/\/ link directly/i);
-});
