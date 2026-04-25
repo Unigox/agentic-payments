@@ -17,11 +17,15 @@
  * Usage:
  *   import { UnigoxClient } from "./unigox-client.ts";
  *   const client = new UnigoxClient({
- *     evmLoginPrivateKey: "0x...",        // wallet used to sign in on UNIGOX
- *     evmSigningPrivateKey: "0x...",      // separate exported signing key for signed actions
+ *     evmLoginPrivateKey: "0x...",        // wallet used to sign in on UNIGOX (SIWE)
  *   });
  *   await client.login();
  *   const details = await client.listPaymentDetails();
+ *
+ * On-chain signing (Forwarder ForwardRequest, Gnosis SafeTx, EIP-3009 permit,
+ * arbitrary EIP-712) is delegated to the privy-signing backend; the client never
+ * holds a signing key. After login the captured idToken is reused as Bearer
+ * authentication for every signature request.
  */
 
 import crypto from "node:crypto";
@@ -45,6 +49,7 @@ import nacl from "tweetnacl";
 import { Wallet, ethers } from "ethers";
 import { approveTonConnectUniversalLinkWithWallet, parseTonConnectUniversalLink } from "./tonconnect-session.ts";
 import { approveWalletConnectUriWithWallet, parseWalletConnectUri } from "./walletconnect-session.ts";
+import { PrivySigner, PrivySigningError } from "./privy-signer.ts";
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -86,26 +91,6 @@ const FUNDING_BALANCE_ABI = [
 const FORWARDER_ABI = [
   "function nonces(address from) view returns (uint256)",
 ] as const;
-
-// EIP-712 types for the Forwarder
-const FORWARDER_DOMAIN = {
-  name: "SyntheticAssetForwarder",
-  version: "1",
-  chainId: XAI_CHAIN_ID,
-  verifyingContract: FORWARDER_ADDRESS,
-};
-
-const FORWARD_REQUEST_TYPES = {
-  ForwardRequest: [
-    { name: "from",     type: "address" },
-    { name: "to",       type: "address" },
-    { name: "value",    type: "uint256" },
-    { name: "gas",      type: "uint256" },
-    { name: "nonce",    type: "uint256" },
-    { name: "deadline", type: "uint48" },
-    { name: "data",     type: "bytes" },
-  ],
-};
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -159,9 +144,8 @@ export async function generateDedicatedTonLoginWallet(
 
 export interface UnigoxClientConfig {
   authMode?: AuthMode;
-  privateKey?: string;
+  /** Private key for the wallet used to SIWE-login on UNIGOX. Never used for on-chain signing. */
   evmLoginPrivateKey?: string;
-  evmSigningPrivateKey?: string;
   email?: string;
   frontendUrl?: string;
   tonPrivateKey?: string;
@@ -171,6 +155,8 @@ export interface UnigoxClientConfig {
   tonNetwork?: string;
   sessionToken?: string;
   sessionTokenExpiresAt?: number;
+  /** Override base URL for the privy-signing backend. */
+  privySigningUrl?: string;
 }
 
 export interface PaymentDetail {
@@ -717,7 +703,6 @@ export function resolveTonWalletCandidate(params: {
 
 export class UnigoxClient {
   private loginWallet: Wallet | null;
-  private signingWallet: Wallet | null;
   private email: string | null;
   private frontendUrl: string;
   private authMode: AuthMode;
@@ -730,17 +715,16 @@ export class UnigoxClient {
   private token: string | null = null;
   private tokenExpiresAt: number = 0;
   private userProfile: UserProfile | null = null;
+  private readonly privySigner: PrivySigner;
 
   constructor(config: UnigoxClientConfig) {
-    const loginPrivateKey = config.evmLoginPrivateKey || config.privateKey;
-    const signingPrivateKey = config.evmSigningPrivateKey || config.privateKey;
+    const loginPrivateKey = config.evmLoginPrivateKey;
 
-    if (!loginPrivateKey && !config.email && !config.tonPrivateKey && !config.tonMnemonic) {
+    if (!loginPrivateKey && !config.email && !config.tonPrivateKey && !config.tonMnemonic && !config.sessionToken) {
       throw new Error(`UNIGOX auth is not configured. ${getUnigoxWalletConnectionPrompt()}`);
     }
 
     this.loginWallet = loginPrivateKey ? new Wallet(loginPrivateKey) : null;
-    this.signingWallet = signingPrivateKey ? new Wallet(signingPrivateKey) : null;
     this.email = config.email || null;
     this.frontendUrl = config.frontendUrl || DEFAULT_FRONTEND_URL;
     this.authMode = config.authMode || "auto";
@@ -755,13 +739,16 @@ export class UnigoxClient {
         ? config.sessionTokenExpiresAt
         : Date.now() + 50 * 60 * 1000;
     }
+    this.privySigner = new PrivySigner({
+      baseUrl: config.privySigningUrl,
+      getIdToken: async () => await this.getOrRefreshToken(),
+    });
   }
 
   get address(): string {
-    if (this.signingWallet) return this.signingWallet.address;
     if (this.userProfile?.evm_address) return this.userProfile.evm_address;
     if (this.loginWallet) return this.loginWallet.address;
-    throw new Error("No EVM wallet configured locally. Log in first and read the account profile instead.");
+    throw new Error("No EVM address known yet. Log in first and read the account profile instead.");
   }
 
   private parseTonMnemonic(mnemonic?: string | string[]): string[] | null {
@@ -774,13 +761,6 @@ export class UnigoxClient {
     return Address.parse(address).toRawString().toLowerCase();
   }
 
-  private requireWallet(): Wallet {
-    if (!this.signingWallet) {
-      throw new Error("This operation requires the UNIGOX-exported EVM signing private key. TON or login-only auth only covers JWT acquisition.");
-    }
-    return this.signingWallet;
-  }
-
   private requireLoginWallet(): Wallet {
     if (!this.loginWallet) {
       throw new Error("EVM login requires the private key for the wallet you use to sign in on UNIGOX.");
@@ -789,8 +769,6 @@ export class UnigoxClient {
   }
 
   private async getAccountEvmAddress(): Promise<string> {
-    if (this.signingWallet) return this.signingWallet.address;
-
     const profile = await this.ensureProfile();
     if (!profile.evm_address) {
       throw new Error("No EVM address found on the UNIGOX account profile.");
@@ -1648,18 +1626,47 @@ export class UnigoxClient {
   }
 
   private async createTradeActionSignature(tradeId: number, direction: "to_buyer" | "to_seller"): Promise<{ signature: string; signedData: unknown }> {
-    const wallet = this.requireWallet();
     const res = await this.authedGet(APIS.trades, `/trade/${tradeId}/signature-data?direction=${direction}`);
     const payload = unwrap<TradeSignaturePayload>(res);
     if (!payload?.domain || !payload?.types || !payload?.safe_params) {
       throw new Error(`Failed to load trade signature payload for trade ${tradeId}: ${JSON.stringify(res)}`);
     }
 
-    const signature = await wallet.signTypedData(
-      payload.domain as any,
-      this.normalizeTypedDataTypes(payload.types) as any,
-      payload.safe_params as any,
-    );
+    const types = this.normalizeTypedDataTypes(payload.types);
+    const message = payload.safe_params as Record<string, unknown>;
+    const domain = payload.domain as Record<string, unknown>;
+
+    // Dispatch by primary type — SafeTx routes to the safe-tx endpoint, which
+    // applies the canonical zero-defaults; everything else goes through the
+    // generic typed-data endpoint.
+    let signature: string;
+    if (types.SafeTx) {
+      signature = await this.privySigner.signSafeTxFromTypedData({ domain, message });
+    } else {
+      const primaryType = Object.keys(types)[0];
+      if (!primaryType) {
+        throw new Error("Trade signature payload has no primary type");
+      }
+      const chainIdRaw = domain.chainId;
+      const chainId = typeof chainIdRaw === "number"
+        ? chainIdRaw
+        : typeof chainIdRaw === "string"
+          ? Number(chainIdRaw)
+          : NaN;
+      if (!Number.isFinite(chainId)) {
+        throw new Error("Trade signature payload domain.chainId is missing or invalid");
+      }
+      const from = await this.getAccountEvmAddress();
+      const result = await this.privySigner.signTypedData({
+        chainId,
+        from,
+        domain,
+        types: types as Record<string, unknown>,
+        primaryType,
+        message,
+      });
+      signature = result.signature;
+    }
 
     return {
       signature,
@@ -1750,14 +1757,14 @@ export class UnigoxClient {
     throw new Error(`Failed to create automated escrow address: ${JSON.stringify(res)}`);
   }
 
-  private async executeForwardedCall(wallet: Wallet, to: string, data: string, value = "0", gas = "500000"): Promise<{ txId: number; txHash: string }> {
+  private async executeForwardedCall(from: string, to: string, data: string, value = "0", gas = "500000"): Promise<{ txId: number; txHash: string }> {
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
     const forwarder = new ethers.Contract(FORWARDER_ADDRESS, FORWARDER_ABI, provider);
-    const nonce = await forwarder.nonces(wallet.address);
+    const nonce = await forwarder.nonces(from);
     const deadline = Math.floor(Date.now() / 1000) + 3600;
 
     const forwardRequest = {
-      from: wallet.address,
+      from,
       to,
       value,
       gas,
@@ -1766,11 +1773,11 @@ export class UnigoxClient {
       data,
     };
 
-    const signature = await wallet.signTypedData(
-      FORWARDER_DOMAIN,
-      FORWARD_REQUEST_TYPES,
-      forwardRequest,
-    );
+    const signature = await this.privySigner.signForwardRequestWithRetry({
+      chainId: XAI_CHAIN_ID,
+      forwarder: FORWARDER_ADDRESS,
+      ...forwardRequest,
+    });
 
     const txRes = await jsonFetch(`${APIS.transactor}/transactions`, {
       method: "POST",
@@ -1798,19 +1805,19 @@ export class UnigoxClient {
     amount: string,
     escrowAddress: string
   ): Promise<{ txId: number; txHash: string }> {
-    const wallet = this.requireWallet();
+    const from = await this.getAccountEvmAddress();
     const token = TOKENS[tokenCode];
     const amountWei = ethers.parseUnits(amount, token.decimals);
 
     const transferIface = new ethers.Interface(["function transfer(address recipient, uint256 amount) returns (bool)"]);
     const transferCallData = transferIface.encodeFunctionData("transfer", [escrowAddress, amountWei]);
-    return this.executeForwardedCall(wallet, token.address, transferCallData);
+    return this.executeForwardedCall(from, token.address, transferCallData);
   }
 
   // ── Automated Escrow Withdraw (diagnostic / legacy only) ───────
 
   async withdrawFromEscrow(tokenCode: "USDC" | "USDT", amount: string): Promise<{ txId: number; txHash: string }> {
-    const wallet = this.requireWallet();
+    const from = await this.getAccountEvmAddress();
     const automatedEscrowAddress = await this.ensureAutomatedEscrowAddress();
 
     const token = TOKENS[tokenCode];
@@ -1819,7 +1826,7 @@ export class UnigoxClient {
     // Build withdraw calldata
     const iface = new ethers.Interface(["function withdraw(address token, uint256 amount) returns (bool)"]);
     const callData = iface.encodeFunctionData("withdraw", [token.address, amountWei]);
-    return this.executeForwardedCall(wallet, automatedEscrowAddress, callData);
+    return this.executeForwardedCall(from, automatedEscrowAddress, callData);
   }
 
   private async pollTransaction(txId: number, timeoutMs = 120_000): Promise<string> {
@@ -1907,7 +1914,7 @@ export class UnigoxClient {
     amount: string;
     recipientAddress?: string;
   }): Promise<{ quoteId: string; txId: number; txHash: string }> {
-    const wallet = this.requireWallet();
+    const from = await this.getAccountEvmAddress();
     const token = TOKENS[params.tokenCode];
     const amountWei = ethers.parseUnits(params.amount, token.decimals).toString();
 
@@ -1918,7 +1925,7 @@ export class UnigoxClient {
       fromTokenAddress: token.address,
       toTokenAddress: params.toTokenAddress,
       amount: amountWei,
-      recipientAddress: params.recipientAddress || wallet.address,
+      recipientAddress: params.recipientAddress || from,
     });
 
     if (!quote.snapshot.isLiquiditySufficient) {
@@ -1928,13 +1935,13 @@ export class UnigoxClient {
     // 2. Execute the bridge tx via transactor (the quote txData contains the bridge calldata)
     const provider = new ethers.JsonRpcProvider(XAI_RPC);
     const forwarder = new ethers.Contract(FORWARDER_ADDRESS, ["function nonces(address) view returns (uint256)"], provider);
-    const nonce = await forwarder.nonces(wallet.address);
+    const nonce = await forwarder.nonces(from);
     const deadline = Math.floor(Date.now() / 1000) + 3600;
 
     // The quote parameters contain the target contract and calldata
     const forwardRequest = {
-      from: wallet.address,
-      to: wallet.address, // bridge txs go through the solver/forwarder path
+      from,
+      to: from, // bridge txs go through the solver/forwarder path
       value: quote.parameters.txData?.value || "0",
       gas: "500000",
       nonce: nonce.toString(),
@@ -1942,11 +1949,11 @@ export class UnigoxClient {
       data: quote.parameters.txData?.data || "0x",
     };
 
-    const signature = await wallet.signTypedData(
-      FORWARDER_DOMAIN,
-      FORWARD_REQUEST_TYPES,
-      forwardRequest,
-    );
+    const signature = await this.privySigner.signForwardRequestWithRetry({
+      chainId: XAI_CHAIN_ID,
+      forwarder: FORWARDER_ADDRESS,
+      ...forwardRequest,
+    });
 
     const txRes = await jsonFetch(`${APIS.transactor}/transactions`, {
       method: "POST",
