@@ -3088,3 +3088,46 @@ test("a failed receipt confirmation keeps the escrow locked and does not show th
   assert.doesNotMatch(res.reply, /INVALID_STATUS|\/api\/v1|b2c3/);
   assert.match(res.session.execution.lastError ?? "", /INVALID_STATUS/);
 });
+
+test("without a price nothing is placed, and a later retry still shows the live price before placing", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({ waitMode: "new_price" });
+  let priced = false;
+  const pricedQuote = client.getPreflightQuote!.bind(client);
+  client.getPreflightQuote = async (params) => (priced ? pricedQuote(params) : undefined);
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+
+  assert.equal(res.session.stage, "awaiting_no_match_resolution");
+  assert.match(res.reply, /couldn't get a price for this transfer right now, so nothing was placed/i);
+  assert.ok(!client.calls.includes("createTradeRequest"));
+
+  priced = true;
+  res = await advanceTransferFlow(res.session, "retry", deps);
+
+  assert.equal(res.session.stage, "awaiting_new_price_confirmation");
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 0);
+  assert.match(res.reply, /I have a live price for this transfer/i);
+  assert.doesNotMatch(res.reply, /original quote/i);
+  assert.ok(!client.calls.includes("waitForTradeMatch"));
+});

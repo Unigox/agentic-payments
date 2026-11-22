@@ -317,6 +317,11 @@ export interface TransferSession {
     confirmed: boolean;
     preflight?: ExecutionPreflightState;
     paymentDetailsId?: string;
+    /**
+     * Largest total crypto cost the person has approved for this transfer, in whole units. Set only
+     * when they confirm a price they were shown; absent means no price has been approved yet.
+     */
+    approvedCryptoAmount?: number;
     tradeRequestId?: string;
     tradeId?: string;
     tradeRequestStatus?: string;
@@ -1087,6 +1092,7 @@ function resolvePaymentCatalogue(deps: TransferFlowDeps): PaymentCatalogue {
 
 function clearExecutionPreflight(session: TransferSession): void {
   session.execution.preflight = undefined;
+  session.execution.approvedCryptoAmount = undefined;
 }
 
 function clearBalanceSnapshot(session: TransferSession): void {
@@ -1854,7 +1860,7 @@ async function maybeResumeExistingKycVerification(
 function capturePendingPriceChange(session: TransferSession, tradeRequest: TradeRequest): void {
   session.execution.pendingPriceChange = {
     originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
-    originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+    originalCryptoAmount: session.execution.approvedCryptoAmount,
     newFiatAmount: tradeRequest.fiat_amount,
     newCryptoAmount: tradeRequest.total_crypto_amount,
     vendorOfferRate: tradeRequest.vendor_offer_rate,
@@ -1873,7 +1879,7 @@ function buildNewPriceConfirmationMessage(session: TransferSession, tradeRequest
   const priceChange = tradeRequest
     ? {
         originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
-        originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+        originalCryptoAmount: session.execution.approvedCryptoAmount,
         newFiatAmount: tradeRequest.fiat_amount,
         newCryptoAmount: tradeRequest.total_crypto_amount,
         vendorOfferRate: tradeRequest.vendor_offer_rate,
@@ -1906,7 +1912,7 @@ function buildNewPriceConfirmationMessage(session: TransferSession, tradeRequest
     : undefined;
 
   return [
-    "The original quote is no longer available.",
+    originalCrypto ? "The original quote is no longer available." : "I have a live price for this transfer.",
     newCrypto && newFiat ? `Right now this counterparty can do ${newCrypto} for ${newFiat} via ${route}.` : undefined,
     originalFiat && originalCrypto ? `Your original target was ${originalFiat} for about ${originalCrypto}.` : undefined,
     rateLine,
@@ -3472,14 +3478,11 @@ async function maybeHandlePendingPriceChangeTurn(
     );
   }
 
-  if (!wantsConfirm || typeof pending.newCryptoAmount !== "number" || !session.execution.preflight?.quote) {
+  if (!wantsConfirm || typeof pending.newCryptoAmount !== "number") {
     return reply(withUpdate(session, deps), buildNewPriceConfirmationMessage(session), ["confirm new price", "cancel"]);
   }
 
-  session.execution.preflight.quote.totalCryptoAmount = pending.newCryptoAmount;
-  if (typeof pending.vendorOfferRate === "number") {
-    session.execution.preflight.quote.vendorOfferRate = pending.vendorOfferRate;
-  }
+  session.execution.approvedCryptoAmount = pending.newCryptoAmount;
   clearPendingPriceChange(session);
   session.execution.confirmed = true;
   const result = await handleExecution(session, deps);
@@ -3932,6 +3935,24 @@ async function ensureExecutionPreflight(
   });
   const quote = assetCoverageState.quote;
 
+  if (client.getPreflightQuote && !quote) {
+    // Without a price there is nothing to compare the balance against and nothing to show for
+    // confirmation, so the transfer stops here instead of guessing the cost.
+    session.execution.confirmed = false;
+    session.status = "blocked";
+    session.stage = "awaiting_no_match_resolution";
+    events.push({ type: "blocked_no_vendor_match", message: "No estimate was available for any funding asset." });
+    return {
+      events,
+      blockedResult: reply(
+        withUpdate(session, deps),
+        "I couldn't get a price for this transfer right now, so nothing was placed. You can retry, change the amount, or switch payment method / currency.",
+        ["retry", "change method", "change currency", "change amount"],
+        events
+      ),
+    };
+  }
+
   session.execution.preflight = {
     balanceUsd: balance.totalUsd,
     amount,
@@ -4035,7 +4056,9 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
     throw new Error("Missing payment details id for trade execution.");
   }
 
-  const approvedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || amount;
+  // No approved price (the estimate was unavailable, or the confirmation did not follow a shown
+  // price) is treated as zero, so the live price is shown and confirmed before anything is placed.
+  const approvedCryptoAmount = session.execution.approvedCryptoAmount ?? 0;
   const sellAssetCode = session.execution.preflight?.selectedAssetCode || session.execution.preflight?.quote?.cryptoCurrencyCode || SELLABLE_ASSET_ORDER[0];
   let tradeRequest: TradeRequest;
   try {
@@ -4069,7 +4092,7 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
         newFiatAmount: tradeRequest.fiat_amount,
         newCryptoAmount: tradeRequest.total_crypto_amount,
         originalFiatAmount: session.amount,
-        originalCryptoAmount: approvedCryptoAmount,
+        originalCryptoAmount: session.execution.approvedCryptoAmount,
       },
     });
     return reply(
@@ -4708,9 +4731,13 @@ export async function advanceTransferFlow(
     || (session.stage === "awaiting_confirmation" && /^confirm\b/i.test(cleanText(normalizedTurn.text)));
 
   if (!session.execution.confirmed) {
+    const answersShownConfirmation = inputSession.stage === "awaiting_confirmation";
     session.stage = "awaiting_confirmation";
     if (confirmationReply) {
       session.execution.confirmed = true;
+      if (answersShownConfirmation) {
+        session.execution.approvedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount;
+      }
     } else {
       return prependReplyContext(
         reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, events),
