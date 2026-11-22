@@ -108,6 +108,12 @@ The flow talks to UNIGOX only through the port in `scripts/transfer-execution.ts
 ### Live price higher than confirmed
 - Place nothing. Show the new price and ask to confirm or cancel.
 
+### No price available
+- If no estimate can be had for any funding asset, place nothing and say so. Offer retry, or a different
+  amount, method or currency.
+- A transfer is never placed at a price the user has not been shown: a confirmation that did not follow a shown
+  price leads to the live price being shown and confirmed first.
+
 ### No provider
 - Tell the user nothing was sent. Offer retry, or a different amount, method or currency.
 
