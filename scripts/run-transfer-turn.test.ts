@@ -11,17 +11,8 @@ import {
   resolveSessionStatePath,
   runTransferTurn,
 } from "./run-transfer-turn.ts";
-import { UnigoxClient } from "./unigox-client.ts";
-import type {
-  CurrencyPaymentData,
-  PaymentDetail,
-  PaymentMethodInfo,
-  ResolvedPaymentMethodFieldConfig,
-  WalletBalance,
-} from "./unigox-client.ts";
-
-const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const VALID_TON_PRIVATE_KEY = "4444444444444444444444444444444444444444444444444444444444444444";
+import type { CurrencyPaymentData, PaymentMethodInfo, ResolvedPaymentMethodFieldConfig } from "./payment-catalogue.ts";
+import type { PaymentDetail, WalletBalance } from "./transfer-execution.ts";
 
 function makeWalletBalance(usdt = 71, usdc = 1): WalletBalance {
   return {
@@ -37,10 +28,10 @@ function makeWalletBalance(usdt = 71, usdc = 1): WalletBalance {
 
 function makeRemotePaymentDetail(): PaymentDetail {
   return {
-    id: 77,
+    id: "77",
     fiat_currency_code: "EUR",
-    payment_method: { id: 10, name: "Wise", slug: "wise" },
-    payment_network: { id: 11, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+    payment_method: { name: "Wise", slug: "wise" },
+    payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
     details: {
       full_name: "Aleksandr Example",
       iban: "EE382200221020145685",
@@ -48,43 +39,21 @@ function makeRemotePaymentDetail(): PaymentDetail {
   };
 }
 
-function makeCurrencyData(): CurrencyPaymentData {
-  const wise: PaymentMethodInfo = {
-    id: 10,
-    slug: "wise",
-    name: "Wise",
-    networks: [
-      {
-        id: 11,
-        slug: "iban-sepa",
-        name: "European Transfer (SEPA)",
-        details_format: [],
-      },
-    ],
-  };
+const WISE: PaymentMethodInfo = {
+  id: 10,
+  slug: "wise",
+  name: "Wise",
+  type: "BANK",
+  typeSlug: "digital-banks",
+  networks: [{ id: 11, slug: "iban-sepa", name: "European Transfer (SEPA)", fiatCurrencyCode: "EUR" }],
+};
 
-  return {
-    fiatCurrencyCode: "EUR",
-    fiatCurrencySymbol: "€",
-    paymentMethods: [wise],
-  };
+function makeCurrencyData(): CurrencyPaymentData {
+  return { currency: { code: "EUR", name: "EUR" }, paymentMethods: [WISE] };
 }
 
 function makeFieldConfig(): ResolvedPaymentMethodFieldConfig {
-  return {
-    currency: "EUR",
-    methodId: 10,
-    methodSlug: "wise",
-    methodName: "Wise",
-    networkId: 11,
-    networkSlug: "iban-sepa",
-    networkName: "European Transfer (SEPA)",
-    fields: [],
-    networkConfig: {
-      countryCode: "BE",
-    },
-    selectedFormatId: undefined,
-  } as ResolvedPaymentMethodFieldConfig;
+  return { method: WISE, network: WISE.networks[0], fields: [] };
 }
 
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
@@ -124,7 +93,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
 test("runner persists session state and resumes it on the next turn", async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-"));
   const deps = {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: false },
+    authState: { hasReplayableAuth: true },
     client: {
       getProfile: async () => ({ username: "skill" }),
       getWalletBalance: async () => makeWalletBalance(),
@@ -161,7 +130,7 @@ test("runner persists session state and resumes it on the next turn", async () =
 test("runner starts fresh on an explicit new transfer even if an old active session exists", async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-reset-"));
   const deps = {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: false },
+    authState: { hasReplayableAuth: true },
     client: {
       getProfile: async () => ({ username: "skill" }),
       getWalletBalance: async () => makeWalletBalance(),
@@ -192,7 +161,7 @@ test("runner starts fresh on an explicit new transfer even if an old active sess
 test("runner resumes an active KYC session when the user sends combined legal-name and country details", async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-kyc-"));
   const deps = {
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: false },
+    authState: { hasReplayableAuth: true },
     client: {
       getProfile: async () => ({
         username: "skill",
@@ -278,124 +247,5 @@ test("resolveRunnerSessionKey uses OpenClaw session variables", () => {
   assert.equal(
     resolveRunnerSessionKey({ OPENCLAW_SESSION_ID: "agent:main:telegram:g-agent-main-main" } as NodeJS.ProcessEnv),
     "agent-main-telegram-g-agent-main-main"
-  );
-});
-
-test("runner persists TON auth secrets into the skill env file by default", async () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-ton-"));
-  const envPath = path.join(stateDir, ".env");
-  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-  const tonPrivateKey = VALID_TON_PRIVATE_KEY;
-
-  await withEnv(
-    {
-      SEND_MONEY_ENV_PATH: envPath,
-      SEND_MONEY_DISABLE_ENV_FILE_LOOKUP: "1",
-    },
-    async () => {
-    const deps = {
-      authState: { hasReplayableAuth: false, authMode: undefined, emailFallbackAvailable: false },
-      verifyTonLogin: async ({ tonPrivateKey: normalizedKey, tonAddress: normalizedAddress }: { tonPrivateKey?: string; tonAddress?: string }) => ({
-        success: normalizedKey === tonPrivateKey && Boolean(normalizedAddress?.startsWith("0:")),
-        username: "tonuser",
-        tonWalletVersion: "v5r1",
-      }),
-      handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
-    };
-
-    await runTransferTurn({
-      text: "send 50 EUR to mom",
-      sessionKey: "telegram:main",
-      stateDir,
-      deps,
-    });
-
-    await runTransferTurn({
-      text: "ton",
-      sessionKey: "telegram:main",
-      stateDir,
-      deps,
-    });
-
-    await runTransferTurn({
-      text: tonAddress,
-      sessionKey: "telegram:main",
-      stateDir,
-      deps,
-    });
-
-    const result = await runTransferTurn({
-      text: "this address is correct",
-      sessionKey: "telegram:main",
-      stateDir,
-      deps,
-    });
-
-    const finalResult = await runTransferTurn({
-      text: tonPrivateKey,
-      sessionKey: "telegram:main",
-      stateDir,
-      deps,
-    });
-
-    assert.equal(result.session.stage, "awaiting_ton_auth_method");
-    assert.match(result.reply, /TON mnemonic|TON private key|TonConnect/i);
-    assert.equal(finalResult.session.auth.mode, "ton");
-    assert.equal(finalResult.session.auth.available, true);
-    assert.equal(finalResult.session.stage, "awaiting_payment_method");
-  }
-  );
-
-  const envBody = fs.readFileSync(envPath, "utf-8");
-  assert.match(envBody, /UNIGOX_AUTH_MODE=ton/);
-  assert.match(envBody, /UNIGOX_TON_PRIVATE_KEY=4444444444444444444444444444444444444444444444444444444444444444/);
-  assert.match(envBody, /UNIGOX_TON_ADDRESS=0:/);
-  assert.match(envBody, /UNIGOX_TON_WALLET_VERSION=v5r1/);
-  assert.match(envBody, /UNIGOX_TON_NETWORK=-239/);
-  assert.match(envBody, /UNIGOX_LOGIN_WALLET_ORIGIN=ton/);
-  assert.match(envBody, /UNIGOX_TON_LOGIN_WALLET_ORIGIN=ton/);
-});
-
-test("runner writes a generated TON wallet export file when asked", async () => {
-  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-runner-export-"));
-  const exportDir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-export-"));
-  const mnemonic = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
-
-  await withEnv(
-    {
-      SEND_MONEY_EXPORT_DIR: exportDir,
-      UNIGOX_LOGIN_WALLET_ORIGIN: "generated_ton",
-      UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-      UNIGOX_TON_MNEMONIC: mnemonic,
-      UNIGOX_TON_ADDRESS: "0:9d7ff9b839333a63db09a70cd19ed3c277f6889f3108cce528a628306ae8c737",
-      UNIGOX_TON_WALLET_VERSION: "v4",
-    },
-    async () => {
-      const result = await runTransferTurn({
-        text: "export this wallet",
-        sessionKey: "telegram:export",
-        stateDir,
-        deps: {
-          authState: { hasReplayableAuth: true, authMode: "ton", choice: "generated_ton", emailFallbackAvailable: false },
-          client: {} as any,
-        },
-      });
-
-      assert.match(result.reply, /dedicated TON login wallet/i);
-      assert.match(result.reply, /local file:/i);
-
-      const files = fs.readdirSync(exportDir);
-      assert.equal(files.length, 1);
-      const exportPath = path.join(exportDir, files[0]);
-      assert.match(result.reply, new RegExp(exportPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-
-      const parsed = JSON.parse(fs.readFileSync(exportPath, "utf-8"));
-      assert.equal(parsed.wallet_type, "ton");
-      assert.equal(parsed.origin, "generated_ton");
-      assert.equal(parsed.private_key, VALID_TON_PRIVATE_KEY);
-      assert.equal(parsed.mnemonic, mnemonic);
-      assert.equal(parsed.address, "0:9d7ff9b839333a63db09a70cd19ed3c277f6889f3108cce528a628306ae8c737");
-      assert.equal(parsed.wallet_version, "v4");
-    }
   );
 });

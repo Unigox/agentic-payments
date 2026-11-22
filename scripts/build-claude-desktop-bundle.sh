@@ -33,8 +33,7 @@ npm install --prefix "${SCRIPT_DIR}" --no-fund --no-audit >&2
 
 rm -rf "${BUNDLE_BUILD_DIR}"
 mkdir -p "${SCRIPTS_BUILD_DIR}" \
-  "${BUNDLE_BUILD_DIR}/workflows/sessions" \
-  "${BUNDLE_BUILD_DIR}/workflows/tonconnect"
+  "${BUNDLE_BUILD_DIR}/workflows/sessions"
 
 cp "${SCRIPT_DIR}/package.json" "${SCRIPTS_BUILD_DIR}/package.json"
 cp "${SCRIPT_DIR}/package-lock.json" "${SCRIPTS_BUILD_DIR}/package-lock.json"

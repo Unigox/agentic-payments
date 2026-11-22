@@ -14,11 +14,8 @@ export const SEND_MONEY_MCP_SERVER_NAME = "agentic-payments-local";
 export const SEND_MONEY_MCP_SERVER_VERSION = "1.0.0";
 
 export const START_SEND_MONEY_TOOL_NAME = "start_send_money";
-export const SIGN_IN_UNIGOX_TOOL_NAME = "sign_in_unigox";
-export const CREATE_WALLET_TOOL_NAME = "create_wallet";
 export const CHECK_KYC_TOOL_NAME = "check_kyc";
 export const SAVE_PAYMENT_DETAILS_TOOL_NAME = "save_payment_details";
-export const EXPORT_WALLET_TOOL_NAME = "export_wallet";
 
 const sessionKeyShape = z
   .string()
@@ -37,41 +34,18 @@ const textShape = z
   .optional()
   .describe("Optional natural-language instruction for this flow.");
 
-const imagePathShape = z
-  .string()
-  .min(1, "image_path must not be empty")
-  .optional()
-  .describe("Optional absolute local path to a fresh TonConnect or WalletConnect QR screenshot from the UNIGOX browser.");
-
 export const sendMoneyMcpInputShape = {
   text: z
     .string()
     .min(1, "text must not be empty")
     .optional()
     .describe("The latest user message for the send-money flow."),
-  image_path: imagePathShape,
   session_key: sessionKeyShape,
   reset: resetShape,
 };
 
 export const startSendMoneyMcpInputShape = {
   text: textShape.describe("Optional send-money request. If omitted, start the flow with a generic 'I want to send money' turn."),
-  session_key: sessionKeyShape,
-  reset: resetShape,
-};
-
-export const signInUnigoxMcpInputShape = {
-  text: textShape.describe("Optional auth instruction such as choosing EVM, TON, email OTP, or pasting a signing key."),
-  image_path: imagePathShape,
-  session_key: sessionKeyShape,
-  reset: resetShape,
-};
-
-export const createWalletMcpInputShape = {
-  wallet_type: z
-    .enum(["evm", "ton"])
-    .describe("Which dedicated wallet to create locally on this device for UNIGOX sign-in."),
-  text: textShape.describe("Optional wallet-creation instruction. If omitted, a dedicated wallet request is synthesized from wallet_type."),
   session_key: sessionKeyShape,
   reset: resetShape,
 };
@@ -92,16 +66,6 @@ export const savePaymentDetailsMcpInputShape = {
   reset: resetShape,
 };
 
-export const exportWalletMcpInputShape = {
-  wallet_type: z
-    .enum(["evm", "ton"])
-    .optional()
-    .describe("Optional explicit generated wallet type to export. Omit this to export the currently active generated login wallet."),
-  text: textShape.describe("Optional generated-wallet export instruction. If omitted, a default local wallet-export request is synthesized."),
-  session_key: sessionKeyShape,
-  reset: resetShape,
-};
-
 export interface AnthropicMcpToolDescriptor {
   name: string;
   title: string;
@@ -117,32 +81,17 @@ export const ANTHROPIC_MCP_TOOL_DESCRIPTORS: AnthropicMcpToolDescriptor[] = [
   {
     name: START_SEND_MONEY_TOOL_NAME,
     title: "Start Send Money",
-    description: "Start or continue a UNIGOX send-money flow. Use for natural requests like 'I want to send money', recipient/amount follow-ups, payment-method changes, top-up continuation, or confirmation steps.",
-  },
-  {
-    name: SIGN_IN_UNIGOX_TOOL_NAME,
-    title: "Sign In to UNIGOX",
-    description: "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, TON TonConnect QR or tc:// browser-login approval, and exported signing-key setup.",
-  },
-  {
-    name: CREATE_WALLET_TOOL_NAME,
-    title: "Create Dedicated Wallet",
-    description: "Create a dedicated local EVM or TON wallet on this device for UNIGOX sign-in. This is the beginner-friendly path when the user does not want to provide an existing wallet key.",
+    description: "Start or continue a UNIGOX send-money flow. Use for natural requests like 'I want to send money', recipient/amount follow-ups, payment-method changes, balance rechecks, or confirmation steps.",
   },
   {
     name: CHECK_KYC_TOOL_NAME,
     title: "Check or Start KYC",
-    description: "Answer KYC questions and continue the KYC flow. Use for prompts like 'Do I need to do KYC?', 'Can I do KYC earlier?', 'I wanna do KYC on the platform', or 'Give me the KYC link'.",
+    description: "Answer KYC questions and continue the KYC flow. UNIGOX requires the sender's identity to be verified before every transfer. Use for prompts like 'Do I need to do KYC?', 'I want to do KYC now', or 'Give me the KYC link'.",
   },
   {
     name: SAVE_PAYMENT_DETAILS_TOOL_NAME,
     title: "Save Payment Details",
     description: "Save or update recipient payout details for later use. Use for adding a recipient, saving payment details, or updating a saved payout route without immediately placing a transfer.",
-  },
-  {
-    name: EXPORT_WALLET_TOOL_NAME,
-    title: "Export Generated Wallet",
-    description: "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', 'backup my generated wallet', 'export my EVM wallet', or 'send me the wallet file'.",
   },
 ];
 
@@ -153,44 +102,29 @@ function trimmed(value: string | undefined): string | undefined {
 
 function buildBaseToolInput(input: {
   text?: string;
-  image_path?: string;
   session_key?: string;
   reset?: boolean;
 }, fallbackText?: string): SendMoneyToolInput {
   const text = trimmed(input.text) || fallbackText;
-  const imagePath = trimmed(input.image_path);
   const sessionKey = trimmed(input.session_key);
 
   return {
     ...(text ? { text } : {}),
-    ...(imagePath ? { image_path: imagePath } : {}),
     ...(sessionKey ? { session_key: sessionKey } : {}),
     ...(typeof input.reset === "boolean" ? { reset: input.reset } : {}),
   };
 }
 
-function buildCreateWalletFallback(walletType: "evm" | "ton"): string {
-  return walletType === "evm"
-    ? "Create dedicated EVM wallet"
-    : "Create dedicated TON wallet";
-}
-
 function buildKycFallback(action: "status" | "start" | "link" | undefined): string {
   switch (action) {
     case "start":
-      return "I wanna do KYC on the platform";
+      return "I want to do KYC now";
     case "link":
       return "Give me the KYC link";
     case "status":
     default:
       return "Do I need to do KYC?";
   }
-}
-
-function buildExportWalletFallback(walletType: "evm" | "ton" | undefined): string {
-  if (walletType === "evm") return "Export my generated EVM wallet";
-  if (walletType === "ton") return "Export my generated TON wallet";
-  return "Export this wallet";
 }
 
 export function shouldResetForFreshStart(text: string | undefined, reset: boolean | undefined, sessionKey: string | undefined): boolean | undefined {
@@ -216,53 +150,16 @@ export function shouldResetForFreshStart(text: string | undefined, reset: boolea
   return freshStartPatterns.some((pattern) => pattern.test(value)) ? true : undefined;
 }
 
-function describeProtocolGuard(choice: string | undefined, mode: string | undefined): string[] {
-  if (choice === "evm" || choice === "generated_evm" || (mode === "evm" && !choice)) {
-    return [
-      "browser_login_protocol: WalletConnect (wc: links, WalletConnect QR)",
-      "FORBIDDEN: TonConnect, tc:// links, TonConnect QR — NEVER mention these for this session",
-    ];
-  }
-  if (choice === "ton" || choice === "generated_ton" || (mode === "ton" && !choice)) {
-    return [
-      "browser_login_protocol: TonConnect (tc:// links, TonConnect QR)",
-      "FORBIDDEN: WalletConnect, wc: links, WalletConnect QR — NEVER mention these for this session",
-    ];
-  }
-  if (choice === "email" || mode === "email") {
-    return ["browser_login_protocol: email OTP (no wallet protocol needed)"];
-  }
-  return [];
-}
-
-function describeNextAction(stage: TransferStage, choice: string | undefined): string {
+/**
+ * Tells the agent, in one line, what to do with the reply for a given stage.
+ *
+ * @param stage The session's stage after this turn.
+ * @returns A short instruction for the agent; a generic one for stages without special handling.
+ */
+function describeNextAction(stage: TransferStage): string {
   switch (stage) {
-    case "awaiting_auth_profile_choice":
-      return "Ask user to pick a saved auth profile from the options";
-    case "awaiting_auth_choice":
-      return "Ask user to pick an auth method from the options";
-    case "awaiting_evm_login_key":
-      return "Ask user for their EVM private key — NOT a TON key";
-    case "awaiting_evm_signing_key":
-      return choice === "evm" || choice === "generated_evm"
-        ? "Ask user for EVM signing key or WalletConnect link — NOT TonConnect"
-        : "Ask user for the UNIGOX signing key";
-    case "awaiting_evm_wallet_signin":
-      return "Waiting for WalletConnect approval — NOT TonConnect";
-    case "awaiting_ton_address":
-    case "awaiting_ton_address_confirmation":
-      return "Ask user for their TON wallet address";
-    case "awaiting_ton_auth_method":
-      return "Ask user for TON auth method";
-    case "awaiting_ton_private_key":
-    case "awaiting_ton_mnemonic":
-      return "Ask user for TON private key or mnemonic — NOT an EVM key";
-    case "awaiting_tonconnect_completion":
-      return "Waiting for TonConnect approval — NOT WalletConnect";
-    case "awaiting_email_address":
-      return "Ask user for their email address";
-    case "awaiting_email_otp":
-      return "Ask user for the email OTP code";
+    case "awaiting_setup":
+      return "Tell the user the skill needs its UNIGOX settings configured; do not ask for keys in chat";
     case "awaiting_recipient_name":
     case "awaiting_recipient_mode":
       return "Ask user for recipient name";
@@ -286,6 +183,10 @@ function describeNextAction(stage: TransferStage, choice: string | undefined): s
       return "Ask user for their country for KYC";
     case "awaiting_kyc_completion":
       return "Waiting for KYC verification to complete";
+    case "awaiting_balance_resolution":
+      return "Ask user to fund the partner wallet on unigox.com or change the amount";
+    case "awaiting_new_price_confirmation":
+      return "Ask user to confirm or cancel the updated price";
     default:
       return "Follow the reply below";
   }
@@ -297,15 +198,11 @@ function buildStateBlock(session: TransferSession): string {
 
   lines.push("=== SESSION STATE (relay the reply below — do not paraphrase or add steps) ===");
 
-  if (auth.username) lines.push(`user: ${auth.username}`);
-  if (auth.choice) lines.push(`auth: ${auth.choice}`);
-  else if (auth.mode) lines.push(`auth_mode: ${auth.mode}`);
-
-  lines.push(...describeProtocolGuard(auth.choice, auth.mode));
+  if (auth.username) lines.push(`sender: ${auth.username}`);
 
   lines.push(`stage: ${stage}`);
   if (goal && goal !== "transfer") lines.push(`goal: ${goal}`);
-  lines.push(`next: ${describeNextAction(stage, auth.choice)}`);
+  lines.push(`next: ${describeNextAction(stage)}`);
 
   lines.push("===");
 
@@ -379,40 +276,6 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
     )
   );
 
-  const signInTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === SIGN_IN_UNIGOX_TOOL_NAME)!;
-  server.registerTool(
-    signInTool.name,
-    {
-      title: signInTool.title,
-      description: signInTool.description,
-      inputSchema: signInUnigoxMcpInputShape,
-    },
-    async (input) => runAndFormat(
-      buildBaseToolInput(
-        {
-          ...input,
-          reset: shouldResetForFreshStart(input.text, input.reset, input.session_key),
-        },
-        "I need to sign in to UNIGOX."
-      ),
-      deps
-    )
-  );
-
-  const createWalletTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === CREATE_WALLET_TOOL_NAME)!;
-  server.registerTool(
-    createWalletTool.name,
-    {
-      title: createWalletTool.title,
-      description: createWalletTool.description,
-      inputSchema: createWalletMcpInputShape,
-    },
-    async (input) => runAndFormat(
-      buildBaseToolInput(input, buildCreateWalletFallback(input.wallet_type)),
-      deps
-    )
-  );
-
   const checkKycTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === CHECK_KYC_TOOL_NAME)!;
   server.registerTool(
     checkKycTool.name,
@@ -441,17 +304,4 @@ export function registerSendMoneyMcpTool(server: McpServer, deps?: TransferFlowD
     )
   );
 
-  const exportWalletTool = ANTHROPIC_MCP_TOOL_DESCRIPTORS.find((tool) => tool.name === EXPORT_WALLET_TOOL_NAME)!;
-  server.registerTool(
-    exportWalletTool.name,
-    {
-      title: exportWalletTool.title,
-      description: exportWalletTool.description,
-      inputSchema: exportWalletMcpInputShape,
-    },
-    async (input) => runAndFormat(
-      buildBaseToolInput(input, buildExportWalletFallback(input.wallet_type)),
-      deps
-    )
-  );
 }

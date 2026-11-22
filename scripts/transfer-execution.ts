@@ -121,8 +121,8 @@ export interface PartnerPaymentFieldDiff {
   partner_field_name: string;
   /** Local field key, when it differs from the backend's. */
   internal_field_name?: string;
-  /** Whether the transfer cannot proceed without it. */
-  required: boolean;
+  /** Whether the transfer cannot proceed without it. Treated as required when absent. */
+  required?: boolean;
   /** Value currently on file, for an invalid field. */
   current_value?: string;
   /** Regular expression the value must match. */

@@ -1,57 +1,67 @@
 #!/usr/bin/env -S node --experimental-strip-types
+/**
+ * Command-line runner for one chat turn of the send-money flow.
+ *
+ * Loads the session saved for the caller, advances it with the turn's text, saves it again and
+ * prints the reply. Each invocation is a separate process, so everything the flow needs between
+ * turns lives in the session file.
+ */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   advanceTransferFlow,
-  type LoginWalletExportRequest,
-  loadUnigoxConfigFromEnv,
   startTransferFlow,
   type TransferFlowDeps,
   type TransferFlowResult,
   type TransferSession,
 } from "./transfer-orchestrator.ts";
-import { UnigoxClient, type UnigoxClientConfig } from "./unigox-client.ts";
-import {
-  checkTonConnectSession,
-  clearTonConnectSession,
-  startTonConnectSession,
-} from "./tonconnect-session.ts";
-import { approveWalletConnectUriWithWallet } from "./walletconnect-session.ts";
-import {
-  decodeTonConnectUniversalLinkFromImagePath,
-  decodeWalletConnectUriFromImagePath,
-} from "./qr-decode.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SKILL_DIR = path.join(__dirname, "..");
 const DEFAULT_STATE_DIR = path.join(SKILL_DIR, "workflows", "sessions");
-const DEFAULT_TONCONNECT_STATE_DIR = path.join(SKILL_DIR, "workflows", "tonconnect");
-const DEFAULT_ENV_PATH = path.join(SKILL_DIR, ".env");
-const DEFAULT_EXPORT_DIR = path.join(SKILL_DIR, "workflows", "exports");
-const DEFAULT_WALLETCONNECT_PROJECT_ID = "5b859bb2b321133226b5b03b00ace35b";
 
+/** Longest session key kept in a state file name, in characters. Keeps file names within common filesystem limits. */
+const MAX_SESSION_KEY_LENGTH = 120;
+
+/** One turn to run. Built by `main` from the command line or by a caller such as the MCP server. */
 export interface TransferRunnerOptions {
+  /** What the person said this turn. */
   text?: string;
-  imagePath?: string;
+  /** Identifies whose session to continue. Defaults to an id taken from the environment. */
   sessionKey?: string;
+  /** Directory holding session files. Defaults to `workflows/sessions` in the skill. */
   stateDir?: string;
+  /** Flow collaborators to use instead of the defaults; tests inject fakes here. */
   deps?: TransferFlowDeps;
+  /** When true, any saved session is discarded and a new one starts. */
   reset?: boolean;
 }
 
+/** Command-line arguments as parsed by `parseArgs`. */
 interface ParsedCliArgs {
+  /** Value of `--text`. */
   text?: string;
+  /** Value of `--text-file`: a file whose contents are the turn's text. */
   textFile?: string;
-  imagePath?: string;
+  /** Value of `--session-key`. */
   sessionKey?: string;
+  /** Value of `--state-dir`. */
   stateDir?: string;
+  /** True when `--json` was given: print the whole result as JSON. */
   json?: boolean;
+  /** True when `--reset` was given. */
   reset?: boolean;
 }
 
+/**
+ * Parses the runner's command-line flags.
+ *
+ * @param argv Arguments after the script name.
+ * @returns The recognised flags. Unknown arguments are ignored.
+ */
 function parseArgs(argv: string[]): ParsedCliArgs {
   const parsed: ParsedCliArgs = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -63,10 +73,6 @@ function parseArgs(argv: string[]): ParsedCliArgs {
         break;
       case "--text-file":
         parsed.textFile = argv[i + 1] || "";
-        i += 1;
-        break;
-      case "--image-path":
-        parsed.imagePath = argv[i + 1] || "";
         i += 1;
         break;
       case "--session-key":
@@ -90,6 +96,11 @@ function parseArgs(argv: string[]): ParsedCliArgs {
   return parsed;
 }
 
+/**
+ * Reads piped standard input.
+ *
+ * @returns The trimmed input, or `""` when the process is attached to a terminal.
+ */
 async function readStdin(): Promise<string> {
   if (process.stdin.isTTY) return "";
 
@@ -100,15 +111,30 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf-8").trim();
 }
 
+/**
+ * Turns an arbitrary id into a safe file-name fragment.
+ *
+ * @param value Any string.
+ * @returns Lower-case letters, digits, `_` and `-` only, at most `MAX_SESSION_KEY_LENGTH` long;
+ *   `default` when nothing usable remains.
+ */
 function slugify(value: string): string {
   return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 120) || "default";
+    .slice(0, MAX_SESSION_KEY_LENGTH) || "default";
 }
 
+/**
+ * Chooses the session key for this run.
+ *
+ * @param env Environment to read; defaults to the process environment.
+ * @param explicit Key given by the caller, which wins over the environment.
+ * @returns A file-safe key: the explicit one, else the first set of `SEND_MONEY_SESSION_ID`,
+ *   `OPENCLAW_SESSION_ID`, `OPENCLAW_AGENT_ID`, `AGENT_ID`, `USER`, else `default`.
+ */
 export function resolveRunnerSessionKey(env: NodeJS.ProcessEnv = process.env, explicit?: string): string {
   const raw = explicit
     || env.SEND_MONEY_SESSION_ID
@@ -120,249 +146,23 @@ export function resolveRunnerSessionKey(env: NodeJS.ProcessEnv = process.env, ex
   return slugify(raw);
 }
 
-function ensureStateDir(stateDir: string): void {
-  fs.mkdirSync(stateDir, { recursive: true });
-}
-
-function resolveEnvFilePath(): string {
-  return process.env.SEND_MONEY_ENV_PATH || DEFAULT_ENV_PATH;
-}
-
-function resolveWalletExportDir(): string {
-  const configured = process.env.SEND_MONEY_EXPORT_DIR?.trim();
-  if (configured) return configured;
-
-  const downloadsDir = path.join(osHomedir(), "Downloads");
-  if (fs.existsSync(downloadsDir) && fs.statSync(downloadsDir).isDirectory()) {
-    return path.join(downloadsDir, "Agentic Payments");
-  }
-
-  return DEFAULT_EXPORT_DIR;
-}
-
-function osHomedir(): string {
-  return process.env.HOME || process.env.USERPROFILE || SKILL_DIR;
-}
-
-function upsertEnvAssignments(filePath: string, assignments: Record<string, string>): void {
-  const nextKeys = new Set(Object.keys(assignments));
-  const existingLines = fs.existsSync(filePath)
-    ? fs.readFileSync(filePath, "utf-8").split(/\r?\n/)
-    : [];
-  const nextLines = existingLines.map((line) => {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=/);
-    const key = match?.[1];
-    if (!key || !nextKeys.has(key)) return line;
-    nextKeys.delete(key);
-    return `${key}=${assignments[key]}`;
-  });
-
-  for (const key of nextKeys) {
-    nextLines.push(`${key}=${assignments[key]}`);
-  }
-
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const body = nextLines.filter((line, index, all) => line.length > 0 || index < all.length - 1).join("\n").replace(/\n*$/, "\n");
-  fs.writeFileSync(filePath, body);
-
-  for (const [key, value] of Object.entries(assignments)) {
-    process.env[key] = value;
-  }
-}
-
-function formatExportTimestamp(date = new Date()): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return [
-    date.getUTCFullYear(),
-    pad(date.getUTCMonth() + 1),
-    pad(date.getUTCDate()),
-    "T",
-    pad(date.getUTCHours()),
-    pad(date.getUTCMinutes()),
-    pad(date.getUTCSeconds()),
-    "Z",
-  ].join("");
-}
-
-function writeLoginWalletExportFile(dirPath: string, wallet: LoginWalletExportRequest) {
-  const timestamp = formatExportTimestamp();
-  const fileName = wallet.walletType === "ton"
-    ? `agentic-payments-generated-ton-wallet-${timestamp}.json`
-    : `agentic-payments-generated-evm-wallet-${timestamp}.json`;
-  const filePath = path.join(dirPath, fileName);
-  const body = {
-    type: "agentic_payments_login_wallet_export",
-    exported_at: new Date().toISOString(),
-    wallet_type: wallet.walletType,
-    origin: wallet.origin,
-    username: wallet.username,
-    address: wallet.address,
-    wallet_version: wallet.walletVersion,
-    private_key: wallet.privateKey,
-    mnemonic: wallet.mnemonic,
-    notes: [
-      "This file contains plain-text secret material for the locally generated UNIGOX login wallet.",
-      "Move this file into secure storage, then delete the local copy when you no longer need it.",
-    ],
-  };
-
-  fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-  try {
-    fs.chmodSync(dirPath, 0o700);
-  } catch {
-    // Best effort across platforms.
-  }
-
-  fs.writeFileSync(filePath, JSON.stringify(body, null, 2) + "\n", { mode: 0o600 });
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch {
-    // Best effort across platforms.
-  }
-
-  return {
-    walletType: wallet.walletType,
-    origin: wallet.origin,
-    filePath,
-    address: wallet.address,
-    walletVersion: wallet.walletVersion,
-    includesMnemonic: Boolean(wallet.mnemonic),
-  };
-}
-
-function resolveFrontendUrl(): string | undefined {
-  return process.env.UNIGOX_FRONTEND_URL || process.env.NEXT_PUBLIC_UNIGOX_FRONTEND_URL;
-}
-
-function buildTonConnectClient(): UnigoxClient {
-  let config: UnigoxClientConfig = {};
-  try {
-    config = loadUnigoxConfigFromEnv("ton");
-  } catch {
-    // TonConnect payload generation can still proceed without stored auth.
-  }
-  const frontendUrl = resolveFrontendUrl() || config.frontendUrl;
-  return new UnigoxClient({
-    ...config,
-    ...(frontendUrl ? { frontendUrl } : {}),
-  });
-}
-
-function buildWalletConnectClient(): UnigoxClient {
-  const config = loadUnigoxConfigFromEnv("evm");
-  const frontendUrl = resolveFrontendUrl() || config.frontendUrl;
-  return new UnigoxClient({
-    ...config,
-    ...(frontendUrl ? { frontendUrl } : {}),
-  });
-}
-
-function buildDefaultRunnerDeps(sessionKey: string): TransferFlowDeps {
-  const envPath = resolveEnvFilePath();
-  const frontendUrl = resolveFrontendUrl();
-  const exportDir = resolveWalletExportDir();
-  const walletConnectProjectId = process.env.WALLETCONNECT_PROJECT_ID
-    || process.env.REOWN_PROJECT_ID
-    || process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
-    || DEFAULT_WALLETCONNECT_PROJECT_ID;
-  return {
-    persistEmailAddress: async (emailAddress) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_EMAIL: emailAddress,
-      });
-    },
-    persistEvmLoginKey: async (loginKey) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_EVM_LOGIN_PRIVATE_KEY: loginKey,
-      });
-    },
-    persistAuthChoice: async (choice) => {
-      const authMode = choice === "evm" || choice === "generated_evm"
-        ? "evm"
-        : choice === "ton" || choice === "generated_ton"
-          ? "ton"
-          : choice === "email"
-            ? "email"
-            : undefined;
-      upsertEnvAssignments(envPath, {
-        UNIGOX_LOGIN_WALLET_ORIGIN: choice,
-        ...(authMode === "evm" ? { UNIGOX_EVM_LOGIN_WALLET_ORIGIN: choice } : {}),
-        ...(authMode === "ton" ? { UNIGOX_TON_LOGIN_WALLET_ORIGIN: choice } : {}),
-      });
-    },
-    exportLoginWalletFile: async (wallet) => writeLoginWalletExportFile(exportDir, wallet),
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_AUTH_MODE: "ton",
-        UNIGOX_TON_PRIVATE_KEY: tonPrivateKey,
-        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
-      });
-    },
-    persistTonMnemonic: async (mnemonic) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_AUTH_MODE: "ton",
-        UNIGOX_TON_MNEMONIC: mnemonic,
-        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
-      });
-    },
-    persistTonAddress: async (tonAddress) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_AUTH_MODE: "ton",
-        UNIGOX_TON_ADDRESS: tonAddress,
-        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
-      });
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      upsertEnvAssignments(envPath, {
-        UNIGOX_AUTH_MODE: "ton",
-        UNIGOX_TON_WALLET_VERSION: tonWalletVersion,
-        UNIGOX_TON_NETWORK: process.env.UNIGOX_TON_NETWORK || "-239",
-      });
-    },
-    startTonConnectLogin: async () => {
-      const client = buildTonConnectClient();
-      const { payloadToken, payloadTokenHash } = await client.createTonLoginPayloadTokenPair();
-      const started = await startTonConnectSession({
-        sessionKey,
-        tonProof: payloadTokenHash,
-        ...(frontendUrl ? { frontendUrl } : {}),
-        stateDir: DEFAULT_TONCONNECT_STATE_DIR,
-      });
-      return {
-        ...started,
-        payloadToken,
-      };
-    },
-    checkTonConnectLogin: async () => checkTonConnectSession({
-      sessionKey,
-      ...(frontendUrl ? { frontendUrl } : {}),
-      stateDir: DEFAULT_TONCONNECT_STATE_DIR,
-    }),
-    clearTonConnectLogin: async () => clearTonConnectSession({
-      sessionKey,
-      ...(frontendUrl ? { frontendUrl } : {}),
-      stateDir: DEFAULT_TONCONNECT_STATE_DIR,
-    }),
-    approveTonConnectLink: async (universalLink) => {
-      const client = buildTonConnectClient();
-      return client.approveTonConnectBrowserLogin(universalLink);
-    },
-    decodeTonConnectQr: async (imagePath) => decodeTonConnectUniversalLinkFromImagePath(imagePath),
-    approveEvmWalletConnectLink: async (uri) => {
-      const client = buildWalletConnectClient();
-      return client.approveEvmWalletConnectBrowserLogin(uri, {
-        projectId: walletConnectProjectId,
-        sessionKey,
-      });
-    },
-    decodeEvmWalletConnectQr: async (imagePath) => decodeWalletConnectUriFromImagePath(imagePath),
-  };
-}
-
+/**
+ * Locates a session's state file.
+ *
+ * @param sessionKey Session key.
+ * @param stateDir Directory holding session files.
+ * @returns Absolute or relative path of the JSON file for that session.
+ */
 export function resolveSessionStatePath(sessionKey: string, stateDir = DEFAULT_STATE_DIR): string {
   return path.join(stateDir, `${slugify(sessionKey)}.json`);
 }
 
+/**
+ * Loads a saved session.
+ *
+ * @param filePath Session file.
+ * @returns The session, or `undefined` when the file is missing or not valid JSON.
+ */
 export function loadSessionState(filePath: string): TransferSession | undefined {
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf-8")) as TransferSession;
@@ -371,11 +171,23 @@ export function loadSessionState(filePath: string): TransferSession | undefined 
   }
 }
 
+/**
+ * Saves a session, creating its directory when needed.
+ *
+ * @param filePath Session file to write.
+ * @param session Session to persist.
+ */
 export function saveSessionState(filePath: string, session: TransferSession): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(session, null, 2) + "\n");
 }
 
+/**
+ * Tells whether a turn reads like the start of a new transfer.
+ *
+ * @param text The turn's text.
+ * @returns True for phrases such as "send money to", "transfer to", "pay" or "send 50".
+ */
 function looksLikeNewTransferTurn(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   if (!normalized) return false;
@@ -388,6 +200,15 @@ function looksLikeNewTransferTurn(text: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+/**
+ * Decides whether this turn starts a new session instead of continuing the saved one.
+ *
+ * @param session Saved session, if any.
+ * @param text The turn's text.
+ * @param reset True when the caller asked for a fresh session.
+ * @returns True when there is no usable session, a reset was asked, or the text starts a new
+ *   transfer while the saved session is not at a step where money or a confirmation is pending.
+ */
 function shouldStartFreshSession(session: TransferSession | undefined, text: string, reset = false): boolean {
   if (reset || !session) return true;
   if (session.status === "completed" || session.status === "cancelled") return true;
@@ -403,10 +224,12 @@ function shouldStartFreshSession(session: TransferSession | undefined, text: str
   return !stickyStages.has(session.stage);
 }
 
-function shouldDeleteSessionState(session: TransferSession): boolean {
-  return session.status === "completed" || session.status === "cancelled";
-}
-
+/**
+ * Formats a flow result for a plain-text chat surface.
+ *
+ * @param result Flow result.
+ * @returns The reply, followed by its options as a bullet list when there are any.
+ */
 export function formatTransferRunnerOutput(result: TransferFlowResult): string {
   let output = result.reply.trim();
   if (result.options?.length) {
@@ -415,29 +238,30 @@ export function formatTransferRunnerOutput(result: TransferFlowResult): string {
   return output;
 }
 
+/**
+ * Runs one chat turn: loads the caller's session, advances the flow, and saves or clears the session.
+ *
+ * @param options The turn's text, session key, state directory, collaborators and reset flag.
+ * @returns The flow's result for this turn. The session file is deleted once the session is
+ *   completed or cancelled, and written otherwise.
+ * @throws Whatever the flow throws; the session file is left as it was.
+ */
 export async function runTransferTurn(options: TransferRunnerOptions): Promise<TransferFlowResult> {
   const sessionKey = resolveRunnerSessionKey(process.env, options.sessionKey);
   const stateDir = options.stateDir || DEFAULT_STATE_DIR;
-  ensureStateDir(stateDir);
+  fs.mkdirSync(stateDir, { recursive: true });
   const statePath = resolveSessionStatePath(sessionKey, stateDir);
   const existingSession = options.reset ? undefined : loadSessionState(statePath);
   const text = options.text?.trim();
-  const imagePath = options.imagePath?.trim();
-  const turn = {
-    ...(text ? { text } : {}),
-    ...(imagePath ? { imagePath } : {}),
-  };
+  const turn = text ? { text } : {};
   const startFresh = shouldStartFreshSession(existingSession, text || "", options.reset);
 
-  const deps: TransferFlowDeps = {
-    ...buildDefaultRunnerDeps(sessionKey),
-    ...(options.deps || {}),
-  };
+  const deps: TransferFlowDeps = options.deps || {};
   const result = startFresh
     ? await startTransferFlow(turn, deps)
     : await advanceTransferFlow(existingSession!, turn, deps);
 
-  if (shouldDeleteSessionState(result.session)) {
+  if (result.session.status === "completed" || result.session.status === "cancelled") {
     fs.rmSync(statePath, { force: true });
   } else {
     saveSessionState(statePath, result.session);
@@ -446,23 +270,27 @@ export async function runTransferTurn(options: TransferRunnerOptions): Promise<T
   return result;
 }
 
+/**
+ * Entry point: runs one turn from the command line and prints the reply.
+ *
+ * Reads the text from `--text`, `--text-file` or standard input. Prints the formatted reply, or the
+ * whole result as JSON with `--json`. Sets a non-zero exit code when no text was given.
+ */
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const stdinText = await readStdin();
   const text = (args.textFile
     ? fs.readFileSync(args.textFile, "utf-8")
     : args.text) || stdinText;
-  const imagePath = args.imagePath?.trim();
 
-  if (!text?.trim() && !imagePath) {
-    console.error("send-money runner requires turn text via --text, --text-file, or stdin, or a local QR screenshot via --image-path.");
+  if (!text?.trim()) {
+    console.error("send-money runner requires turn text via --text, --text-file, or stdin.");
     process.exitCode = 1;
     return;
   }
 
   const result = await runTransferTurn({
-    ...(text?.trim() ? { text: text.trim() } : {}),
-    ...(imagePath ? { imagePath } : {}),
+    text: text.trim(),
     sessionKey: args.sessionKey,
     stateDir: args.stateDir,
     reset: args.reset,
