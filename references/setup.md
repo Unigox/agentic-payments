@@ -2,92 +2,64 @@
 
 ## Dependencies
 
-- Node.js 22+
-- `ethers` v6
-- `@ton/crypto`, `@ton/ton`, `@tonconnect/sdk`, `tweetnacl` for TON auth
-- `unigox-client.ts` module (the UNIGOX SDK)
-
-## UNIGOX Client Module
-
-The client module lives inside this skill at `scripts/unigox-client.ts`.
-
-## Authentication
-
-When auth is missing or login has to be re-established, start with this user-facing question:
-
-> Which wallet connection path should I use to sign in on UNIGOX: **EVM wallet connection** or **TON wallet connection**?
->
-> If neither is ready yet, use **email OTP** for onboarding or recovery, then link the wallet path the user chooses.
-
-Once the user is signed in (SIWE / TON proof / email OTP), the skill captures the Auth0 idToken from the UNIGOX session and forwards it as Bearer auth to the **privy-signing backend** for any on-chain signing the flow needs. There is no second key to collect.
-
-### 1. EVM login key
-
-```env
-UNIGOX_EVM_LOGIN_PRIVATE_KEY=0x...
+```bash
+cd scripts
+npm install
 ```
 
-Use this key to:
-- replay the EVM / SIWE login flow on UNIGOX
-- verify that the agent can sign in successfully
+Node 22.6 or newer is required: the scripts run TypeScript directly with `--experimental-strip-types`.
 
-Conversation order for EVM:
-1. Ask whether the user has already signed in on unigox.com with that wallet.
-2. If not, stop there and tell them to sign in first.
-3. Only after they confirm that sign-in already happened, ask for this login key and verify it.
+Runtime packages: `ethers` (local signing and the balance read), `@modelcontextprotocol/sdk` and `zod`
+(MCP server only).
 
-### 2. TON wallet auth
+## Settings
 
-```env
-UNIGOX_AUTH_MODE=ton
-UNIGOX_TON_PRIVATE_KEY=...   # or use UNIGOX_TON_MNEMONIC for agent-side derivation
-UNIGOX_TON_MNEMONIC=...      # first-class agent-side login path when paired with the exact address
-UNIGOX_TON_ADDRESS=0:...     # exact wallet address to use as the TON source of truth
-UNIGOX_TON_WALLET_VERSION=v4 # persisted after local version matching
-UNIGOX_TON_NETWORK=-239      # optional, defaults to mainnet
+Copy `.env.example` to `.env` in the repository root and fill it in. See `docs/authentication.md` for what
+each setting is. All reads go through `scripts/partner-api-config.ts`.
+
+```bash
+UNIGOX_API_KEY=...
+UNIGOX_WALLET_PRIVATE_KEY=0x...
+UNIGOX_XAI_RPC_URL=https://...
+UNIGOX_SENDER_EMAIL=you@example.com
+# optional, for testing:
+# UNIGOX_API_URL=https://api-staging.unigox.com
 ```
 
-This mode uses the frontend TON routes:
-- `POST /api/ton-generate-payload`
-- `POST /api/ton-login`
-- `POST /api/ton-link`
+## Running one turn
 
-TON auth is only for JWT acquisition and optional wallet linking. After the JWT is obtained, the rest of the client keeps using the same account/trade APIs as before.
-
-The TON wallet address is the source of truth. For agent-side login, the user can provide either the mnemonic phrase or the TON private key for that same wallet, and the skill checks the supported TON wallet versions locally until one matches the exact address. The matched version is stored in `UNIGOX_TON_WALLET_VERSION`.
-
-The other first-class TON path is a fresh live TonConnect deep link / QR. That flow does not store a reusable QR token. The user must use the current live link (or a QR generated from it right now); old screenshots of prior QR codes are not reusable.
-
-### 3. Email OTP onboarding
-
-```env
-UNIGOX_EMAIL=agent@example.com
-# optional later, once configured:
-UNIGOX_EVM_LOGIN_PRIVATE_KEY=0x...
+```bash
+echo "send 50 EUR to John" | bash scripts/run-transfer-turn.sh --json
 ```
 
-Use this for onboarding or recovery. After email login, the agent can:
-- generate and link a local EVM **login** wallet, or
-- link a TON wallet for future JWT login
+The session is kept in `workflows/sessions/` between turns, keyed by `--session-key` or the agent's session id.
 
-### 4. Privy signing backend (optional override)
+## Tests
 
-```env
-# Optional. Defaults to the production privy-signing backend.
-PRIVY_SIGNING_URL=https://privy-signing-prod-at922.ondigitalocean.app
+```bash
+cd scripts
+npm test
 ```
 
-The skill posts the Auth0 idToken from the active UNIGOX session as Bearer auth to this backend whenever a signed action is needed. Only override this if you are pointing at a staging or self-hosted privy-signing deployment.
+The tests use in-memory fakes and make no network calls.
 
-## Supported APIs
+## APIs used
 
-| API | Base URL |
-|-----|----------|
-| Account | `https://prod-account-gynob.ondigitalocean.app/api/v1` |
-| Trades | `https://prod-trades-inrvj.ondigitalocean.app/api/v1` |
-| Offers | `https://prod-offers-jwek6.ondigitalocean.app/api/v1` |
-| Escrow | `https://prod-escrow-l2eom.ondigitalocean.app/api/v1` |
-| Transactor | `https://transactorpoc-mi666.ondigitalocean.app/api/v1` |
-| Currency | `https://prod-currencies-trz2y.ondigitalocean.app/api/v1` |
-| Quote/Bridge | `https://prod-relay-quote-bwl48.ondigitalocean.app` |
-| Privy signing | `https://privy-signing-prod-at922.ondigitalocean.app` |
+Everything goes to one host, the UNIGOX Partner API (`https://api.unigox.com`, or the staging host when
+`UNIGOX_API_URL` is set). Reference: https://developers.unigox.com
+
+| Purpose | Endpoint |
+|---------|----------|
+| Check the key | `GET /api/v1/partner/verify-auth` |
+| Register the sender | `POST /api/v1/partner/users` |
+| KYC | `POST /api/v1/partner/users/{user_uuid}/kyc-submissions`, `GET .../verification-status`, `PATCH .../kyc` |
+| Saved payout details | `GET` and `POST /api/v1/partner/users/{user_uuid}/payment-details` |
+| Catalogue (public) | `GET /api/v1/supported/payment-rails`, `/institutions`, `/blockchains` |
+| Price | `POST /api/v1/partner/offramp/estimate`, `POST /api/v1/partner/offramp/quote` |
+| Order | `POST /api/v1/partner/offramp/initiate`, `GET /api/v1/partner/orders/{order_id}` |
+| Fund escrow | `GET .../transfer-authorization-parameters`, `POST .../authorize-crypto-transfer` |
+| Refund | `GET .../refund-authorization-parameters`, `POST .../authorize-refund` |
+| Receipt | `POST .../confirm-fiat-received` |
+
+The only other network call is the balance read: an ERC-20 `balanceOf` on the XAI node named by
+`UNIGOX_XAI_RPC_URL`.

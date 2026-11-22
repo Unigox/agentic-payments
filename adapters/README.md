@@ -3,6 +3,7 @@
 `agentic-payments` stays one project.
 
 - Core business logic: `scripts/transfer-orchestrator.ts`
+- Payments backend port and its Partner API implementation: `scripts/transfer-execution.ts`, `scripts/partner-execution-client.ts`, `scripts/partner-api-client.ts`
 - Canonical session-aware runner: `scripts/run-transfer-turn.ts`
 - Canonical portable tool contract: `scripts/send-money-tool.ts`
 - Codex local plugin adapter: `.codex-plugin/plugin.json` + `skills/send-money/SKILL.md`
@@ -17,7 +18,6 @@ All adapters should call the same logical tool:
 - `name`: `send_money_turn`
 - input:
   - `text`: latest user turn
-  - `image_path`: optional absolute local path to a fresh UNIGOX browser-login QR screenshot (`tc://` TonConnect or `wc:` WalletConnect)
   - `session_key`: optional stable per-user or per-chat key reused across turns when the host can provide one
   - `reset`: optional hard reset
 
@@ -27,7 +27,7 @@ The result still comes from the same runner/state machine:
 
 - `reply`
 - `options`
-- `status`
+- `done`
 - `session`
 - `events`
 
@@ -49,14 +49,13 @@ Each adapter decides how to render them:
 
 Everything above is intended to stay local to each tester's machine. This repo does not assume a shared hosted MCP layer.
 
-WalletConnect distribution rule:
-- the product should ship with a default UNIGOX-managed WalletConnect project id for the EVM browser-login helper
-- end users should not be asked to create their own WalletConnect / Reown project just to use the connector
-- advanced or self-hosted installs may still override the default with `WALLETCONNECT_PROJECT_ID`, `REOWN_PROJECT_ID`, or `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`
+Credentials rule:
+- no adapter collects keys in chat; every adapter reads the same settings through `scripts/partner-api-config.ts`
+- Claude Desktop takes them as extension settings (`user_config` in `adapters/anthropic/manifest.json`); the other adapters read `.env`
 
 Anthropic-specific tool split:
 - `send_money_turn` remains the canonical catch-all tool contract
-- Claude Desktop additionally exposes thin entry tools for `start_send_money`, `sign_in_unigox`, `create_wallet`, `export_wallet`, `check_kyc`, and `save_payment_details`
+- Claude Desktop additionally exposes thin entry tools for `start_send_money`, `check_kyc`, and `save_payment_details`
 - those Anthropic entry tools must stay as wrappers around the same shared runner, not separate payment engines
 
 ## Host integration rule
@@ -107,9 +106,8 @@ Claude trigger rule:
 - the README and companion Claude skill should also document `/agentic-payments` as a direct skill-style trigger for Claude, and that explicit skill invocation should not be treated as proof the extension is unavailable before local-tool routing has had a chance to load
 - when Claude does not provide a real per-chat `session_key`, explicit fresh-start prompts like `/agentic-payments lets start` should reset the default local session instead of inheriting an older blocked flow
 - the README and companion Claude skill should also preserve an explicit fallback prompt that names `send_money_turn` directly, so the direct invocation path remains documented if natural routing fails
-- KYC FAQ turns such as `Do I need to do KYC?`, `Can I do KYC earlier?`, `I wanna do KYC on the platform`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
-- generated-wallet backup prompts like `export this wallet` or `backup my generated wallet` should route into the shared runner and write a local file instead of echoing secrets into chat
-- EVM WalletConnect browser-login prompts such as `paste the wc link`, `scan this WalletConnect QR`, or `approve the UNIGOX EVM login` should route into the shared runner, not be answered with TON/TonConnect guidance
+- KYC turns such as `Do I need to do KYC?`, `I want to do KYC`, and `Give me the KYC link` should route back into `send_money_turn` instead of being answered from generic model knowledge
+- no description may suggest that a key can be pasted into chat
 
 Codex distribution rule:
 - keep Codex local-first too

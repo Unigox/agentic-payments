@@ -1,4 +1,6 @@
-import type { TradeRequest } from "./unigox-client.ts";
+import type { SettlementTrade, TradeRequest } from "./transfer-execution.ts";
+
+export type { SettlementTrade } from "./transfer-execution.ts";
 
 export type SettlementPhase =
   | "matching"
@@ -12,32 +14,15 @@ export type SettlementPhase =
   | "refunded_or_cancelled"
   | "deferred";
 
-export interface SettlementTrade {
-  id: number;
-  status: string;
-  total_crypto_amount?: number | null;
-  escrow_funded_amount?: number | null;
-  possible_actions?: string[];
-  partner_short_name?: string | null;
-  partner_details_checked_at?: string | null;
-  initiator_payment_details?: Record<string, unknown> | null;
-  payment_request?: boolean;
-  claim_autorelease_seconds_left?: number | null;
-  payment_window_seconds_left?: number | null;
-  open_dispute_seconds_left?: number | null;
-  upload_dispute_proof_seconds_left?: number | null;
-  fiat_payment_deadline?: string | null;
-}
-
 export interface SettlementMonitorClient {
-  getTradeRequest?(tradeRequestId: number): Promise<TradeRequest>;
-  getTrade?(tradeId: number): Promise<SettlementTrade | undefined>;
+  getTradeRequest?(tradeRequestId: string): Promise<TradeRequest>;
+  getTrade?(tradeId: string): Promise<SettlementTrade | undefined>;
 }
 
 export interface SettlementMonitorState {
-  tradeRequestId?: number;
+  tradeRequestId?: string;
   tradeRequestStatus?: string;
-  tradeId?: number;
+  tradeId?: string;
   tradeStatus?: string;
   phase?: SettlementPhase;
   awaitingUserActionSince?: string;
@@ -86,7 +71,8 @@ export interface SettlementSnapshot {
 
 const RECEIPT_REMINDER_MS = 15 * 60 * 1000;
 const RECEIPT_TIMEOUT_MS = 60 * 60 * 1000;
-const DEFAULT_POLL_INTERVAL_MS = 2_000;
+/** Pause between backend reads while polling, in milliseconds. Also used while waiting for a provider match. */
+export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 const RECEIVED_RE = /^(yes(?:\b.*)?|received|got it|got the money|got funds|funds arrived|money arrived|arrived|came through|recipient received|paid)$/i;
@@ -159,9 +145,9 @@ export function parseReceiptDecision(text: string | undefined): "received" | "no
 }
 
 export function createInitialSettlementState(input: {
-  tradeRequestId?: number;
+  tradeRequestId?: string;
   tradeRequestStatus?: string;
-  tradeId?: number;
+  tradeId?: string;
   tradeStatus?: string;
 }): SettlementMonitorState {
   return {

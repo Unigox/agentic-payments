@@ -40,9 +40,13 @@ test("send_money_turn tool schema no longer requires session_key", () => {
   assert.deepEqual(SEND_MONEY_TOOL_INPUT_SCHEMA.required ?? [], []);
 });
 
-test("runSendMoneyToolTurn requires either text or image_path", async () => {
+test("runSendMoneyToolTurn requires text", async () => {
   await assert.rejects(
     () => runSendMoneyToolTurn({ session_key: "chat-1" }),
-    /text or image_path/i
+    /requires text/i
   );
+});
+
+test("send_money_turn accepts no key or image input", () => {
+  assert.deepEqual(Object.keys(SEND_MONEY_TOOL_INPUT_SCHEMA.properties), ["text", "session_key", "reset"]);
 });

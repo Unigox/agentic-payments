@@ -1,6 +1,6 @@
 ---
 name: send-money
-description: Plugin wrapper for the canonical Agentic Payments send-money skill. Use when the user wants to send money through UNIGOX, manage payout recipients, sign in with EVM, TON, or email OTP, or continue an existing payment flow.
+description: Plugin wrapper for the canonical Agentic Payments send-money skill. Use when the user wants to send money through UNIGOX, manage payout recipients, check or start KYC, or continue an existing payment flow.
 ---
 
 # Send Money

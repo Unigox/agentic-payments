@@ -18,8 +18,8 @@ Tell your agent:
 send money using Agentic Payments
 ```
 
-The sign-in setup flow should begin.
+With settings in place, the reply starts with the sender and the partner wallet balance. Without them, it names the settings that are missing.
 
 ## Next Steps
 
-- [Configure authentication](authentication.md)
+- [Settings and credentials](authentication.md): copy `.env.example` to `.env` and fill it in

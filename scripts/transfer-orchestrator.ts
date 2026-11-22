@@ -2,43 +2,36 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { mnemonicValidate } from "@ton/crypto";
-import { Address } from "@ton/ton";
-import { Wallet } from "ethers";
 
-import UnigoxClient, {
-  generateDedicatedEvmLoginWallet,
-  generateDedicatedTonLoginWallet,
-  getPaymentMethodsForCurrency as defaultGetPaymentMethodsForCurrency,
-  getPaymentMethodFieldConfig as defaultGetPaymentMethodFieldConfig,
-  parseTonPrivateKeyInput,
-  validatePaymentDetailInput as defaultValidatePaymentDetailInput,
-  getUnigoxWalletConnectionPrompt,
-} from "./unigox-client.ts";
+import { PartnerApiClient } from "./partner-api-client.ts";
+import { loadPartnerApiConfigFromEnv } from "./partner-api-config.ts";
+import { PartnerExecutionClient } from "./partner-execution-client.ts";
+import { createPaymentCatalogue, validatePaymentDetailInput as defaultValidatePaymentDetailInput } from "./payment-catalogue.ts";
 import type {
-  AgenticPaymentsSettings,
   CurrencyPaymentData,
-  DepositFlowSelection,
-  InitiatorTradeSummary,
-  KycVerificationData,
-  NetworkFieldConfig,
-  PartnerPaymentDetailsDiffData,
-  PaymentDetail,
+  PaymentCatalogue,
+  PaymentFieldConfig,
   PaymentFieldValidationResult,
   PaymentMethodInfo,
   PaymentNetworkInfo,
-  PreflightQuote,
   ResolvedPaymentMethodFieldConfig,
-  SupportedDepositAssetOption,
-  SupportedDepositChainOption,
-  TonWalletVersion,
+} from "./payment-catalogue.ts";
+import { TransferExecutionError } from "./transfer-execution.ts";
+import type {
+  AgenticPaymentsSettings,
+  InitiatorTradeSummary,
+  KycVerificationData,
+  PartnerPaymentDetailsDiffData,
+  PaymentDetail,
+  PreflightQuote,
+  SettlementTrade,
   TradeRequest,
-  UnigoxClientConfig,
-  UserProfile,
+  TransferExecutionClient,
   WalletBalance,
   WalletBalanceAsset,
-} from "./unigox-client.ts";
+} from "./transfer-execution.ts";
 import {
+  DEFAULT_POLL_INTERVAL_MS,
   createInitialSettlementState,
   noteDeferredPlaceholder,
   noteReceiptNotReceived,
@@ -51,7 +44,6 @@ import type {
   SettlementMonitorOptions,
   SettlementPhase,
   SettlementSnapshot,
-  SettlementTrade,
 } from "./settlement-monitor.ts";
 import {
   DEFAULT_CONTACTS_FILE,
@@ -66,32 +58,19 @@ import {
 } from "./contact-store.ts";
 import type { ContactMatch, ContactRecord, ContactResolution, ContactStoreData, StoredPaymentMethod } from "./contact-store.ts";
 
+export type { TransferExecutionClient } from "./transfer-execution.ts";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_SETTINGS_FILE = path.join(SKILL_DIR, "settings.json");
 
-type AuthChoice = "evm" | "ton" | "email" | "generated_evm" | "generated_ton";
-type SecretKind = "evm_login_key" | "ton_private_key" | "ton_mnemonic";
-type TopUpMethod = "internal_username" | "external_deposit";
-type WalletExportType = "evm" | "ton";
+/** What the person asked for: send money now, or only save a recipient for later. */
+export type TransferGoal = "transfer" | "save_contact_only";
 
-export type TransferGoal = "transfer" | "save_contact_only" | "sign_in_only";
+/** Where the conversation is waiting. Persisted with the session between turns. */
 export type TransferStage =
   | "resolving"
-  | "awaiting_auth_profile_choice"
-  | "awaiting_auth_choice"
-  | "awaiting_email_address"
-  | "awaiting_email_otp"
-  | "awaiting_wallet_setup_choice"
-  | "awaiting_evm_wallet_signin"
-  | "awaiting_evm_login_key"
-  | "awaiting_ton_address"
-  | "awaiting_ton_address_confirmation"
-  | "awaiting_ton_auth_method"
-  | "awaiting_ton_private_key"
-  | "awaiting_ton_mnemonic"
-  | "awaiting_tonconnect_completion"
-  | "awaiting_secret_cleanup_confirmation"
+  | "awaiting_setup"
   | "awaiting_recipient_mode"
   | "awaiting_recipient_name"
   | "awaiting_saved_recipient_confirmation"
@@ -105,9 +84,6 @@ export type TransferStage =
   | "awaiting_kyc_country"
   | "awaiting_kyc_completion"
   | "awaiting_confirmation"
-  | "awaiting_topup_method"
-  | "awaiting_external_deposit_asset"
-  | "awaiting_external_deposit_chain"
   | "awaiting_balance_resolution"
   | "awaiting_match_status"
   | "awaiting_new_price_confirmation"
@@ -139,13 +115,11 @@ export interface TransferFlowEvent {
     | "trade_price_change_confirmed"
     | "trade_price_change_cancelled"
     | "escrow_funding_submitted"
+    | "escrow_refund_authorized"
     | "trade_pending"
-    | "browser_login_handoff"
     | "blocked_missing_auth"
     | "blocked_insufficient_balance"
     | "blocked_no_vendor_match"
-    | "secret_message_deleted"
-    | "secret_cleanup_required"
     | "balance_checked"
     | "settlement_monitor_started"
     | "settlement_status_changed"
@@ -156,186 +130,72 @@ export interface TransferFlowEvent {
     | "receipt_not_received"
     | "settlement_placeholder_deferred"
     | "settlement_completed"
-    | "settlement_refunded_or_cancelled"
-    | "wallet_exported";
+    | "settlement_refunded_or_cancelled";
   message: string;
   data?: Record<string, unknown>;
 }
 
-export interface LoginWalletExportRequest {
-  walletType: WalletExportType;
-  origin: "generated_evm" | "generated_ton";
-  privateKey?: string;
-  mnemonic?: string;
-  address?: string;
-  walletVersion?: TonWalletVersion;
-  username?: string;
-}
-
-export interface LoginWalletExportResult {
-  walletType: WalletExportType;
-  origin: "generated_evm" | "generated_ton";
-  filePath: string;
-  address?: string;
-  walletVersion?: TonWalletVersion;
-  includesMnemonic?: boolean;
-}
-
-export interface TransferExecutionClient {
-  getProfile?(): Promise<Pick<UserProfile, "username"> | UserProfile>;
-  getWalletBalance(): Promise<WalletBalance>;
-  getKycVerificationStatus?(): Promise<KycVerificationData>;
-  initializeKycVerification?(params: { fullName: string; country: string }): Promise<KycVerificationData>;
-  requestEmailOTP?(): Promise<void>;
-  verifyEmailOTP?(code: string): Promise<string>;
-  generateAndLinkWallet?(): Promise<{ address: string; privateKey: string }>;
-  generateAndLinkTonWallet?(): Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic?: string }>;
-  listPaymentDetails?(): Promise<PaymentDetail[]>;
-  listInitiatorTrades?(filter?: "action_required" | "waiting_other_party" | "history"): Promise<InitiatorTradeSummary[]>;
-  ensurePaymentDetail(params: {
-    paymentMethodId: number;
-    paymentNetworkId: number;
-    fiatCurrencyCode: string;
-    details: Record<string, string>;
-  }): Promise<PaymentDetail>;
-  getPreflightQuote?(params: {
-    tradeType: "BUY" | "SELL";
-    cryptoCurrencyCode?: string;
-    fiatAmount: number;
-    paymentDetailsId: number;
-    tradePartner?: "licensed" | "p2p" | "all";
-  }): Promise<PreflightQuote | undefined>;
-  createTradeRequest(params: {
-    tradeType: "BUY" | "SELL";
-    cryptoCurrencyCode?: string;
-    fiatCurrencyCode: string;
-    fiatAmount: number;
-    cryptoAmount: number;
-    paymentDetailsId: number;
-    paymentMethodId: number;
-    paymentNetworkId: number;
-    preferredVendor?: string;
-    tradePartner?: "licensed" | "p2p" | "all";
-  }): Promise<TradeRequest>;
-  waitForTradeMatch(tradeRequestId: number, timeoutMs?: number): Promise<TradeRequest>;
-  fundTradeEscrow?(tokenCode: "USDC" | "USDT", amount: string, escrowAddress: string): Promise<{ txId: number; txHash: string }>;
-  getTradeRequest?(tradeRequestId: number): Promise<TradeRequest>;
-  getTrade?(tradeId: number): Promise<SettlementTrade | undefined>;
-  getPartnerPaymentDetailsDiff?(tradeId: number): Promise<PartnerPaymentDetailsDiffData>;
-  createOrUpdatePartnerPaymentDetails?(params: {
-    internalDetailsId: number;
-    partner: string;
-    details: Record<string, string>;
-  }): Promise<{ details?: Record<string, string> }>;
-  revalidateTradePaymentDetails?(tradeId: number): Promise<{ trade?: SettlementTrade | undefined } | undefined>;
-  confirmFiatReceived?(tradeId: number): Promise<SettlementTrade | undefined>;
-  confirmTradeRequestPrice?(tradeRequestId: number): Promise<TradeRequest>;
-  refuseTradeRequestPrice?(tradeRequestId: number): Promise<TradeRequest>;
-  getSupportedDepositOptions?(): Promise<SupportedDepositAssetOption[]>;
-  describeDepositSelection?(selection: DepositFlowSelection): Promise<SupportedDepositChainOption & { depositAddress: string }>;
-}
-
+/**
+ * Collaborators and timings of one flow run. Created by the turn runner, the MCP server or a test;
+ * consumed by `startTransferFlow` and `advanceTransferFlow`. Every field is optional: an omitted
+ * collaborator is built from the environment, an omitted timing uses the flow's default.
+ */
 export interface TransferFlowDeps {
+  /** Contacts file to read and write. Defaults to the skill's `contacts.json`. */
   contactsFilePath?: string;
+  /** Settings file to read. Defaults to the skill's `settings.json`. */
   settingsFilePath?: string;
+  /** How long to wait for a provider to accept a placed transfer, in milliseconds. */
   waitForMatchTimeoutMs?: number;
+  /** How long one turn keeps polling settlement, in milliseconds. */
   waitForSettlementTimeoutMs?: number;
+  /** How long to keep polling after funding escrow before handing back to the person, in milliseconds. */
   receiptConfirmationHandoffTimeoutMs?: number;
+  /** Pause between settlement and match reads, in milliseconds. */
   settlementPollIntervalMs?: number;
+  /** Time before a receipt-confirmation reminder is due, in milliseconds. */
   receiptReminderMs?: number;
+  /** Time before a receipt confirmation counts as overdue, in milliseconds. */
   receiptTimeoutMs?: number;
+  /** Pause between reads while waiting for a KYC link, in milliseconds. */
   kycVerificationPollIntervalMs?: number;
+  /** How long to wait for a KYC link, in milliseconds. */
   kycVerificationPollTimeoutMs?: number;
+  /** Clock. Defaults to the system clock. */
   now?: () => Date;
+  /** Timer. Defaults to a real one. */
   sleep?: (ms: number) => Promise<void>;
+  /** Whether stored credentials are usable. Defaults to what the environment holds. */
   authState?: AuthState;
+  /** Backend to use for this run. Takes precedence over `clientFactory` and the environment. */
   client?: TransferExecutionClient;
+  /** Builds the backend on first use. Takes precedence over the environment. */
   clientFactory?: () => Promise<TransferExecutionClient>;
-  clientConfig?: UnigoxClientConfig;
-  verifyEvmLoginKey?: (loginKey: string) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string } | void>;
-  verifyTonLogin?: (params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string }) => Promise<{ success?: boolean; ok?: boolean; message?: string; username?: string; tonWalletVersion?: TonWalletVersion } | void>;
-  startTonConnectLogin?: () => Promise<{ universalLink: string; manifestUrl?: string; expiresAt?: string; payloadToken: string }>;
-  checkTonConnectLogin?: () => Promise<{
-    status: "pending" | "connected" | "error";
-    walletAddress?: string;
-    network?: string;
-    publicKey?: string;
-    proof?: {
-      timestamp: number;
-      domain: { lengthBytes: number; value: string };
-      signature: string;
-      payload: string;
-      stateInit?: string;
-    };
-    message?: string;
-  }>;
-  clearTonConnectLogin?: () => Promise<void> | void;
-  approveTonConnectLink?: (universalLink: string) => Promise<{
-    bridgeUrl: string;
-    walletAddress: string;
-    manifestUrl: string;
-    tonProofPayload?: string;
-  }>;
-  decodeTonConnectQr?: (imagePath: string) => Promise<string | undefined>;
-  approveEvmWalletConnectLink?: (uri: string) => Promise<{
-    sessionTopic?: string;
-    pairingTopic?: string;
-    requestedChains: string[];
-    approvedChains: string[];
-    requestedMethods: string[];
-    handledMethods: string[];
-    requestCount: number;
-  }>;
-  decodeEvmWalletConnectQr?: (imagePath: string) => Promise<string | undefined>;
-  generateDedicatedEvmWallet?: () => Promise<{ address: string; privateKey: string }>;
-  generateDedicatedTonWallet?: () => Promise<{ address: string; privateKey: string; walletVersion: TonWalletVersion; mnemonic?: string }>;
-  persistEmailAddress?: (emailAddress: string) => Promise<void> | void;
-  persistEvmLoginKey?: (loginKey: string) => Promise<void> | void;
-  persistTonPrivateKey?: (tonPrivateKey: string) => Promise<void> | void;
-  persistTonMnemonic?: (mnemonic: string) => Promise<void> | void;
-  persistTonAddress?: (tonAddress: string) => Promise<void> | void;
-  persistTonWalletVersion?: (tonWalletVersion: TonWalletVersion) => Promise<void> | void;
-  persistAuthChoice?: (choice: AuthChoice) => Promise<void> | void;
-  exportLoginWalletFile?: (wallet: LoginWalletExportRequest) => Promise<LoginWalletExportResult> | LoginWalletExportResult;
-  handleSensitiveInput?: (params: {
-    kind: SecretKind;
-    secret: string;
-    turn: TransferTurn;
-    session: TransferSession;
-  }) => Promise<{ deleted?: boolean; note?: string } | void> | { deleted?: boolean; note?: string } | void;
-  getPaymentMethodsForCurrency?: (currency: string) => Promise<CurrencyPaymentData>;
-  getPaymentMethodFieldConfig?: (params: {
-    currency: string;
-    methodSlug?: string;
-    methodId?: number;
-    networkSlug?: string;
-    networkId?: number;
-  }) => Promise<ResolvedPaymentMethodFieldConfig>;
-  validatePaymentDetailInput?: (
-    details: Record<string, string>,
-    fields: NetworkFieldConfig[],
-    options?: { countryCode?: string; formatId?: string }
-  ) => PaymentFieldValidationResult;
+  /** Lists payout methods for a currency; `searchTerms` are words that may name an institution. */
+  getPaymentMethodsForCurrency?: (currency: string, searchTerms?: string[]) => Promise<CurrencyPaymentData>;
+  /** Resolves the fields to collect for one institution on one rail. */
+  getPaymentMethodFieldConfig?: (params: { currency: string; methodSlug: string; networkSlug: string }) => Promise<ResolvedPaymentMethodFieldConfig>;
+  /** Validates collected payout fields against a rail's rules. */
+  validatePaymentDetailInput?: (details: Record<string, string>, fields: PaymentFieldConfig[]) => PaymentFieldValidationResult;
 }
 
+/**
+ * Whether this installation can act without asking for credentials.
+ * Produced by `detectAuthState` from the environment (or supplied by a test) and read once per
+ * session by `advanceTransferFlow`.
+ */
 export interface AuthState {
+  /** True when the Partner API key, wallet key, node URL and sender email are all configured. */
   hasReplayableAuth: boolean;
-  authMode?: "evm" | "ton" | "email";
-  choice?: AuthChoice;
-  availableChoices?: AuthChoice[];
-  emailFallbackAvailable: boolean;
+  /** Names of the environment settings still missing. Empty or absent when none are. */
+  missingSettings?: string[];
+  /** Name to address the sender by, when already known. */
   username?: string;
 }
 
 interface ResolvedAuthState extends AuthState {
   balanceUsd?: number;
   walletBalance?: WalletBalance;
-}
-
-export interface SecretSubmissionState {
-  kind: SecretKind;
-  value: string;
-  note?: string;
 }
 
 export interface AssetCoverageState {
@@ -352,7 +212,7 @@ export interface ExecutionPreflightState {
   amount: number;
   currency: string;
   checkedAt: string;
-  paymentDetailsId?: number;
+  paymentDetailsId?: string;
   quote?: PreflightQuote;
   walletBalanceAssets?: WalletBalanceAsset[];
   assetCoverage?: AssetCoverageState[];
@@ -377,12 +237,6 @@ export interface DetailCollectionState {
   lastError?: string;
 }
 
-export interface TopUpState {
-  method?: TopUpMethod;
-  assetCode?: SupportedDepositAssetOption["assetCode"];
-  chainId?: number;
-}
-
 interface PartnerFieldToComplete {
   fieldKey: string;
   label: string;
@@ -395,9 +249,9 @@ interface PartnerFieldToComplete {
 }
 
 interface PartnerDetailCollectionState {
-  tradeId: number;
-  tradeRequestId: number;
-  paymentDetailsId: number;
+  tradeId: string;
+  tradeRequestId: string;
+  paymentDetailsId: string;
   partner: string;
   index: number;
   fields: PartnerFieldToComplete[];
@@ -405,7 +259,7 @@ interface PartnerDetailCollectionState {
 }
 
 interface OutstandingTradeReminderState {
-  tradeId: number;
+  tradeId: string;
   phase: SettlementPhase;
   recipient: string;
   fiatAmount?: number;
@@ -436,7 +290,6 @@ export interface TransferSession {
   currency?: string;
   amount?: number;
   payment?: SelectedPaymentMethod;
-  topUp?: TopUpState;
   details: Record<string, string>;
   detailCollection: DetailCollectionState;
   saveContactDecision?: "pending" | "yes" | "no";
@@ -446,28 +299,11 @@ export interface TransferSession {
   auth: {
     checked: boolean;
     available: boolean;
-    mode?: "evm" | "ton" | "email";
-    choice?: AuthChoice;
-    availableChoices?: AuthChoice[];
-    emailAddress?: string;
-    emailAuthToken?: string;
-    emailAuthTokenExpiresAt?: string;
-    tonAddress?: string;
-    tonAddressDisplay?: string;
-    tonWalletVersion?: TonWalletVersion;
-    sessionToken?: string;
-    sessionTokenExpiresAt?: string;
-    tonConnect?: {
-      universalLink?: string;
-      manifestUrl?: string;
-      expiresAt?: string;
-      payloadToken?: string;
-    };
+    missingSettings?: string[];
     username?: string;
     kycStatus?: string;
     kycCountryCode?: string;
     kycFullName?: string;
-    totalTradedVolumeUsd?: number;
     kycVerificationUrl?: string;
     kycVerificationSecondsLeft?: number;
     balanceUsd?: number;
@@ -476,14 +312,18 @@ export interface TransferSession {
     outstandingTradeReminderShown?: boolean;
     outstandingTradeReminder?: string;
     outstandingTrade?: OutstandingTradeReminderState;
-    pendingSecret?: SecretSubmissionState;
   };
   execution: {
     confirmed: boolean;
     preflight?: ExecutionPreflightState;
-    paymentDetailsId?: number;
-    tradeRequestId?: number;
-    tradeId?: number;
+    paymentDetailsId?: string;
+    /**
+     * Largest total crypto cost the person has approved for this transfer, in whole units. Set only
+     * when they confirm a price they were shown; absent means no price has been approved yet.
+     */
+    approvedCryptoAmount?: number;
+    tradeRequestId?: string;
+    tradeId?: string;
     tradeRequestStatus?: string;
     tradeStatus?: string;
     pendingPriceChange?: {
@@ -518,28 +358,16 @@ interface ParsedHints {
   recipient?: string;
   currency?: string;
   amount?: number;
-  signInIntent?: boolean;
   savedOrNew?: "saved" | "new";
-  authChoice?: AuthChoice;
   changeCurrency?: string;
   changeAmount?: number;
   changeRecipient?: string;
   changeMethod?: boolean;
-  switchAuth?: boolean;
   goBack?: boolean;
   checkStatus?: boolean;
   cancel?: boolean;
   saveContactDecision?: "yes" | "no";
   confirm?: boolean;
-}
-
-interface WalletExportIntent {
-  walletType?: WalletExportType;
-}
-
-interface StoredGeneratedWalletExport extends LoginWalletExportRequest {
-  walletType: WalletExportType;
-  origin: "generated_evm" | "generated_ton";
 }
 
 const CURRENCY_SYNONYMS: Record<string, string> = {
@@ -571,7 +399,6 @@ const AFFIRMATIVE_RE = /^(yes|y|save it|save|update it)$/i;
 const CONFIRM_RE = /^(confirm|confirmed|proceed|go ahead|send it|do it|retry|continue)$/i;
 const NO_RE = /^(no|n|don'?t|not now|skip save)$/i;
 const SKIP_RE = /^(skip|none|leave it blank|not needed)$/i;
-const AUTH_STAGE_GUIDANCE_RE = /\b(agentic payments|unigox|sign(?:\s+me)? in|log(?:\s+me)? in|signin|login|browser login|walletconnect|wallet connect|tonconnect|ton connect|what next|what do i do|help|let'?s start|start again|start over|continue)\b/i;
 const GENERIC_SELECTION_TOKENS = new Set([
   "account",
   "accounts",
@@ -614,17 +441,8 @@ const GENERIC_SELECTION_TOKENS = new Set([
   "wallets",
   "wrong",
 ]);
-const SIGNIN_READY_RE = /^(yes|y|done|ready|already signed in|already logged in|signed in|logged in|i signed in|i have signed in|i already signed in|i logged in|i have logged in)$/i;
-const NOT_READY_RE = /^(no|n|not yet|haven'?t|have not|didn'?t|did not)$/i;
-const DELETED_RE = /^(deleted|i deleted it|deleted it|it'?s deleted|removed it|done deleting)$/i;
-const MAX_AMOUNT_WITHOUT_KYC = 100;
 const KYC_VERIFIED_STATUSES = new Set(["VERIFIED", "APPROVED", "verified", "approved"]);
 const KYC_ACTIVE_STATUSES = new Set(["initial", "pending", "in_progress"]);
-const KYC_AUTH_FAILURE_KEYS = new Set([
-  "invalid_auth_token",
-  "auth_token_required",
-  "verification_service_auth_failed",
-]);
 const DEFAULT_KYC_VERIFICATION_POLL_INTERVAL_MS = 1_000;
 // The frontend keeps polling /kyc until the verification URL appears.
 // In chat we still need a ceiling, but 15s was too short and caused Cinnamon
@@ -838,337 +656,6 @@ function parseKycIdentityInput(text: string | undefined): { fullName?: string; c
   };
 }
 
-function parseEmailAddress(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match?.[0]?.trim();
-}
-
-function parseOtpCode(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  const inline = value.match(/\b(\d{4,8})\b/);
-  return inline?.[1];
-}
-
-function parseTonAddressInput(text: string | undefined): { raw: string; display: string } | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-
-  const candidates = value.match(/(?:[A-Za-z0-9_-]{48,80}|[A-Za-z0-9_-]?:[0-9a-fA-F]{64})/g) || [];
-  for (const candidate of candidates) {
-    try {
-      return {
-        raw: Address.parse(candidate).toRawString().toLowerCase(),
-        display: candidate,
-      };
-    } catch {
-      // keep scanning
-    }
-  }
-
-  return undefined;
-}
-
-function parseTonAddress(text: string | undefined): string | undefined {
-  return parseTonAddressInput(text)?.raw;
-}
-
-function parseTonConnectUniversalLinkInput(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  const match = value.match(/tc:\/\/\?[^\s]+/i);
-  return match?.[0];
-}
-
-function parseWalletConnectUriInput(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  const match = value.match(/wc:[^\s]+/i);
-  return match?.[0];
-}
-
-function parseTonMnemonic(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-
-  const words = value
-    .split(/\s+/)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  if (words.length < 12 || words.length > 24) return undefined;
-  if (!words.every((entry) => /^[a-z]+$/i.test(entry))) return undefined;
-  return words.join(" ");
-}
-
-function chooseTonCredentialMethod(text: string | undefined): "mnemonic" | "private_key" | "tonconnect" | undefined {
-  const value = cleanText(text)?.toLowerCase();
-  if (!value) return undefined;
-  if (/\b(tonconnect|ton connect|qr|qr code|deep link|wallet connect)\b/.test(value)) return "tonconnect";
-  if (/\b(mnemonic|seed phrase|recovery phrase|12 words|24 words)\b/.test(value)) return "mnemonic";
-  if (/\b(private key|secret key|ton key|seed32|secret64)\b/.test(value)) return "private_key";
-  return undefined;
-}
-
-function parseTonPrivateKey(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  return parseTonPrivateKeyInput(value)?.normalized;
-}
-
-function parseEvmPrivateKey(text: string | undefined): string | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) return undefined;
-
-  const match = value.match(/\b(?:0x)?[0-9a-fA-F]{64}\b/);
-  if (!match) return undefined;
-
-  const normalized = match[0].startsWith("0x") ? match[0] : `0x${match[0]}`;
-  try {
-    new Wallet(normalized);
-    return normalized;
-  } catch {
-    return undefined;
-  }
-}
-
-function looksLikeAttemptedEvmPrivateKeyInput(text: string | undefined): boolean {
-  const value = cleanText(text);
-  if (!value) return false;
-  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) return false;
-  return /\b(?:0x)?[0-9a-fA-F]{16,64}\b/.test(value);
-}
-
-function looksLikeGenericLoginRequest(text: string | undefined): boolean {
-  const value = cleanText(text);
-  if (!value) return false;
-  return /\b(sign(?:\s+me)? in|log(?:\s+me)? in|signin|login|authenticate|auth)\b/i.test(value);
-}
-
-function looksLikeEvmAddress(text: string | undefined): boolean {
-  const value = cleanText(text);
-  if (!value) return false;
-  return /\b(?:0x)?[0-9a-fA-F]{40}\b/.test(value);
-}
-
-function authChoiceToMode(choice: AuthChoice | undefined): "evm" | "ton" | "email" | undefined {
-  if (choice === "evm" || choice === "generated_evm") return "evm";
-  if (choice === "ton" || choice === "generated_ton") return "ton";
-  if (choice === "email") return "email";
-  return undefined;
-}
-
-function getLegacyStoredAuthChoice(): AuthChoice | undefined {
-  return normalizeStoredAuthChoice(loadEnvValue("UNIGOX_LOGIN_WALLET_ORIGIN"));
-}
-
-function getStoredAuthChoiceForMode(mode: "evm" | "ton"): AuthChoice | undefined {
-  const modeSpecificKey = mode === "evm"
-    ? "UNIGOX_EVM_LOGIN_WALLET_ORIGIN"
-    : "UNIGOX_TON_LOGIN_WALLET_ORIGIN";
-  const modeSpecificChoice = normalizeStoredAuthChoice(loadEnvValue(modeSpecificKey));
-  if (modeSpecificChoice && authChoiceToMode(modeSpecificChoice) === mode) {
-    return modeSpecificChoice;
-  }
-
-  const legacyChoice = getLegacyStoredAuthChoice();
-  return legacyChoice && authChoiceToMode(legacyChoice) === mode
-    ? legacyChoice
-    : undefined;
-}
-
-function buildStoredAuthChoices(): AuthChoice[] {
-  const evmStoredChoice = getStoredAuthChoiceForMode("evm");
-  const tonStoredChoice = getStoredAuthChoiceForMode("ton");
-  const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
-  const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
-  const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
-  const choices: AuthChoice[] = [];
-
-  if (evmLoginPrivateKey) {
-    choices.push(evmStoredChoice === "generated_evm" ? "generated_evm" : "evm");
-  }
-  if (tonPrivateKey || tonMnemonic) {
-    choices.push(tonStoredChoice === "generated_ton" ? "generated_ton" : "ton");
-  }
-
-  return choices;
-}
-
-function hasMultipleStoredWalletChoices(choices: AuthChoice[] | undefined): boolean {
-  return Boolean(choices && choices.length > 1);
-}
-
-function resolveStoredChoiceForMode(
-  mode: "evm" | "ton" | "email" | undefined,
-  availableChoices: AuthChoice[] | undefined,
-): AuthChoice | undefined {
-  if (!mode || !availableChoices?.length) return undefined;
-  return availableChoices.find((choice) => authChoiceToMode(choice) === mode);
-}
-
-function buildStoredAuthProfileChoiceOptions(choices: AuthChoice[] | undefined): string[] {
-  const options: string[] = [];
-  if (choices?.some((choice) => authChoiceToMode(choice) === "evm")) {
-    options.push("Use saved EVM account");
-  }
-  if (choices?.some((choice) => authChoiceToMode(choice) === "ton")) {
-    options.push("Use saved TON account");
-  }
-  return options;
-}
-
-function buildStoredAuthProfileChoicePrompt(choices: AuthChoice[] | undefined): string {
-  const labels: string[] = [];
-  if (choices?.some((choice) => authChoiceToMode(choice) === "evm")) {
-    labels.push("a saved EVM account");
-  }
-  if (choices?.some((choice) => authChoiceToMode(choice) === "ton")) {
-    labels.push("a saved TON account");
-  }
-  const inventory = labels.length > 1
-    ? `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`
-    : labels[0] || "more than one saved account";
-
-  return `I found ${inventory} on this machine. Which one should I use for this UNIGOX flow?`;
-}
-
-function isAuthBlockedStage(stage: TransferStage): boolean {
-  return [
-    "awaiting_auth_profile_choice",
-    "awaiting_auth_choice",
-    "awaiting_email_address",
-    "awaiting_email_otp",
-    "awaiting_wallet_setup_choice",
-    "awaiting_evm_wallet_signin",
-    "awaiting_evm_login_key",
-    "awaiting_ton_address",
-    "awaiting_ton_address_confirmation",
-    "awaiting_ton_auth_method",
-    "awaiting_ton_private_key",
-    "awaiting_ton_mnemonic",
-    "awaiting_tonconnect_completion",
-    "awaiting_secret_cleanup_confirmation",
-  ].includes(stage);
-}
-
-function applySelectedStoredAuthChoice(session: TransferSession, choice: AuthChoice | undefined): void {
-  if (!choice) return;
-  const switchedChoice = session.auth.choice !== choice;
-  session.auth.choice = choice;
-  session.auth.mode = authChoiceToMode(choice);
-  session.auth.startupSnapshotShown = false;
-  session.auth.outstandingTradeReminderShown = false;
-  session.auth.outstandingTradeReminder = undefined;
-  session.auth.outstandingTrade = undefined;
-  if (switchedChoice) {
-    session.auth.pendingSecret = undefined;
-    session.auth.tonConnect = undefined;
-    if (isAuthBlockedStage(session.stage)) {
-      session.stage = "resolving";
-      session.status = "active";
-    }
-  }
-}
-
-function resolveRequestedStoredAuthMode(
-  hints: ParsedHints,
-  explicitWalletConnectLink: boolean,
-  explicitTonConnectLink: boolean,
-): "evm" | "ton" | undefined {
-  if (explicitWalletConnectLink) return "evm";
-  if (explicitTonConnectLink) return "ton";
-  const hintedMode = authChoiceToMode(hints.authChoice);
-  return hintedMode === "evm" || hintedMode === "ton" ? hintedMode : undefined;
-}
-
-const AUTH_CHOICE_OPTIONS = [
-  "EVM wallet connection",
-  "TON wallet connection",
-  "Create dedicated EVM wallet",
-  "Create dedicated TON wallet",
-  "email OTP",
-] as const;
-
-const POST_EMAIL_WALLET_SETUP_OPTIONS = [
-  "Create dedicated EVM wallet",
-  "Create dedicated TON wallet",
-  "Stay on email OTP for now",
-] as const;
-
-function parseAuthChoice(value: string): AuthChoice | undefined {
-  const normalized = cleanText(value)?.toLowerCase();
-  if (!normalized) return undefined;
-
-  if (/^(evm|evm wallet|evm wallet connection|wallet connection evm)$/.test(normalized)) {
-    return "evm";
-  }
-  if (/^(ton|ton wallet|ton wallet connection|wallet connection ton)$/.test(normalized)) {
-    return "ton";
-  }
-  if (/^(create|generate|make)\s+(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?evm wallet(?: for me)?$/.test(normalized)) {
-    return "generated_evm";
-  }
-  if (/^(create|generate|make)\s+(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?ton wallet(?: for me)?$/.test(normalized)) {
-    return "generated_ton";
-  }
-  if (/^(email|otp|email otp)$/.test(normalized)) {
-    return "email";
-  }
-
-  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:evm|evm wallet(?: connection)?)\b/.test(normalized)) {
-    return "evm";
-  }
-  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:ton|ton wallet(?: connection)?)\b/.test(normalized)) {
-    return "ton";
-  }
-  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?evm wallet\b/.test(normalized)) {
-    return "generated_evm";
-  }
-  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do|create|generate|make)\s+(?:me\s+)?(?:a\s+)?(?:dedicated\s+|new\s+|local\s+)?ton wallet\b/.test(normalized)) {
-    return "generated_ton";
-  }
-  if (/\b(?:let'?s do|lets do|use|choose|pick|go with|do)\s+(?:the\s+)?(?:email|email otp|otp)\b/.test(normalized)) {
-    return "email";
-  }
-  if (/\b(?:stay|keep using|use)\s+(?:on\s+)?email(?: otp)?(?: for now)?\b/.test(normalized)) {
-    return "email";
-  }
-  if (/\b(?:use|pick|choose|go with)\s+(?:the\s+)?saved\s+evm\s+account\b/.test(normalized)) {
-    return "evm";
-  }
-  if (/\b(?:use|pick|choose|go with)\s+(?:the\s+)?saved\s+ton\s+account\b/.test(normalized)) {
-    return "ton";
-  }
-
-  return undefined;
-}
-
-function parseWalletExportIntent(text: string | undefined): WalletExportIntent | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-
-  const normalized = value.toLowerCase();
-  const mentionsExport = /\b(export|backup|download|write|save|send|give)\b/.test(normalized);
-  const mentionsWalletMaterial = /\b(wallet|login wallet|wallet file|key file|private key|backup file|portable backup)\b/.test(normalized);
-  const mentionsElsewhereUse = /\b(continue using this wallet elsewhere|use this wallet elsewhere|use elsewhere)\b/.test(normalized);
-  const mentionsCreatedWallet = /\b(created|made|generated)\b.*\b(wallet)\b|\b(wallet)\b.*\b(created|made|generated)\b/.test(normalized);
-
-  if (!((mentionsExport && (mentionsWalletMaterial || mentionsCreatedWallet)) || mentionsElsewhereUse)) {
-    return undefined;
-  }
-
-  const walletType = /\bton\b/.test(normalized)
-    ? "ton"
-    : /\b(evm|ethereum|eth)\b/.test(normalized)
-      ? "evm"
-      : undefined;
-
-  return { walletType };
-}
-
 const DETAIL_LABELS: Record<string, string> = {
   full_name: "Full name",
   iban: "IBAN",
@@ -1305,12 +792,7 @@ function hasSavedRecipientLookupIntent(text: string | undefined): boolean {
 function parseIntentHints(text: string | undefined): ParsedHints {
   const value = cleanText(text);
   if (!value) return {};
-  if (parseTonConnectUniversalLinkInput(value) || parseWalletConnectUriInput(value)) {
-    return {};
-  }
   const lower = value.toLowerCase();
-  const unigoxSignInIntent = /(?:\b(?:sign|log)\s+(?:me\s+)?in\b|\bsignin\b|\blogin\b|\bauthenticate\b|\bauth\b)/.test(lower)
-    && /\bunigox\b/.test(lower);
   const amountCurrency = parseAmountAndCurrency(value);
 
   const hints: ParsedHints = {
@@ -1323,10 +805,6 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   }
   if (/make a transfer|send money|send|transfer|pay /.test(lower) && !hints.goal) {
     hints.goal = "transfer";
-  }
-  if (unigoxSignInIntent) {
-    hints.signInIntent = true;
-    hints.goal = hints.goal || "sign_in_only";
   }
   if (hasSavedRecipientLookupIntent(value)) {
     hints.savedOrNew = "saved";
@@ -1361,9 +839,6 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/\b(change (?:payment )?method|different (?:payment )?method|switch (?:payment )?method|try (?:a )?different (?:way|method|option)|another (?:payment )?method|different provider|change provider)\b/.test(lower)) {
     hints.changeMethod = true;
   }
-  if (/\b(switch (?:auth|wallet|login)|different (?:auth|wallet|login)|change (?:auth|wallet|login)|use (?:a )?different (?:wallet|auth|login)|try (?:a )?different (?:wallet|auth))\b/.test(lower)) {
-    hints.switchAuth = true;
-  }
   const changeRecipientMatch = value.match(/\b(?:change|switch|different)\s+(?:recipient|person|payee)\s*(?:to\s+)?(.+)?/i);
   if (changeRecipientMatch) {
     hints.changeRecipient = changeRecipientMatch[1]?.trim() || "";
@@ -1371,7 +846,6 @@ function parseIntentHints(text: string | undefined): ParsedHints {
   if (/\b(send to someone else|pay someone else|different recipient|different person)\b/.test(lower)) {
     hints.changeRecipient = hints.changeRecipient ?? "";
   }
-  hints.authChoice = parseAuthChoice(value);
   if (CONFIRM_RE.test(value)) {
     hints.confirm = true;
   }
@@ -1417,13 +891,8 @@ function withUpdate(session: TransferSession, deps: TransferFlowDeps): TransferS
 
 function buildStartupAuthSnapshot(session: TransferSession): string | undefined {
   const parts: string[] = [];
-  const formattedUsername = formatUsername(session.auth.username);
-  if (formattedUsername) {
-    const origin = formatAuthOrigin(session.auth.choice);
-    parts.push(origin
-      ? `You're currently signed in as ${formattedUsername} on UNIGOX (${origin}).`
-      : `You're currently signed in as ${formattedUsername} on UNIGOX.`);
-  }
+  const senderLine = buildSenderLine(session.auth.username);
+  if (senderLine) parts.push(senderLine);
   const balanceLine = buildWalletBalanceLine(session.auth.walletBalance, session.auth.balanceUsd);
   if (balanceLine) {
     parts.push(balanceLine);
@@ -1524,14 +993,9 @@ function decorateStartupReply(session: TransferSession, message: string): string
   if (!snapshot) return message;
 
   const snapshotParts: string[] = [];
-  if (!/signed in as/i.test(message)) {
-    const formattedUsername = formatUsername(session.auth.username);
-    if (formattedUsername) {
-      const origin = formatAuthOrigin(session.auth.choice);
-      snapshotParts.push(origin
-        ? `You're currently signed in as ${formattedUsername} on UNIGOX (${origin}).`
-        : `You're currently signed in as ${formattedUsername} on UNIGOX.`);
-    }
+  if (!/sending as/i.test(message)) {
+    const senderLine = buildSenderLine(session.auth.username);
+    if (senderLine) snapshotParts.push(senderLine);
   }
   if (!/Current wallet balance:/i.test(message)) {
     const balanceLine = buildWalletBalanceLine(session.auth.walletBalance, session.auth.balanceUsd);
@@ -1561,221 +1025,6 @@ function reply(session: TransferSession, message: string, options?: string[], ev
   };
 }
 
-function getEnvCandidates(): string[] {
-  if (process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP === "1") {
-    return [];
-  }
-  const configuredEnvPath = process.env.SEND_MONEY_ENV_PATH?.trim();
-  return Array.from(new Set([
-    configuredEnvPath,
-    path.join(SKILL_DIR, ".env"),
-    path.join(process.env.HOME || "", ".openclaw", ".env"),
-  ].filter((candidate): candidate is string => Boolean(candidate))));
-}
-
-function normalizeStoredAuthChoice(choice: string | undefined): AuthChoice | undefined {
-  if (!choice) return undefined;
-  return ["evm", "ton", "email", "generated_evm", "generated_ton"].includes(choice)
-    ? choice as AuthChoice
-    : undefined;
-}
-
-function loadEnvValue(key: string): string | undefined {
-  if (process.env[key]) return process.env[key];
-  for (const envPath of getEnvCandidates()) {
-    if (!envPath || !fs.existsSync(envPath)) continue;
-    const line = fs.readFileSync(envPath, "utf-8")
-      .split("\n")
-      .find((entry) => entry.startsWith(`${key}=`));
-    if (line) return line.slice(key.length + 1).trim();
-  }
-  return undefined;
-}
-
-export function detectAuthState(): AuthState {
-  const storedChoices = buildStoredAuthChoices();
-  const singleStoredChoice = storedChoices.length === 1 ? storedChoices[0] : undefined;
-  const email = loadEnvValue("UNIGOX_EMAIL");
-
-  if (hasMultipleStoredWalletChoices(storedChoices)) {
-    return {
-      hasReplayableAuth: true,
-      availableChoices: storedChoices,
-      emailFallbackAvailable: !!email,
-    };
-  }
-  if (singleStoredChoice) {
-    return {
-      hasReplayableAuth: true,
-      authMode: authChoiceToMode(singleStoredChoice),
-      choice: singleStoredChoice,
-      availableChoices: storedChoices,
-      emailFallbackAvailable: !!email,
-    };
-  }
-  return {
-    hasReplayableAuth: false,
-    choice: email ? "email" : undefined,
-    authMode: email ? "email" : undefined,
-    availableChoices: [],
-    emailFallbackAvailable: !!email,
-  };
-}
-
-function getGeneratedWalletChoice(session: TransferSession): "generated_evm" | "generated_ton" | undefined {
-  const sessionChoice = session.auth.choice;
-  if (sessionChoice === "generated_evm" || sessionChoice === "generated_ton") return sessionChoice;
-
-  const sessionMode = session.auth.mode;
-  if (sessionMode === "evm" || sessionMode === "ton") {
-    const storedChoiceForMode = getStoredAuthChoiceForMode(sessionMode);
-    if (storedChoiceForMode === "generated_evm" || storedChoiceForMode === "generated_ton") {
-      return storedChoiceForMode;
-    }
-  }
-
-  const legacyChoice = getLegacyStoredAuthChoice();
-  return legacyChoice === "generated_evm" || legacyChoice === "generated_ton"
-    ? legacyChoice
-    : undefined;
-}
-
-function resolveStoredGeneratedWalletExport(
-  session: TransferSession,
-  requestedType?: WalletExportType,
-): StoredGeneratedWalletExport | undefined {
-  const choice = requestedType === "evm"
-    ? getStoredAuthChoiceForMode("evm")
-    : requestedType === "ton"
-      ? getStoredAuthChoiceForMode("ton")
-      : getGeneratedWalletChoice(session);
-  if (!choice) return undefined;
-  if (requestedType === "evm" && choice !== "generated_evm") return undefined;
-  if (requestedType === "ton" && choice !== "generated_ton") return undefined;
-
-  if (choice === "generated_evm") {
-    const privateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
-    if (!privateKey) return undefined;
-    const address = (() => {
-      try {
-        return new Wallet(privateKey).address;
-      } catch {
-        return undefined;
-      }
-    })();
-    return {
-      walletType: "evm",
-      origin: "generated_evm",
-      privateKey,
-      address,
-      username: session.auth.username,
-    };
-  }
-
-  const privateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
-  const mnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
-  if (!privateKey && !mnemonic) return undefined;
-  return {
-    walletType: "ton",
-    origin: "generated_ton",
-    privateKey,
-    mnemonic,
-    address: loadEnvValue("UNIGOX_TON_ADDRESS") || session.auth.tonAddress,
-    walletVersion: (loadEnvValue("UNIGOX_TON_WALLET_VERSION") as TonWalletVersion | undefined) || session.auth.tonWalletVersion,
-    username: session.auth.username,
-  };
-}
-
-function resolveInitialAuthState(authState?: AuthState): ResolvedAuthState {
-  const detected = detectAuthState();
-  if (!authState) return detected;
-
-  return {
-    hasReplayableAuth: authState.hasReplayableAuth || detected.hasReplayableAuth,
-    authMode: authState.authMode || detected.authMode,
-    choice: authState.choice || detected.choice,
-    availableChoices: authState.availableChoices?.length ? authState.availableChoices : detected.availableChoices,
-    emailFallbackAvailable: authState.emailFallbackAvailable || detected.emailFallbackAvailable,
-    username: authState.username || detected.username,
-  };
-}
-
-export function loadUnigoxConfigFromEnv(preferredMode?: "evm" | "ton" | "email"): UnigoxClientConfig {
-  const frontendUrl = loadEnvValue("UNIGOX_FRONTEND_URL") || loadEnvValue("NEXT_PUBLIC_UNIGOX_FRONTEND_URL");
-  const evmLoginPrivateKey = loadEnvValue("UNIGOX_EVM_LOGIN_PRIVATE_KEY");
-  const tonPrivateKey = loadEnvValue("UNIGOX_TON_PRIVATE_KEY");
-  const tonMnemonic = loadEnvValue("UNIGOX_TON_MNEMONIC");
-  const email = loadEnvValue("UNIGOX_EMAIL");
-  const privySigningUrl = loadEnvValue("PRIVY_SIGNING_URL") || loadEnvValue("NEXT_PUBLIC_PRIVY_SIGNING_URL");
-
-  const baseExtras = {
-    ...(frontendUrl && { frontendUrl }),
-    ...(privySigningUrl && { privySigningUrl }),
-  };
-
-  if (preferredMode === "evm" && evmLoginPrivateKey) {
-    return {
-      authMode: "evm",
-      ...baseExtras,
-      evmLoginPrivateKey,
-      ...(email && { email }),
-    };
-  }
-
-  if (preferredMode === "ton" && (tonPrivateKey || tonMnemonic)) {
-    return {
-      authMode: "ton",
-      ...baseExtras,
-      ...(tonPrivateKey && { tonPrivateKey }),
-      ...(tonMnemonic && { tonMnemonic }),
-      tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
-      tonWalletVersion: loadEnvValue("UNIGOX_TON_WALLET_VERSION") as TonWalletVersion | undefined,
-      tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
-      ...(email && { email }),
-    };
-  }
-
-  if (preferredMode === "email" && email) {
-    return {
-      email,
-      authMode: "email",
-      ...baseExtras,
-    };
-  }
-
-  if (evmLoginPrivateKey) {
-    return {
-      authMode: "evm",
-      ...baseExtras,
-      evmLoginPrivateKey,
-      ...(email && { email }),
-    };
-  }
-
-  if (tonPrivateKey || tonMnemonic) {
-    return {
-      authMode: "ton",
-      ...baseExtras,
-      ...(tonPrivateKey && { tonPrivateKey }),
-      ...(tonMnemonic && { tonMnemonic }),
-      tonAddress: loadEnvValue("UNIGOX_TON_ADDRESS"),
-      tonWalletVersion: loadEnvValue("UNIGOX_TON_WALLET_VERSION") as TonWalletVersion | undefined,
-      tonNetwork: loadEnvValue("UNIGOX_TON_NETWORK") || "-239",
-      ...(email && { email }),
-    };
-  }
-
-  if (email) {
-    return {
-      email,
-      authMode: "email",
-      ...baseExtras,
-    };
-  }
-
-  throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
-}
-
 export function loadSendMoneySettings(filePath = DEFAULT_SETTINGS_FILE): AgenticPaymentsSettings {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -1788,175 +1037,62 @@ export function loadSendMoneySettings(filePath = DEFAULT_SETTINGS_FILE): Agentic
   }
 }
 
-function buildExecutionClientConfig(session: TransferSession | undefined, deps: TransferFlowDeps): UnigoxClientConfig {
-  let config: UnigoxClientConfig | undefined = deps.clientConfig;
-  if (!config) {
-    try {
-      const preferredMode = session?.auth.mode || authChoiceToMode(session?.auth.choice);
-      config = loadUnigoxConfigFromEnv(preferredMode);
-    } catch {
-      if (!session?.auth.emailAddress) throw new Error(`UNIGOX auth config not found. ${getUnigoxWalletConnectionPrompt()}`);
-      config = {
-        authMode: "email",
-        email: session.auth.emailAddress,
-      };
-    }
-  }
-
-  const transientSessionToken = session?.auth.sessionToken || session?.auth.emailAuthToken;
-  const sessionTokenExpiresAt = session?.auth.sessionTokenExpiresAt
-    ? Date.parse(session.auth.sessionTokenExpiresAt)
-    : session?.auth.emailAuthTokenExpiresAt
-      ? Date.parse(session.auth.emailAuthTokenExpiresAt)
-    : undefined;
-
-  if (session?.auth.mode === "email" || transientSessionToken) {
-    return {
-      ...config,
-      authMode: session?.auth.mode || config.authMode || "email",
-      email: session.auth.emailAddress || config.email || getStoredEmailAddress(deps),
-      ...(transientSessionToken ? { sessionToken: transientSessionToken } : {}),
-      ...(sessionTokenExpiresAt ? { sessionTokenExpiresAt } : {}),
-    };
-  }
-
-  return config;
+/**
+ * Reports whether this installation holds everything needed to send without asking for credentials.
+ *
+ * @returns `hasReplayableAuth` is true when every required Partner API setting is present;
+ *   `missingSettings` names the ones that are not. Reads the environment and the skill's `.env` files.
+ */
+export function detectAuthState(): AuthState {
+  const { missingSettings } = loadPartnerApiConfigFromEnv();
+  return { hasReplayableAuth: missingSettings.length === 0, missingSettings };
 }
 
-async function getExecutionClient(deps: TransferFlowDeps, session?: TransferSession): Promise<TransferExecutionClient> {
+/**
+ * Returns the backend for this run.
+ *
+ * @param deps Flow collaborators. An injected `client` wins, then `clientFactory`, then a Partner
+ *   API client built from the environment.
+ * @returns The transfer execution client.
+ * @throws Error naming the missing settings when nothing is injected and the environment is incomplete.
+ */
+async function getExecutionClient(deps: TransferFlowDeps, _session?: TransferSession): Promise<TransferExecutionClient> {
   if (deps.client) return deps.client;
   if (deps.clientFactory) return deps.clientFactory();
-  return new UnigoxClient(buildExecutionClientConfig(session, deps));
+  const { config, missingSettings } = loadPartnerApiConfigFromEnv();
+  if (!config) {
+    throw new Error(`UNIGOX Partner API settings are missing: ${missingSettings.join(", ")}`);
+  }
+  return new PartnerExecutionClient(new PartnerApiClient(config), {
+    matchPollIntervalMs: deps.settlementPollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    sleep: deps.sleep,
+  });
 }
 
-async function verifyEvmLoginKeyInput(loginKey: string, deps: TransferFlowDeps): Promise<{ success: boolean; message?: string; username?: string }> {
-  if (deps.verifyEvmLoginKey) {
-    const result = await deps.verifyEvmLoginKey(loginKey);
-    if (!result) return { success: true };
+/**
+ * Returns the payout method catalogue for this run.
+ *
+ * @param deps Flow collaborators. Injected catalogue functions win; otherwise the public Partner API
+ *   catalogue of the configured host is used, which needs no API key.
+ * @returns The two catalogue operations.
+ */
+function resolvePaymentCatalogue(deps: TransferFlowDeps): PaymentCatalogue {
+  if (deps.getPaymentMethodsForCurrency && deps.getPaymentMethodFieldConfig) {
     return {
-      success: result.success ?? result.ok ?? true,
-      message: result.message,
-      username: result.username,
+      getPaymentMethodsForCurrency: deps.getPaymentMethodsForCurrency,
+      getPaymentMethodFieldConfig: deps.getPaymentMethodFieldConfig,
     };
   }
-
-  let email: string | undefined;
-  let frontendUrl: string | undefined;
-  if (deps.clientConfig) {
-    email = deps.clientConfig.email;
-    frontendUrl = deps.clientConfig.frontendUrl;
-  } else {
-    try {
-      const config = loadUnigoxConfigFromEnv();
-      email = config.email;
-      frontendUrl = config.frontendUrl;
-    } catch {
-      // No stored config available yet; login verification can still proceed with the provided key alone.
-    }
-  }
-
-  try {
-    const client = new UnigoxClient({
-      authMode: "evm",
-      evmLoginPrivateKey: loginKey,
-      ...(email ? { email } : {}),
-      ...(frontendUrl ? { frontendUrl } : {}),
-    });
-    await client.login();
-
-    let username: string | undefined;
-    try {
-      username = (await client.getProfile())?.username;
-    } catch {
-      // Username is helpful but optional for a successful verification.
-    }
-
-    return { success: true, username };
-  } catch (error) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-async function verifyTonLoginInput(
-  params: { tonPrivateKey?: string; mnemonic?: string; tonAddress?: string },
-  deps: TransferFlowDeps
-): Promise<{ success: boolean; message?: string; username?: string; tonWalletVersion?: TonWalletVersion }> {
-  const { tonPrivateKey, mnemonic, tonAddress } = params;
-  if (!tonPrivateKey && !mnemonic) {
-    return { success: false, message: "TON auth requires a TON private key or legacy mnemonic." };
-  }
-
-  if (deps.verifyTonLogin) {
-    const result = await deps.verifyTonLogin({ tonPrivateKey, mnemonic, tonAddress });
-    if (!result) return { success: true };
-    return {
-      success: result.success ?? result.ok ?? true,
-      message: result.message,
-      username: result.username,
-      tonWalletVersion: result.tonWalletVersion,
-    };
-  }
-
-  let email: string | undefined;
-  let frontendUrl: string | undefined;
-  let tonWalletVersion: TonWalletVersion | undefined;
-  if (deps.clientConfig) {
-    email = deps.clientConfig.email;
-    frontendUrl = deps.clientConfig.frontendUrl;
-    tonWalletVersion = deps.clientConfig.tonWalletVersion;
-  } else {
-    try {
-      const config = loadUnigoxConfigFromEnv();
-      email = config.email;
-      frontendUrl = config.frontendUrl;
-      tonWalletVersion = config.tonWalletVersion;
-    } catch {
-      // Verification can proceed with the supplied TON credentials alone.
-    }
-  }
-
-  try {
-    const client = new UnigoxClient({
-      authMode: "ton",
-      ...(tonPrivateKey ? { tonPrivateKey } : {}),
-      ...(mnemonic ? { tonMnemonic: mnemonic } : {}),
-      ...(tonAddress ? { tonAddress } : {}),
-      ...(tonWalletVersion ? { tonWalletVersion } : {}),
-      ...(email ? { email } : {}),
-      ...(frontendUrl ? { frontendUrl } : {}),
-    });
-    await client.login();
-    const derivation = client.getTonWalletDerivation();
-
-    let username: string | undefined;
-    try {
-      username = (await client.getProfile())?.username;
-    } catch {
-      // Username is helpful but optional for a successful verification.
-    }
-
-    return { success: true, username, tonWalletVersion: derivation?.walletVersion };
-  } catch (error) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-async function verifyLegacyTonMnemonicInput(
-  mnemonic: string,
-  tonAddress: string | undefined,
-  deps: TransferFlowDeps
-): Promise<{ success: boolean; message?: string; username?: string }> {
-  return verifyTonLoginInput({ mnemonic, tonAddress }, deps);
+  const catalogue = createPaymentCatalogue({ apiUrl: loadPartnerApiConfigFromEnv().apiUrl });
+  return {
+    getPaymentMethodsForCurrency: deps.getPaymentMethodsForCurrency ?? catalogue.getPaymentMethodsForCurrency,
+    getPaymentMethodFieldConfig: deps.getPaymentMethodFieldConfig ?? catalogue.getPaymentMethodFieldConfig,
+  };
 }
 
 function clearExecutionPreflight(session: TransferSession): void {
   session.execution.preflight = undefined;
+  session.execution.approvedCryptoAmount = undefined;
 }
 
 function clearBalanceSnapshot(session: TransferSession): void {
@@ -1969,29 +1105,39 @@ function invalidateBalanceState(session: TransferSession): void {
   clearExecutionPreflight(session);
 }
 
-function formatUsername(username: string | undefined): string | undefined {
-  if (!username) return undefined;
-  return username.startsWith("@") ? username : `@${username}`;
+/**
+ * Stops the flow until the Partner API settings are configured, and says what is missing.
+ *
+ * This is the one reply that names environment settings: setting them is the person's task here.
+ * It never includes a setting's value.
+ *
+ * @param session Current session. Moves to `awaiting_setup` with status `blocked`.
+ * @param deps Flow collaborators.
+ * @returns The setup reply with a `blocked_missing_auth` event.
+ */
+function replyWithSetupInstructions(session: TransferSession, deps: TransferFlowDeps): TransferFlowResult {
+  session.status = "blocked";
+  session.stage = "awaiting_setup";
+  const missing = session.auth.missingSettings?.length
+    ? ` Missing settings: ${session.auth.missingSettings.join(", ")}.`
+    : "";
+  const prompt = [
+    "This skill is not connected to UNIGOX yet, so I can't send money.",
+    `It needs a UNIGOX Partner API key, the partner wallet key, an XAI node address and the sender's email.${missing}`,
+    "Add them to the skill's .env file as described in docs/authentication.md, then send your request again.",
+    "Please don't paste keys into this chat.",
+  ].join(" ");
+  return reply(withUpdate(session, deps), prompt, undefined, [{ type: "blocked_missing_auth", message: prompt }]);
 }
 
-function formatAuthOrigin(choice: AuthChoice | undefined): string | undefined {
-  switch (choice) {
-    case "evm": return "via EVM wallet";
-    case "ton": return "via TON wallet";
-    case "generated_evm": return "via a generated EVM wallet on this device";
-    case "generated_ton": return "via a generated TON wallet on this device";
-    case "email": return "via email";
-    default: return undefined;
-  }
-}
-
-function buildUsernameReminder(username: string | undefined, choice?: AuthChoice): string | undefined {
-  const formatted = formatUsername(username);
-  if (!formatted) return undefined;
-  const origin = formatAuthOrigin(choice);
-  return origin
-    ? `You're currently signed in as ${formatted} on UNIGOX (${origin}). You can change that username later in this agent flow or on unigox.com.`
-    : `You're currently signed in as ${formatted} on UNIGOX. You can change that username later in this agent flow or on unigox.com.`;
+/**
+ * Builds the line that tells the person which UNIGOX sender this installation sends for.
+ *
+ * @param sender The sender's display name, which is their email on the Partner API.
+ * @returns One sentence, or `undefined` when the sender is not known yet.
+ */
+function buildSenderLine(sender: string | undefined): string | undefined {
+  return sender ? `You're sending as ${sender} from the UNIGOX partner wallet.` : undefined;
 }
 
 function getInitiatorTradeRecipientName(trade: InitiatorTradeSummary | undefined): string | undefined {
@@ -2114,6 +1260,18 @@ function formatUsdAmount(value: number): string {
 
 const SELLABLE_ASSET_ORDER = ["USDC", "USDT"] as const;
 
+/**
+ * How long one turn waits for a provider to accept a placed transfer, in milliseconds, unless the
+ * caller sets `waitForMatchTimeoutMs`. Carried over from the previous client, which waited two minutes.
+ */
+const DEFAULT_WAIT_FOR_MATCH_TIMEOUT_MS = 120_000;
+
+/** How the person funds the partner wallet. Source: "Funding your wallet" guide (My Wallet on unigox.com). */
+const FUND_PARTNER_WALLET_PROMPT = "Add USDC or USDT to the partner wallet in My Wallet on unigox.com, then tell me to recheck the balance. You can also change the amount.";
+
+/** Choices offered while a transfer waits for the partner wallet to be funded. */
+const BALANCE_RESOLUTION_OPTIONS = ["recheck balance", "change amount"] as const;
+
 function getWalletBalanceAssets(balance: WalletBalance | undefined): WalletBalanceAsset[] {
   if (!balance) return [];
 
@@ -2221,8 +1379,10 @@ async function buildAssetCoverageState(params: {
   client: TransferExecutionClient;
   balance: WalletBalance;
   amount: number;
-  paymentDetailsId: number;
-  tradePartner?: "licensed" | "p2p" | "all";
+  currency: string;
+  paymentMethodSlug?: string;
+  paymentNetworkSlug?: string;
+  tradePartner: AgenticPaymentsSettings["tradePartner"];
 }): Promise<{
   assetCoverage: AssetCoverageState[];
   selected?: AssetCoverageState;
@@ -2241,10 +1401,11 @@ async function buildAssetCoverageState(params: {
     if (params.client.getPreflightQuote) {
       try {
         quote = await params.client.getPreflightQuote({
-          tradeType: "SELL",
           cryptoCurrencyCode: asset.assetCode,
+          fiatCurrencyCode: params.currency,
           fiatAmount: params.amount,
-          paymentDetailsId: params.paymentDetailsId,
+          paymentMethodSlug: params.paymentMethodSlug,
+          paymentNetworkSlug: params.paymentNetworkSlug,
           tradePartner: params.tradePartner,
         });
       } catch {
@@ -2280,549 +1441,8 @@ async function buildAssetCoverageState(params: {
   };
 }
 
-function chooseTopUpMethod(text: string | undefined): TopUpMethod | undefined {
-  const value = cleanText(text);
-  if (!value) return undefined;
-  if (/(another\s+unigox\s+(?:user|wallet)|internal(?:\s+unigox)?|my username|send to (?:my )?username|username transfer)/i.test(value)) {
-    return "internal_username";
-  }
-  if (/(external|on-?chain|deposit address|wallet address|crypto deposit|from another wallet|token and chain|network deposit)/i.test(value)) {
-    return "external_deposit";
-  }
-  return undefined;
-}
-
-function buildTopUpMethodPrompt(username: string | undefined): string {
-  const formatted = formatUsername(username);
-  return [
-    "How would you like to top up the wallet?",
-    formatted ? `1) Another UNIGOX user sends funds directly to your username ${formatted}.` : "1) Another UNIGOX user sends funds directly to your UNIGOX username.",
-    "2) External / on-chain deposit to your wallet address.",
-    "You can also change the transfer amount instead.",
-  ].join(" ");
-}
-
-function buildInternalTopUpInstructions(username: string | undefined, preflight?: ExecutionPreflightState): string {
-  const formatted = formatUsername(username);
-  const shortfall = getTopUpShortfallUsd(preflight);
-  return [
-    buildPreflightQuoteSummary(preflight),
-    buildAssetCoverageLine(preflight),
-    buildTopUpShortfallLine(preflight),
-    buildPreflightQuoteCaveat(preflight),
-    formatted
-      ? `Your current UNIGOX username is ${formatted}.`
-      : "I couldn't hydrate your UNIGOX username just yet, so this internal route is only useful once that username is visible.",
-    formatted
-      ? shortfall && shortfall > 0
-        ? `Ask the other UNIGOX user to send about ${formatFixed(shortfall, 2)} USD more directly to ${formatted} inside UNIGOX.`
-        : `Ask the other UNIGOX user to send the required funds directly to ${formatted} inside UNIGOX.`
-      : "If you want, switch to external / on-chain deposit instead and I'll guide that route step by step.",
-    formatted ? "This internal UNIGOX route does not need a token + chain deposit flow first." : undefined,
-    "When the funds arrive, tell me to recheck the balance.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildExternalDepositAssetPrompt(options: SupportedDepositAssetOption[]): string {
-  const assets = options.map((entry) => entry.assetCode).join(", ");
-  return `For an external / on-chain deposit, which token do you want to deposit? Available options here: ${assets}.`;
-}
-
-function buildExternalDepositChainPrompt(option: SupportedDepositAssetOption): string {
-  const chains = option.chains.map((entry) => entry.chainName).join(", ");
-  return `Which network should I use for ${option.assetCode}? Supported ${option.assetCode} deposit networks here: ${chains}.`;
-}
-
-function buildExternalDepositInstructions(selection: SupportedDepositChainOption & { depositAddress: string }): string {
-  return [
-    `Send ${selection.assetCode} on ${selection.chainName} to this deposit address: ${selection.depositAddress}`,
-    "This is the single relevant address for that token + network choice.",
-    "Once the transfer lands, tell me to recheck the balance.",
-  ].join(" ");
-}
-
-function chooseDepositAssetOption(options: SupportedDepositAssetOption[], text: string | undefined): SupportedDepositAssetOption | undefined {
-  const query = normalizeMatchValue(text);
-  if (!query) return undefined;
-  return options.find((option) => {
-    const candidates = [option.assetCode, ...option.tokenCodes];
-    return candidates.some((candidate) => {
-      const normalized = normalizeMatchValue(candidate);
-      return normalized === query || normalized.includes(query) || query.includes(normalized);
-    });
-  });
-}
-
-function chooseDepositChainOption(chains: SupportedDepositChainOption[], text: string | undefined): SupportedDepositChainOption | undefined {
-  const query = normalizeMatchValue(text);
-  if (!query) return undefined;
-  return chains.find((chain) => {
-    const candidates = [chain.chainName, chain.chainType, `${chain.assetCode} ${chain.chainName}`, `${chain.tokenCode} ${chain.chainName}`];
-    return candidates.some((candidate) => {
-      const normalized = normalizeMatchValue(candidate);
-      return normalized === query || normalized.includes(query) || query.includes(normalized);
-    });
-  });
-}
-
 function wantsBalanceRecheck(text: string | undefined): boolean {
   return /^(recheck|check|refresh|retry|continue|done|funded|topped up|balance updated|try again)(?:\s+balance)?$/i.test(cleanText(text));
-}
-
-function buildEvmKeySecurityWarning(kind: SecretKind): string {
-  const keyLabel = kind === "evm_login_key"
-    ? "login wallet key"
-    : kind === "ton_private_key"
-      ? "TON private key"
-      : "TON mnemonic";
-  return [
-    "🚨🔐 IMPORTANT WALLET SAFETY WARNING 🔐🚨",
-    `Use a NEWLY CREATED / ISOLATED wallet for this ${keyLabel}.`,
-    "❌ This must NOT be your main wallet.",
-    "❌ Do NOT paste a wallet that holds long-term funds.",
-    "✅ Use a dedicated UNIGOX / agent wallet only.",
-  ].join(" ");
-}
-
-function buildWalletSetupChoicePrompt(emailAddress?: string): string {
-  return [
-    emailAddress ? `Email OTP worked for ${emailAddress}.` : "Email OTP worked.",
-    "To keep future sign-in simple, I can create a dedicated login wallet for you locally on this device.",
-    "Which path should I set up now?",
-    "1. Create a dedicated EVM wallet on this device",
-    "2. Create a dedicated TON wallet on this device",
-    "3. Stay on email OTP for now",
-  ].join(" ");
-}
-
-function buildEvmLoginKeyPrompt(): string {
-  return [
-    buildEvmKeySecurityWarning("evm_login_key"),
-    "I need the account private key for the EVM wallet you used to sign in on UNIGOX.",
-    "This is the private key for that specific account — not the wallet’s seed phrase or mnemonic.",
-    "In MetaMask: click the ⋮ menu on the account → Account details → Show private key. In Phantom or other wallets, look for ‘Export private key’ in the account settings.",
-    "It starts with 0x and is 64 hex characters long (66 with the 0x prefix).",
-    "Paste it here and I’ll verify login with that key.",
-  ].join(" ");
-}
-
-function buildInvalidEvmKeyPrompt(kind: "evm_login_key", _username?: string, _choice?: AuthChoice): string {
-  void kind;
-  const followUp = buildEvmLoginKeyPrompt();
-  const mnemonicHint = " If you pasted a mnemonic / seed phrase, that’s not what I need here — I need the account private key, not the wallet recovery phrase.";
-  return [
-    "That doesn’t look like a valid EVM private key.",
-    "I accept the key with or without 0x, but it must be the full 32-byte private key (64 hex characters), not the wallet address.",
-    mnemonicHint,
-    followUp,
-  ].filter(Boolean).join(" ");
-}
-
-function buildAddressInsteadOfPrivateKeyPrompt(kind: "evm_login_key", _username?: string, _choice?: AuthChoice): string {
-  void kind;
-  const followUp = buildEvmLoginKeyPrompt();
-  return [
-    "That looks like an EVM address, not a private key.",
-    "I accept the private key with or without 0x, but it must be the full 32-byte private key, not the 20-byte wallet address.",
-    followUp,
-  ].join(" ");
-}
-
-function buildInvalidTonMnemonicPrompt(tonAddress: string | undefined): string {
-  const followUp = tonAddress ? buildTonAuthMethodPrompt(tonAddress) : buildTonAddressPrompt();
-  return [
-    "That doesn’t look like a valid TON mnemonic phrase yet.",
-    "Send the full mnemonic for the exact wallet address you confirmed, and I’ll match the supported TON wallet versions locally until one derives that address.",
-    followUp,
-  ].join(" ");
-}
-
-function buildInvalidTonPrivateKeyPrompt(tonAddress: string | undefined): string {
-  const followUp = tonAddress ? buildTonAuthMethodPrompt(tonAddress) : buildTonAddressPrompt();
-  return [
-    "That doesn’t look like a valid TON private key / secret key.",
-    "I accept a TON key as 32-byte or 64-byte key material in hex or base64, with or without 0x.",
-    followUp,
-  ].join(" ");
-}
-
-function buildSigningKeyBrowserApprovalPrompt(choice?: AuthChoice): string | undefined {
-  if (choice === "ton" || choice === "generated_ton") {
-    return buildTonConnectBrowserApprovalPrompt();
-  }
-  if (choice === "evm" || choice === "generated_evm") {
-    return buildEvmWalletConnectBrowserApprovalPrompt();
-  }
-
-  return undefined;
-}
-
-function buildBrowserLoginAccessPrompt(choice?: AuthChoice): string {
-  if (choice === "generated_ton") {
-    return [
-      "This login wallet is a TON wallet that I created on this machine.",
-      "For browser login, do not open the same wallet in another app first.",
-      "Open unigox.com and send me either: 1. a fresh screenshot of the visible TonConnect QR, or 2. the fresh tc:// TonConnect link from the page.",
-      "I can approve that live browser-login request locally with the TON wallet I created here.",
-    ].join(" ");
-  }
-
-  if (choice === "ton") {
-    return [
-      "This login wallet is your external TON wallet.",
-      "For browser login on unigox.com, the protocol is TonConnect.",
-      "If the page shows a fresh TonConnect QR or tc:// link, send it here and I can approve that live browser-login request locally. Otherwise open it directly in your TON wallet.",
-    ].join(" ");
-  }
-
-  if (choice === "generated_evm") {
-    return [
-      "This login wallet is an EVM wallet that I created on this machine.",
-      "For browser login on unigox.com, the protocol is WalletConnect, not TonConnect.",
-      "If the page shows a fresh WalletConnect QR or wc: link, send it here and I can approve that live browser-login request locally with the EVM login wallet on this machine.",
-      "If the site opens a browser-extension approval instead of WalletConnect, first say 'export this wallet', import it into an isolated EVM wallet app or browser extension, then complete that approval there.",
-    ].join(" ");
-  }
-
-  if (choice === "evm") {
-    return [
-      "This login wallet is your external EVM wallet.",
-      "For browser login on unigox.com, the protocol is WalletConnect, not TonConnect.",
-      "If the page shows a fresh WalletConnect QR or wc: link, send it here and I can approve that live browser-login request locally. If the site opens a browser-extension approval instead, complete that approval in your wallet there.",
-    ].join(" ");
-  }
-
-  return [
-    "To log into unigox.com from here, send me the fresh browser login request from that page.",
-    "TON wallets use TonConnect (tc:// or a TonConnect QR).",
-    "EVM wallets use WalletConnect (wc: or a WalletConnect QR, sometimes a browser-extension approval).",
-  ].join(" ");
-}
-
-function buildBrowserLoginContinuationPrompt(username: string | undefined, choice?: AuthChoice): string {
-  return [
-    buildUsernameReminder(username, choice),
-    "Agent-side login is already set up on this machine.",
-    "If you just want to log into unigox.com in the browser, here is what to do.",
-    buildBrowserLoginAccessPrompt(choice),
-    buildSigningKeyBrowserApprovalPrompt(choice),
-  ].filter(Boolean).join(" ");
-}
-
-function getStoredTonAddress(deps: TransferFlowDeps): string | undefined {
-  return deps.clientConfig?.tonAddress || loadEnvValue("UNIGOX_TON_ADDRESS");
-}
-
-function buildTonAddressPrompt(): string {
-  return [
-    "I can do TON login here.",
-    "First send the TON address shown by the wallet you use on UNIGOX.",
-    "You can paste either the normal wallet address form or the raw 0:... form.",
-    "I’ll use that exact address as the source of truth so I do not guess the wrong wallet version.",
-  ].join(" ");
-}
-
-function buildTonAddressConfirmationPrompt(tonAddress: string): string {
-  return [
-    `I’ll use this exact TON address: ${tonAddress}.`,
-    "Is this the correct wallet address for the wallet you used on UNIGOX, or should I use a different version / address?",
-    "Once you confirm it, you can either send the mnemonic phrase for that wallet, send the TON private key / secret key, or use a fresh TonConnect QR / deep link. I’ll keep only the wallet version that actually matches this exact address.",
-  ].join(" ");
-}
-
-function buildTonAuthMethodPrompt(tonAddress: string): string {
-  return [
-    `Got the TON address: ${tonAddress}.`,
-    "How do you want me to complete TON login for this exact wallet?",
-    "1. Send the TON mnemonic phrase for this wallet",
-    "2. Send the TON private key / secret key for this wallet",
-    "3. Say 'TonConnect QR' and I’ll generate a fresh live TonConnect deep link for this login",
-    "For the mnemonic/private-key paths, I’ll derive the supported TON wallet versions locally and keep the one that matches this exact address.",
-  ].join(" ");
-}
-
-function buildTonMnemonicPrompt(tonAddress: string): string {
-  return [
-    buildEvmKeySecurityWarning("ton_mnemonic"),
-    `Got the TON address: ${tonAddress}.`,
-    "Now send the TON mnemonic phrase for that same wallet and I’ll match the supported TON wallet versions locally until one derives this exact address, then I’ll log in from the agent side.",
-  ].join(" ");
-}
-
-function buildTonPrivateKeyPrompt(tonAddress: string): string {
-  return [
-    buildEvmKeySecurityWarning("ton_private_key"),
-    `Got the TON address: ${tonAddress}.`,
-    "Now send the TON private key / secret key for that same wallet and I’ll match the supported TON wallet versions locally until one derives this exact address, then I’ll verify TON login here from the agent side.",
-  ].join(" ");
-}
-
-function buildTonConnectPrompt(params: { universalLink: string; expiresAt?: string; tonAddress?: string }): string {
-  const expiresIn = params.expiresAt
-    ? Math.max(1, Math.round((Date.parse(params.expiresAt) - Date.now()) / 60000))
-    : undefined;
-  return [
-    "Your fresh TonConnect login link is ready.",
-    params.tonAddress ? `I’ll only accept the connection if the wallet comes back as this address: ${params.tonAddress}.` : undefined,
-    params.universalLink,
-    "Open that link in the TON wallet you use on UNIGOX. If you’re on another device, scan a QR generated from this exact link.",
-    "Use this live link or a QR generated from it now. An old screenshot of a previous QR will not work as a reusable login credential.",
-    expiresIn ? `This live request should stay valid for about ${expiresIn} minutes.` : undefined,
-    "After you approve it in the wallet, reply with: connected",
-  ].filter(Boolean).join(" ");
-}
-
-function buildTonConnectBrowserApprovalPrompt(): string {
-  return [
-    "If UNIGOX is already showing you a fresh tc:// TonConnect link in the browser, you can paste that link here too.",
-    "You can also send a fresh screenshot of the visible TonConnect QR and I’ll decode the tc:// request locally on this machine.",
-    "I’ll use the TON key on this machine to approve that live browser-login request so the UNIGOX page can finish logging you in without a manual wallet scan.",
-  ].join(" ");
-}
-
-function buildTonConnectBrowserApprovalSuccessPrompt(): string {
-  return [
-    "I approved that fresh UNIGOX TonConnect browser-login request locally with the TON key for this wallet.",
-    "If the page is still open on that live request, it should finish logging you in within a moment.",
-    "If the page does not move, refresh UNIGOX and generate a fresh link because these requests expire quickly.",
-  ].join(" ");
-}
-
-function buildTonConnectBrowserApprovalMissingTonKeyPrompt(choice?: AuthChoice): string {
-  if (choice === "evm" || choice === "generated_evm") {
-    return [
-      "That tc:// link is a TonConnect request, but you're signed in with an EVM wallet on this machine.",
-      "TonConnect needs TON key material, which isn't available here.",
-      "For this EVM login wallet, use the WalletConnect flow instead: open unigox.com, start the EVM wallet-connection login, and send me the fresh wc: link or WalletConnect QR from that page.",
-    ].join(" ");
-  }
-
-  return [
-    "I can consume a fresh UNIGOX tc:// TonConnect link here, but I still need TON key material for that exact wallet on this machine first.",
-    "Send the TON mnemonic phrase or TON private key / secret key for that wallet, then paste the fresh tc:// link again.",
-  ].join(" ");
-}
-
-function buildTonConnectBrowserApprovalFailurePrompt(message?: string): string {
-  return [
-    "I couldn’t approve that UNIGOX TonConnect browser-login link yet.",
-    message ? `Reason: ${message}` : undefined,
-    "Make sure it is a fresh tc:// link from unigox.com, not an older expired one.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildTonConnectQrDecodeFailurePrompt(message?: string): string {
-  return [
-    "I couldn’t read a valid fresh UNIGOX TonConnect QR from that image yet.",
-    message ? `Reason: ${message}` : undefined,
-    "Send a fresh screenshot with the QR clearly visible, or paste the fresh tc:// link directly.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildEvmWalletConnectBrowserApprovalPrompt(): string {
-  return [
-    "If UNIGOX is already showing you a fresh wc: WalletConnect link in the browser, you can paste that link here too.",
-    "You can also send a fresh screenshot of the visible WalletConnect QR and I’ll decode the wc: request locally on this machine.",
-    "I’ll use the EVM login wallet on this machine to approve that live browser-login request so the UNIGOX page can finish logging you in without a manual wallet scan.",
-  ].join(" ");
-}
-
-function buildEvmWalletConnectBrowserApprovalSuccessPrompt(): string {
-  return [
-    "I approved that fresh UNIGOX WalletConnect browser-login request locally with the EVM login wallet for this account.",
-    "If the page is still open on that live request, it should finish logging you in within a moment.",
-    "If the page does not move, refresh UNIGOX and generate a fresh wc: link or QR because these requests expire quickly.",
-  ].join(" ");
-}
-
-function buildEvmWalletConnectBrowserApprovalMissingWalletPrompt(): string {
-  return [
-    "I can consume a fresh UNIGOX wc: WalletConnect link here, but I still need the exact EVM login wallet on this machine first.",
-    "Send the EVM login private key for that wallet, or let me create a dedicated EVM wallet here and then paste the fresh wc: link again.",
-  ].join(" ");
-}
-
-function buildEvmWalletConnectBrowserApprovalFailurePrompt(message?: string): string {
-  return [
-    "I couldn’t approve that UNIGOX WalletConnect browser-login request yet.",
-    message ? `Reason: ${message}` : undefined,
-    "Make sure it is a fresh wc: link or a fresh WalletConnect QR from unigox.com, not an older expired one.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildEvmWalletConnectQrDecodeFailurePrompt(message?: string): string {
-  return [
-    "I couldn’t read a valid fresh UNIGOX WalletConnect QR from that image yet.",
-    message ? `Reason: ${message}` : undefined,
-    "Send a fresh screenshot with the QR clearly visible, or paste the fresh wc: link directly.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildBrowserLoginProtocolMismatchPrompt(choice: AuthChoice | undefined, attemptedProtocol: "tonconnect" | "walletconnect"): string {
-  if ((choice === "evm" || choice === "generated_evm") && attemptedProtocol === "tonconnect") {
-    return [
-      buildBrowserLoginAccessPrompt(choice),
-      "That tc:// link is a TonConnect request, so it belongs to a TON browser-login flow, not this EVM login wallet.",
-      "If you want me to approve that tc:// link here, switch to TON wallet connection or create a dedicated TON wallet first.",
-      "Otherwise send the fresh wc: WalletConnect link or WalletConnect QR from the EVM login flow on unigox.com instead.",
-    ].join(" ");
-  }
-
-  if ((choice === "ton" || choice === "generated_ton") && attemptedProtocol === "walletconnect") {
-    return [
-      buildBrowserLoginAccessPrompt(choice),
-      "That wc: link is a WalletConnect request, so it belongs to an EVM browser-login flow, not this TON login wallet.",
-      "If you want me to approve that wc: link here, switch to EVM wallet connection or create a dedicated EVM wallet first.",
-      "Otherwise send the fresh tc:// TonConnect link or TonConnect QR from the TON login flow on unigox.com instead.",
-    ].join(" ");
-  }
-
-  return [
-    buildBrowserLoginAccessPrompt(choice),
-    attemptedProtocol === "tonconnect"
-      ? "That looks like a TonConnect request."
-      : "That looks like a WalletConnect request.",
-  ].join(" ");
-}
-
-function buildTonConnectStillWaitingPrompt(params: { universalLink: string; expiresAt?: string }): string {
-  const expiresIn = params.expiresAt
-    ? Math.max(1, Math.round((Date.parse(params.expiresAt) - Date.now()) / 60000))
-    : undefined;
-  return [
-    "I’m still waiting for the TonConnect approval from the wallet.",
-    params.universalLink,
-    expiresIn ? `This live request should still be valid for about ${expiresIn} minutes.` : undefined,
-    "Approve it in the wallet, then reply: connected",
-  ].filter(Boolean).join(" ");
-}
-
-function sessionHasTransferContext(session: TransferSession): boolean {
-  return Boolean(
-    session.recipientName
-    || (session.recipientQuery && !looksLikeGenericLoginRequest(session.recipientQuery))
-    || session.currency
-    || typeof session.amount === "number"
-    || session.payment
-    || session.contactKey
-    || session.remoteSavedContact
-    || Object.keys(session.details || {}).length
-    || session.execution.tradeRequestId
-    || session.execution.tradeId
-    || session.execution.preflight
-  );
-}
-
-function buildSecretCleanupPrompt(secret: SecretSubmissionState): string {
-  const label = secret.kind === "evm_login_key"
-    ? "login wallet key"
-    : secret.kind === "ton_private_key"
-      ? "TON private key"
-      : "TON mnemonic";
-  return [
-    secret.note,
-    `⚠️ For safety, please delete the message that contains your ${label} from this chat right now.`,
-    "If this channel/runtime cannot delete your message automatically, I need you to delete it yourself before I continue.",
-    "Reply 'deleted' once that message is gone.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildSecretCleanupAdvisory(kind: SecretKind): string {
-  const label = kind === "evm_login_key"
-    ? "login wallet key"
-    : kind === "ton_private_key"
-      ? "TON private key"
-      : "TON mnemonic";
-  return `⚠️ You just shared sensitive data (${label}). It is advised to delete or archive the messages containing sensitive information, depending on the platform you are using.`;
-}
-
-function getStoredEmailAddress(deps: TransferFlowDeps): string | undefined {
-  if (deps.clientConfig?.email) return deps.clientConfig.email;
-  return loadEnvValue("UNIGOX_EMAIL");
-}
-
-function buildEmailAddressPrompt(existingEmail?: string): string {
-  if (existingEmail) {
-    return `I can use ${existingEmail} for email OTP recovery. Reply with that email again if you want to use it, or send a different email address.`;
-  }
-  return "What email address should I use for OTP onboarding or recovery?";
-}
-
-function buildEmailOtpPrompt(email: string): string {
-  return `I sent a 6-digit code to ${email}. What’s the code?`;
-}
-
-function buildGeneratedWalletFailurePrompt(kind: "generated_evm" | "generated_ton", message?: string): string {
-  const walletLabel = kind === "generated_evm" ? "dedicated EVM login wallet" : "dedicated TON login wallet";
-  return [
-    `I couldn’t create the ${walletLabel} automatically yet.`,
-    message ? `Reason: ${message}` : undefined,
-    "You can retry that generated-wallet path, use your own wallet instead, or stay on email OTP for now.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildGeneratedWalletExportHint(): string {
-  return "If you want a portable backup of this login wallet, say 'export this wallet' and I’ll write a local wallet file for you.";
-}
-
-function buildGeneratedEvmWalletReadyPrompt(username: string | undefined, goal: TransferGoal): string {
-  void goal;
-  return [
-    "I generated a dedicated EVM login wallet locally on this machine, so you do not need to paste the EVM login key yourself.",
-    "It was created from cryptographic randomness and kept local to this device.",
-    buildGeneratedWalletExportHint(),
-    buildBrowserLoginContinuationPrompt(username, "generated_evm"),
-  ].filter(Boolean).join(" ");
-}
-
-function buildGeneratedTonWalletReadyPrompt(username: string | undefined, goal: TransferGoal): string {
-  void goal;
-  return [
-    "I generated a dedicated TON login wallet locally on this machine, so you do not need to paste the TON login key yourself.",
-    "It was created from cryptographic randomness and kept local to this device.",
-    buildGeneratedWalletExportHint(),
-    buildBrowserLoginContinuationPrompt(username, "generated_ton"),
-  ].filter(Boolean).join(" ");
-}
-
-function buildWalletExportUnavailablePrompt(session: TransferSession, requestedType?: WalletExportType): string {
-  const requestedLabel = requestedType === "ton"
-    ? "TON"
-    : requestedType === "evm"
-      ? "EVM"
-      : "generated";
-  const currentChoice = session.auth.choice || normalizeStoredAuthChoice(loadEnvValue("UNIGOX_LOGIN_WALLET_ORIGIN"));
-
-  if (!currentChoice || (currentChoice !== "generated_evm" && currentChoice !== "generated_ton")) {
-    return [
-      `I can only auto-export a ${requestedLabel} login wallet if I generated that dedicated wallet locally on this device.`,
-      "If you connected an existing wallet manually, keep using your own wallet backup / export flow there instead.",
-    ].join(" ");
-  }
-
-  const currentLabel = currentChoice === "generated_ton" ? "TON" : "EVM";
-  return `I only have a generated ${currentLabel} login wallet available to export on this device right now.`;
-}
-
-function buildWalletExportSuccessPrompt(session: TransferSession, exported: LoginWalletExportResult): string {
-  void session;
-  const walletLabel = exported.walletType === "ton" ? "TON" : "EVM";
-  return [
-    `I wrote your dedicated ${walletLabel} login wallet to a local file: ${exported.filePath}`,
-    exported.address ? `Wallet address: ${exported.address}.` : undefined,
-    exported.walletType === "ton" && exported.walletVersion ? `Wallet version: ${exported.walletVersion}.` : undefined,
-    exported.includesMnemonic ? "The file includes both the private key material and the TON mnemonic for this generated wallet." : "The file contains the login wallet secret material in plain text.",
-    "Treat that file like a wallet backup: move it into secure storage, then delete the local copy when you no longer need it.",
-  ].filter(Boolean).join(" ");
-}
-
-function buildEmailOtpOnlyReadyPrompt(username: string | undefined): string {
-  void username;
-  return "Email OTP works. I can keep using email OTP for onboarding or recovery on this device, but future re-authentication may still need another code.";
-}
-
-function buildPostLoginSetupPrompt(session: TransferSession): string {
-  return buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice);
 }
 
 async function maybeHydrateAuthIdentity(
@@ -2838,19 +1458,15 @@ async function maybeHydrateAuthIdentity(
     if (profile?.username) {
       session.auth.username = profile.username;
     }
-    const fullProfile = profile as UserProfile;
-    const fullName = buildKycFullName(fullProfile.first_name, fullProfile.last_name);
+    const fullName = buildKycFullName(profile.first_name, profile.last_name);
     if (fullName) {
       session.auth.kycFullName = fullName;
     }
-    if (fullProfile.kyc_country_code) {
-      session.auth.kycCountryCode = fullProfile.kyc_country_code.toUpperCase();
+    if (profile.kyc_country_code) {
+      session.auth.kycCountryCode = profile.kyc_country_code.toUpperCase();
     }
-    if (typeof fullProfile.total_traded_volume_usd === "number") {
-      session.auth.totalTradedVolumeUsd = fullProfile.total_traded_volume_usd;
-    }
-    if (fullProfile.id_verification_status) {
-      session.auth.kycStatus = fullProfile.id_verification_status;
+    if (profile.id_verification_status) {
+      session.auth.kycStatus = profile.id_verification_status;
     }
   } catch {
     // Username is a nice UX enhancement, not a hard blocker.
@@ -2863,7 +1479,6 @@ async function maybeHydrateStartupAuthStatus(
   client?: TransferExecutionClient
 ): Promise<void> {
   if (!session.auth.available) return;
-  if (hasMultipleStoredWalletChoices(session.auth.availableChoices) && !session.auth.choice) return;
 
   let executionClient: TransferExecutionClient;
   try {
@@ -2893,1343 +1508,6 @@ async function maybeHydrateStartupAuthStatus(
       // Startup reminders are helpful, but should never block the main send flow.
     }
   }
-}
-
-async function maybeRefreshStoredAuthState(
-  session: TransferSession,
-  deps: TransferFlowDeps
-): Promise<void> {
-  if (session.goal === "save_contact_only" || session.auth.available) return;
-
-  const auth = resolveInitialAuthState(deps.authState);
-  if (!auth.hasReplayableAuth) return;
-
-  session.auth.checked = true;
-  session.auth.available = true;
-  session.auth.mode = auth.authMode || session.auth.mode;
-  session.auth.choice = auth.choice || auth.authMode || session.auth.choice;
-  session.auth.availableChoices = auth.availableChoices?.length ? auth.availableChoices : session.auth.availableChoices;
-  session.auth.username = auth.username || session.auth.username;
-  session.auth.balanceUsd = auth.balanceUsd ?? session.auth.balanceUsd;
-  session.auth.walletBalance = auth.walletBalance ?? session.auth.walletBalance;
-  session.auth.startupSnapshotShown = false;
-  session.auth.outstandingTradeReminderShown = false;
-  session.auth.outstandingTradeReminder = undefined;
-  session.auth.outstandingTrade = undefined;
-  session.auth.pendingSecret = undefined;
-
-  if ([
-    "awaiting_auth_choice",
-    "awaiting_email_address",
-    "awaiting_email_otp",
-    "awaiting_wallet_setup_choice",
-    "awaiting_evm_wallet_signin",
-    "awaiting_evm_login_key",
-    "awaiting_ton_address",
-    "awaiting_ton_address_confirmation",
-    "awaiting_ton_auth_method",
-    "awaiting_ton_private_key",
-    "awaiting_ton_mnemonic",
-    "awaiting_tonconnect_completion",
-    "awaiting_secret_cleanup_confirmation",
-  ].includes(session.stage)) {
-    session.status = "active";
-    session.stage = "resolving";
-  }
-
-  await maybeHydrateStartupAuthStatus(session, deps);
-}
-
-async function maybeHandleSensitiveInput(
-  session: TransferSession,
-  kind: SecretKind,
-  secret: string,
-  turn: TransferTurn,
-  deps: TransferFlowDeps
-): Promise<{ needsManualCleanup: boolean; note?: string; deleted?: boolean; advisory?: string }> {
-  const result = await deps.handleSensitiveInput?.({ kind, secret, turn, session });
-  if (result?.deleted) {
-    return { needsManualCleanup: false, deleted: true, note: result.note || "✅ I deleted that key-containing message from the chat before continuing." };
-  }
-
-  // No longer block for manual cleanup confirmation — proceed with an informational advisory instead
-  return {
-    needsManualCleanup: false,
-    note: result?.note,
-    advisory: buildSecretCleanupAdvisory(kind),
-  };
-}
-
-async function normalizeSecretInput(
-  kind: SecretKind,
-  secret: string,
-): Promise<string | undefined> {
-  if (kind === "ton_private_key") {
-    return parseTonPrivateKey(secret);
-  }
-  if (kind === "ton_mnemonic") {
-    const mnemonic = parseTonMnemonic(secret);
-    if (!mnemonic) return undefined;
-    try {
-      return await mnemonicValidate(mnemonic.split(/\s+/)) ? mnemonic : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return parseEvmPrivateKey(secret);
-}
-
-function restoreStageForSecretKind(session: TransferSession, kind: SecretKind): void {
-  if (kind === "evm_login_key") {
-    session.stage = "awaiting_evm_login_key";
-    return;
-  }
-  session.stage = kind === "ton_mnemonic" ? "awaiting_ton_mnemonic" : "awaiting_ton_private_key";
-}
-
-async function finalizeEvmLoginKey(
-  session: TransferSession,
-  loginKey: string,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = []
-): Promise<TransferFlowResult> {
-  session.auth.pendingSecret = undefined;
-  const verification = await verifyEvmLoginKeyInput(loginKey, deps);
-  if (!verification.success) {
-    session.stage = "awaiting_evm_login_key";
-    const failure = `That login wallet key didn't work. Please double-check the wallet that is actually linked to UNIGOX sign-in and try again.${verification.message ? ` (${verification.message})` : ""}`;
-    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: failure,
-    }]);
-  }
-
-  await deps.persistEvmLoginKey?.(loginKey);
-  await deps.persistAuthChoice?.("evm");
-  session.auth.available = true;
-  session.auth.mode = "evm";
-  session.auth.choice = "evm";
-  session.auth.username = verification.username || session.auth.username;
-  if (!session.auth.username) {
-    await maybeHydrateAuthIdentity(session, deps);
-  }
-  session.status = "active";
-  session.stage = "resolving";
-  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
-  if (prefixEvents.length) {
-    resumed.events = [...prefixEvents, ...resumed.events];
-  }
-  return resumed;
-}
-
-async function finalizeTonMnemonic(
-  session: TransferSession,
-  mnemonic: string,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = []
-): Promise<TransferFlowResult> {
-  session.auth.pendingSecret = undefined;
-  const verification = await verifyTonLoginInput({ mnemonic, tonAddress: session.auth.tonAddress }, deps);
-  if (!verification.success) {
-    session.stage = "awaiting_ton_mnemonic";
-    const failure = `That TON mnemonic didn't verify against the exact TON address used on UNIGOX. Please double-check the mnemonic phrase and the exact wallet address, then try again.${verification.message ? ` (${verification.message})` : ""}`;
-    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: failure,
-    }]);
-  }
-
-  if (session.auth.tonAddress) {
-    await deps.persistTonAddress?.(session.auth.tonAddress);
-  }
-  await deps.persistAuthChoice?.("ton");
-  if (verification.tonWalletVersion) {
-    session.auth.tonWalletVersion = verification.tonWalletVersion;
-    await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
-  }
-  await deps.persistTonMnemonic?.(mnemonic);
-
-  session.auth.available = true;
-  session.auth.mode = "ton";
-  session.auth.choice = "ton";
-  session.auth.username = verification.username || session.auth.username;
-  if (!session.auth.username) {
-    await maybeHydrateAuthIdentity(session, deps);
-  }
-
-  session.status = "active";
-  session.stage = "resolving";
-  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
-  if (prefixEvents.length) {
-    resumed.events = [...prefixEvents, ...resumed.events];
-  }
-  return resumed;
-}
-
-async function startTonConnectLoginFlow(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = []
-): Promise<TransferFlowResult> {
-  if (!deps.startTonConnectLogin) {
-    const prompt = "This skill runtime cannot generate a live TonConnect login link yet. Send the TON mnemonic phrase or TON private key / secret key for that same wallet instead.";
-    session.stage = "awaiting_ton_auth_method";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  try {
-    const started = await deps.startTonConnectLogin();
-    session.auth.tonConnect = {
-      universalLink: started.universalLink,
-      manifestUrl: started.manifestUrl,
-      expiresAt: started.expiresAt,
-      payloadToken: started.payloadToken,
-    };
-    session.stage = "awaiting_tonconnect_completion";
-    session.status = "blocked";
-    const prompt = buildTonConnectPrompt({
-      universalLink: started.universalLink,
-      expiresAt: started.expiresAt,
-      tonAddress: session.auth.tonAddress,
-    });
-    return reply(withUpdate(session, deps), prompt, ["connected", "status", "send TON mnemonic", "send TON private key"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  } catch (error) {
-    const prompt = `I couldn't start a fresh TonConnect login right now.${error instanceof Error ? ` (${error.message})` : ""}`;
-    session.stage = "awaiting_ton_auth_method";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function maybeHandleGeneratedWalletExportTurn(
-  session: TransferSession,
-  turn: TransferTurn,
-  deps: TransferFlowDeps,
-): Promise<TransferFlowResult | undefined> {
-  const exportIntent = parseWalletExportIntent(turn.text);
-  if (!exportIntent) return undefined;
-
-  const exportable = resolveStoredGeneratedWalletExport(session, exportIntent.walletType);
-  if (!exportable) {
-    return reply(withUpdate(session, deps), buildWalletExportUnavailablePrompt(session, exportIntent.walletType));
-  }
-
-  if (!deps.exportLoginWalletFile) {
-    return reply(
-      withUpdate(session, deps),
-      "This runtime can keep using the generated login wallet locally, but it cannot write an export file yet.",
-    );
-  }
-
-  const exported = await deps.exportLoginWalletFile(exportable);
-  const prompt = buildWalletExportSuccessPrompt(session, exported);
-  return reply(withUpdate(session, deps), prompt, undefined, [{
-    type: "wallet_exported",
-    message: prompt,
-    data: {
-      filePath: exported.filePath,
-      walletType: exported.walletType,
-      origin: exported.origin,
-      address: exported.address,
-      walletVersion: exported.walletVersion,
-      includesMnemonic: exported.includesMnemonic === true,
-    },
-  }]);
-}
-
-function buildTonConnectVerificationClient(deps: TransferFlowDeps): UnigoxClient {
-  let frontendUrl: string | undefined;
-  let email: string | undefined;
-  if (deps.clientConfig) {
-    frontendUrl = deps.clientConfig.frontendUrl;
-    email = deps.clientConfig.email;
-  } else {
-    try {
-      const config = loadUnigoxConfigFromEnv();
-      frontendUrl = config.frontendUrl;
-      email = config.email;
-    } catch {
-      // Default frontend URL is fine.
-    }
-  }
-
-  return new UnigoxClient({
-    ...(frontendUrl ? { frontendUrl } : {}),
-    ...(email ? { email } : {}),
-  });
-}
-
-async function tryApproveProvidedTonConnectBrowserLink(
-  session: TransferSession,
-  turn: TransferTurn,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = [],
-): Promise<TransferFlowResult | undefined> {
-  let link = parseTonConnectUniversalLinkInput(turn.text);
-  if (!link && turn.imagePath) {
-    if (!deps.decodeTonConnectQr) {
-      const prompt = "This skill runtime cannot decode a TonConnect QR screenshot yet. Paste the fresh tc:// link directly or open the QR in your wallet instead.";
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    try {
-      link = await deps.decodeTonConnectQr(turn.imagePath);
-    } catch (error) {
-      const prompt = buildTonConnectQrDecodeFailurePrompt(error instanceof Error ? error.message : undefined);
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (!link) {
-      const prompt = buildTonConnectQrDecodeFailurePrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-  }
-
-  if (!link) return undefined;
-
-  if (!deps.approveTonConnectLink) {
-    const prompt = "This skill runtime cannot consume a fresh tc:// TonConnect link yet. Open it in your wallet directly.";
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  try {
-    await deps.approveTonConnectLink(link);
-    const prompt = buildTonConnectBrowserApprovalSuccessPrompt();
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "browser_login_handoff",
-      message: prompt,
-    }]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : undefined;
-    const prompt = /TON auth requires|tonPrivateKey|tonMnemonic|does not derive the exact TON address/i.test(message || "")
-      ? buildTonConnectBrowserApprovalMissingTonKeyPrompt(session.auth.choice)
-      : buildTonConnectBrowserApprovalFailurePrompt(message);
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function tryApproveProvidedEvmWalletConnectBrowserLink(
-  session: TransferSession,
-  turn: TransferTurn,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = [],
-): Promise<TransferFlowResult | undefined> {
-  let uri = parseWalletConnectUriInput(turn.text);
-  if (!uri && turn.imagePath) {
-    if (!deps.decodeEvmWalletConnectQr) {
-      const prompt = "This skill runtime cannot decode a WalletConnect QR screenshot yet. Paste the fresh wc: link directly or open the QR in your wallet instead.";
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    try {
-      uri = await deps.decodeEvmWalletConnectQr(turn.imagePath);
-    } catch (error) {
-      const prompt = buildEvmWalletConnectQrDecodeFailurePrompt(error instanceof Error ? error.message : undefined);
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (!uri) {
-      const prompt = buildEvmWalletConnectQrDecodeFailurePrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-  }
-
-  if (!uri) return undefined;
-
-  if (!deps.approveEvmWalletConnectLink) {
-    const prompt = "This skill runtime cannot consume a fresh wc: WalletConnect link yet. Complete the browser login in your wallet app or extension there.";
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  try {
-    await deps.approveEvmWalletConnectLink(uri);
-    const prompt = buildEvmWalletConnectBrowserApprovalSuccessPrompt();
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "browser_login_handoff",
-      message: prompt,
-    }]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : undefined;
-    const prompt = /EVM login requires|No EVM wallet configured|login wallet|private key/i.test(message || "")
-      ? buildEvmWalletConnectBrowserApprovalMissingWalletPrompt()
-      : buildEvmWalletConnectBrowserApprovalFailurePrompt(message);
-    return reply(withUpdate(session, deps), prompt, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function finalizeTonConnectLogin(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = []
-): Promise<TransferFlowResult> {
-  const active = session.auth.tonConnect;
-  if (!active?.payloadToken || !active.universalLink) {
-    session.stage = "awaiting_ton_auth_method";
-    session.status = "blocked";
-    const prompt = buildTonAuthMethodPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
-    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (!deps.checkTonConnectLogin) {
-    const prompt = "This skill runtime cannot check TonConnect approval yet. Use the mnemonic or TON private-key path instead.";
-    session.stage = "awaiting_ton_auth_method";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  const checked = await deps.checkTonConnectLogin();
-  if (checked.status === "pending") {
-    const prompt = buildTonConnectStillWaitingPrompt({
-      universalLink: active.universalLink,
-      expiresAt: active.expiresAt,
-    });
-    session.stage = "awaiting_tonconnect_completion";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["connected", "status"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (checked.status === "error" || !checked.walletAddress || !checked.network || !checked.proof) {
-    const prompt = `TonConnect did not complete cleanly yet.${checked.status === "error" && checked.message ? ` (${checked.message})` : ""} If needed, I can generate a fresh live link.`;
-    session.stage = "awaiting_tonconnect_completion";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["connected", "status", "TonConnect QR"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.auth.tonAddress && checked.walletAddress !== session.auth.tonAddress) {
-    await deps.clearTonConnectLogin?.();
-    await deps.persistAuthChoice?.("ton");
-    session.auth.tonConnect = undefined;
-    session.stage = "awaiting_ton_address";
-    session.status = "blocked";
-    const prompt = [
-      `The connected wallet came back as ${checked.walletAddress}, not ${session.auth.tonAddress}.`,
-      "That means this TonConnect approval was for a different wallet or address version.",
-      "Send the exact TON address you want me to use, then I can generate a fresh TonConnect QR or use the mnemonic/private-key path for that wallet.",
-    ].join(" ");
-    return reply(withUpdate(session, deps), prompt, ["use a different TON address", "TonConnect QR"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  try {
-    const client = buildTonConnectVerificationClient(deps);
-    const token = await client.loginWithTonConnect({
-      address: checked.walletAddress,
-      network: checked.network,
-      ...(checked.publicKey ? { public_key: checked.publicKey } : {}),
-      proof: checked.proof,
-      payloadToken: active.payloadToken,
-    });
-
-    await deps.clearTonConnectLogin?.();
-    session.auth.tonConnect = undefined;
-    session.auth.available = true;
-    session.auth.mode = "ton";
-    session.auth.choice = "ton";
-    session.auth.checked = true;
-    session.auth.tonAddress = checked.walletAddress;
-    session.auth.sessionToken = token;
-    session.auth.sessionTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
-    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
-
-    session.status = "active";
-    session.stage = "resolving";
-    const resumed = await advanceTransferFlow(session, { text: "" }, { ...deps, client });
-    if (prefixEvents.length) {
-      resumed.events = [...prefixEvents, ...resumed.events];
-    }
-    return resumed;
-  } catch (error) {
-    const prompt = `TonConnect approval came back, but UNIGOX login still failed.${error instanceof Error ? ` (${error.message})` : ""}`;
-    session.stage = "awaiting_tonconnect_completion";
-    session.status = "blocked";
-    return reply(withUpdate(session, deps), prompt, ["connected", "TonConnect QR"], [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function finalizeTonPrivateKey(
-  session: TransferSession,
-  tonPrivateKey: string,
-  deps: TransferFlowDeps,
-  prefixEvents: TransferFlowEvent[] = []
-): Promise<TransferFlowResult> {
-  session.auth.pendingSecret = undefined;
-  const verification = await verifyTonLoginInput({ tonPrivateKey, tonAddress: session.auth.tonAddress }, deps);
-  if (!verification.success) {
-    session.stage = "awaiting_ton_private_key";
-    const failure = `That TON wallet didn't verify. Please double-check the TON private key / secret key and the exact TON address used on UNIGOX, then try again.${verification.message ? ` (${verification.message})` : ""}`;
-    return reply(withUpdate(session, deps), failure, undefined, [...prefixEvents, {
-      type: "blocked_missing_auth",
-      message: failure,
-    }]);
-  }
-
-  if (session.auth.tonAddress) {
-    await deps.persistTonAddress?.(session.auth.tonAddress);
-  }
-  await deps.persistAuthChoice?.("ton");
-  if (verification.tonWalletVersion) {
-    session.auth.tonWalletVersion = verification.tonWalletVersion;
-    await deps.persistTonWalletVersion?.(verification.tonWalletVersion);
-  }
-  await deps.persistTonPrivateKey?.(tonPrivateKey);
-
-  session.auth.available = true;
-  session.auth.mode = "ton";
-  session.auth.choice = "ton";
-  session.auth.username = verification.username || session.auth.username;
-  if (!session.auth.username) {
-    await maybeHydrateAuthIdentity(session, deps);
-  }
-
-  session.status = "active";
-  session.stage = "resolving";
-  const resumed = await advanceTransferFlow(session, { text: "" }, deps);
-  if (prefixEvents.length) {
-    resumed.events = [...prefixEvents, ...resumed.events];
-  }
-  return resumed;
-}
-
-async function finalizeGeneratedEvmWalletSetup(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  client?: TransferExecutionClient
-): Promise<TransferFlowResult> {
-  const canLinkAfterEmail = Boolean(
-    client?.generateAndLinkWallet && (session.auth.emailAuthToken || session.auth.sessionToken || session.auth.mode === "email")
-  );
-
-  try {
-    const generated = canLinkAfterEmail
-      ? await client!.generateAndLinkWallet!()
-      : await (deps.generateDedicatedEvmWallet?.() ?? Promise.resolve(generateDedicatedEvmLoginWallet()));
-
-    if (!canLinkAfterEmail) {
-      const verification = await verifyEvmLoginKeyInput(generated.privateKey, deps);
-      if (!verification.success) {
-        throw new Error(verification.message || "Generated EVM wallet login could not be verified.");
-      }
-      session.auth.username = verification.username || session.auth.username;
-    }
-
-    await deps.persistEvmLoginKey?.(generated.privateKey);
-    await deps.persistAuthChoice?.("generated_evm");
-
-    session.auth.available = true;
-    session.auth.mode = "evm";
-    session.auth.choice = "generated_evm";
-    session.auth.checked = true;
-    await maybeHydrateStartupAuthStatus(session, deps, canLinkAfterEmail ? client : undefined);
-
-    session.status = "active";
-    session.stage = "resolving";
-    return advanceTransferFlow(session, { text: "" }, canLinkAfterEmail ? { ...deps, client } : deps);
-  } catch (error) {
-    session.stage = canLinkAfterEmail ? "awaiting_wallet_setup_choice" : "awaiting_auth_choice";
-    session.status = "blocked";
-    const prompt = buildGeneratedWalletFailurePrompt("generated_evm", error instanceof Error ? error.message : String(error));
-    return reply(withUpdate(session, deps), prompt, canLinkAfterEmail ? [...POST_EMAIL_WALLET_SETUP_OPTIONS] : [...AUTH_CHOICE_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function finalizeGeneratedTonWalletSetup(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  client?: TransferExecutionClient
-): Promise<TransferFlowResult> {
-  const canLinkAfterEmail = Boolean(
-    client?.generateAndLinkTonWallet && (session.auth.emailAuthToken || session.auth.sessionToken || session.auth.mode === "email")
-  );
-
-  try {
-    const generated = canLinkAfterEmail
-      ? await client!.generateAndLinkTonWallet!()
-      : await (deps.generateDedicatedTonWallet?.() ?? generateDedicatedTonLoginWallet(session.auth.tonWalletVersion));
-
-    if (!canLinkAfterEmail) {
-      const verification = await verifyTonLoginInput({ tonPrivateKey: generated.privateKey, tonAddress: generated.address }, deps);
-      if (!verification.success) {
-        throw new Error(verification.message || "Generated TON wallet login could not be verified.");
-      }
-      session.auth.username = verification.username || session.auth.username;
-      session.auth.tonWalletVersion = verification.tonWalletVersion || generated.walletVersion;
-    }
-
-    await deps.persistTonPrivateKey?.(generated.privateKey);
-    if (generated.mnemonic) {
-      await deps.persistTonMnemonic?.(generated.mnemonic);
-    }
-    await deps.persistTonAddress?.(generated.address);
-    await deps.persistTonWalletVersion?.(session.auth.tonWalletVersion || generated.walletVersion);
-    await deps.persistAuthChoice?.("generated_ton");
-
-    session.auth.available = true;
-    session.auth.mode = "ton";
-    session.auth.choice = "generated_ton";
-    session.auth.checked = true;
-    session.auth.tonAddress = generated.address;
-    session.auth.tonAddressDisplay = generated.address;
-    session.auth.tonWalletVersion = session.auth.tonWalletVersion || generated.walletVersion;
-    await maybeHydrateStartupAuthStatus(session, deps, canLinkAfterEmail ? client : undefined);
-
-    session.status = "active";
-    session.stage = "resolving";
-    return advanceTransferFlow(session, { text: "" }, canLinkAfterEmail ? { ...deps, client } : deps);
-  } catch (error) {
-    session.stage = canLinkAfterEmail ? "awaiting_wallet_setup_choice" : "awaiting_auth_choice";
-    session.status = "blocked";
-    const prompt = buildGeneratedWalletFailurePrompt("generated_ton", error instanceof Error ? error.message : String(error));
-    return reply(withUpdate(session, deps), prompt, canLinkAfterEmail ? [...POST_EMAIL_WALLET_SETUP_OPTIONS] : [...AUTH_CHOICE_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-}
-
-async function startEmailOtpFlow(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  emailAddress: string
-): Promise<TransferFlowResult> {
-  const client = await getExecutionClient(deps, {
-    ...session,
-    auth: {
-      ...session.auth,
-      emailAddress,
-      mode: "email",
-    },
-  });
-  if (!client.requestEmailOTP) {
-    session.stage = "awaiting_auth_choice";
-    session.status = "blocked";
-    return reply(
-      withUpdate(session, deps),
-      "This skill setup cannot send email OTP codes automatically yet. Please choose a wallet path instead.",
-      [...AUTH_CHOICE_OPTIONS],
-      [{
-        type: "blocked_missing_auth",
-        message: "Email OTP request is not available in this client setup.",
-      }]
-    );
-  }
-  try {
-    await client.requestEmailOTP();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    session.stage = "awaiting_email_address";
-    session.auth.emailAddress = emailAddress;
-    session.status = "blocked";
-    return reply(
-      withUpdate(session, deps),
-      `I couldn’t send the email OTP yet (${message}). Double-check the email address and send it again.`,
-      undefined,
-      [{
-        type: "blocked_missing_auth",
-        message,
-      }]
-    );
-  }
-
-  session.auth.emailAddress = emailAddress;
-  session.auth.choice = session.auth.choice || "email";
-  session.auth.mode = "email";
-  session.status = "blocked";
-  session.stage = "awaiting_email_otp";
-  return reply(withUpdate(session, deps), buildEmailOtpPrompt(emailAddress), undefined, [{
-    type: "blocked_missing_auth",
-    message: buildEmailOtpPrompt(emailAddress),
-  }]);
-}
-
-async function finalizeEmailOtpVerification(
-  session: TransferSession,
-  deps: TransferFlowDeps,
-  client: TransferExecutionClient,
-  emailAddress: string,
-  otpCode: string
-): Promise<TransferFlowResult> {
-  if (!client.verifyEmailOTP) {
-    session.stage = "awaiting_auth_choice";
-    session.status = "blocked";
-    return reply(
-      withUpdate(session, deps),
-      "This skill setup cannot verify email OTP codes automatically yet. Please choose a wallet path instead.",
-      [...AUTH_CHOICE_OPTIONS],
-      [{
-        type: "blocked_missing_auth",
-        message: "Email OTP verification is not available in this client setup.",
-      }]
-    );
-  }
-  try {
-    const token = await client.verifyEmailOTP(otpCode);
-    session.auth.available = true;
-    session.auth.mode = "email";
-    session.auth.choice = session.auth.choice || "email";
-    session.auth.emailAddress = emailAddress;
-    session.auth.emailAuthToken = token;
-    session.auth.emailAuthTokenExpiresAt = new Date(Date.now() + 50 * 60 * 1000).toISOString();
-    session.auth.sessionToken = token;
-    session.auth.sessionTokenExpiresAt = session.auth.emailAuthTokenExpiresAt;
-    session.auth.checked = true;
-    await deps.persistEmailAddress?.(emailAddress);
-    await maybeHydrateStartupAuthStatus(session, { ...deps, client }, client);
-
-    if (session.auth.choice === "generated_evm") {
-      const generated = await finalizeGeneratedEvmWalletSetup(session, deps, client);
-      generated.events = [{
-        type: "blocked_missing_auth",
-        message: `Email OTP verified for ${emailAddress}.`,
-      }, ...generated.events];
-      return generated;
-    }
-
-    if (session.auth.choice === "generated_ton") {
-      const generated = await finalizeGeneratedTonWalletSetup(session, deps, client);
-      generated.events = [{
-        type: "blocked_missing_auth",
-        message: `Email OTP verified for ${emailAddress}.`,
-      }, ...generated.events];
-      return generated;
-    }
-
-    if (session.auth.choice === "email") {
-      session.status = "blocked";
-      session.stage = "awaiting_wallet_setup_choice";
-      const prompt = buildWalletSetupChoicePrompt(emailAddress);
-      return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
-        type: "blocked_missing_auth",
-        message: `Email OTP verified for ${emailAddress}.`,
-      }]);
-    }
-
-    session.status = "active";
-    session.stage = "resolving";
-    const resumed = await advanceTransferFlow(session, { text: "" }, { ...deps, client });
-    resumed.events = [{
-      type: "blocked_missing_auth",
-      message: `Email OTP verified for ${emailAddress}.`,
-    }, ...resumed.events];
-    return resumed;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    session.stage = "awaiting_email_otp";
-    session.status = "blocked";
-    return reply(
-      withUpdate(session, deps),
-      `That OTP code didn’t work (${message}). ${buildEmailOtpPrompt(emailAddress)}`,
-      undefined,
-      [{
-        type: "blocked_missing_auth",
-        message,
-      }]
-    );
-  }
-}
-
-async function maybeHandleAuthOnboardingTurn(
-  session: TransferSession,
-  turn: TransferTurn,
-  deps: TransferFlowDeps
-): Promise<TransferFlowResult | undefined> {
-  if (session.goal !== "transfer") return undefined;
-
-  const responseText = cleanText(turn.option || turn.text);
-  const hinted = parseIntentHints(responseText);
-  const hintedChoice = hinted.authChoice;
-
-  if (session.stage === "awaiting_secret_cleanup_confirmation") {
-    session.status = "blocked";
-    const pendingSecret = session.auth.pendingSecret;
-    if (!pendingSecret) {
-      session.stage = "awaiting_auth_choice";
-      return reply(withUpdate(session, deps), getUnigoxWalletConnectionPrompt(), [...AUTH_CHOICE_OPTIONS], [{
-        type: "blocked_missing_auth",
-        message: getUnigoxWalletConnectionPrompt(),
-      }]);
-    }
-
-    if (!DELETED_RE.test(responseText)) {
-      return reply(withUpdate(session, deps), buildSecretCleanupPrompt(pendingSecret), ["deleted"], [{
-        type: "secret_cleanup_required",
-        message: buildSecretCleanupPrompt(pendingSecret),
-      }]);
-    }
-
-    const normalizedSecret = await normalizeSecretInput(pendingSecret.kind, pendingSecret.value);
-    if (!normalizedSecret) {
-      session.auth.pendingSecret = undefined;
-      restoreStageForSecretKind(session, pendingSecret.kind);
-      const prompt = pendingSecret.kind === "evm_login_key"
-        ? buildInvalidEvmKeyPrompt("evm_login_key")
-        : buildInvalidTonMnemonicPrompt(session.auth.tonAddress || getStoredTonAddress(deps));
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (pendingSecret.kind === "evm_login_key") {
-      return finalizeEvmLoginKey(session, normalizedSecret, deps);
-    }
-    if (pendingSecret.kind === "ton_private_key") {
-      return finalizeTonPrivateKey(session, normalizedSecret, deps);
-    }
-    if (pendingSecret.kind === "ton_mnemonic") {
-      return finalizeTonMnemonic(session, normalizedSecret, deps);
-    }
-    // Should not reach here — secret kinds above are exhaustive.
-    return reply(withUpdate(session, deps), getUnigoxWalletConnectionPrompt(), [...AUTH_CHOICE_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: getUnigoxWalletConnectionPrompt(),
-    }]);
-  }
-
-  // Escape hatch: allow switching auth method from any auth stage
-  const AUTH_SWITCHABLE_STAGES: TransferStage[] = [
-    "awaiting_evm_wallet_signin", "awaiting_evm_login_key",
-    "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method",
-    "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion",
-    "awaiting_email_address", "awaiting_email_otp", "awaiting_wallet_setup_choice",
-  ];
-  if ((hinted.switchAuth || hinted.goBack) && AUTH_SWITCHABLE_STAGES.includes(session.stage)) {
-    session.auth.choice = undefined;
-    session.auth.mode = undefined;
-    session.auth.pendingSecret = undefined;
-    session.auth.tonAddress = undefined;
-    session.auth.tonAddressDisplay = undefined;
-    session.auth.tonConnect = undefined;
-    session.status = "blocked";
-    session.stage = "awaiting_auth_choice";
-    const prompt = "No problem. Let's pick a different sign-in method. " + getUnigoxWalletConnectionPrompt();
-    return reply(withUpdate(session, deps), prompt, [...AUTH_CHOICE_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.stage === "awaiting_wallet_setup_choice") {
-    session.status = "blocked";
-    const choice = hintedChoice;
-    const emailAddress = session.auth.emailAddress || getStoredEmailAddress(deps);
-    if (!emailAddress || !session.auth.sessionToken) {
-      session.stage = "awaiting_email_address";
-      const prompt = buildEmailAddressPrompt(emailAddress);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const client = await getExecutionClient(deps, {
-      ...session,
-      auth: {
-        ...session.auth,
-        emailAddress,
-        mode: "email",
-      },
-    });
-
-    if (choice === "generated_evm") {
-      return finalizeGeneratedEvmWalletSetup(session, deps, client);
-    }
-
-    if (choice === "generated_ton") {
-      return finalizeGeneratedTonWalletSetup(session, deps, client);
-    }
-
-    if (choice === "evm") {
-      session.stage = "awaiting_evm_wallet_signin";
-      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
-      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (choice === "ton") {
-      const storedTonAddress = getStoredTonAddress(deps);
-      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
-      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (choice === "email") {
-      session.status = "active";
-      session.stage = "resolving";
-      return advanceTransferFlow(session, { text: "" }, { ...deps, client });
-    }
-
-    const prompt = buildWalletSetupChoicePrompt(emailAddress);
-    return reply(withUpdate(session, deps), prompt, [...POST_EMAIL_WALLET_SETUP_OPTIONS], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.stage === "awaiting_evm_wallet_signin") {
-    session.status = "blocked";
-
-    if (hintedChoice === "ton" || hintedChoice === "email" || hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
-      session.auth.choice = hintedChoice;
-      if (hintedChoice === "ton") {
-        const storedTonAddress = getStoredTonAddress(deps);
-        session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-        session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
-        session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
-        return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
-          type: "blocked_missing_auth",
-          message: followUp,
-        }]);
-      }
-
-      if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
-        return hintedChoice === "generated_evm"
-          ? finalizeGeneratedEvmWalletSetup(session, deps)
-          : finalizeGeneratedTonWalletSetup(session, deps);
-      }
-
-      const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
-      if (storedEmail) {
-        return startEmailOtpFlow(session, deps, storedEmail);
-      }
-      session.stage = "awaiting_email_address";
-      const followUp = buildEmailAddressPrompt();
-      return reply(withUpdate(session, deps), followUp, undefined, [{
-        type: "blocked_missing_auth",
-        message: followUp,
-      }]);
-    }
-
-    if (SIGNIN_READY_RE.test(responseText) || /signed in|logged in/i.test(responseText)) {
-      session.stage = "awaiting_evm_login_key";
-      const followUp = buildEvmLoginKeyPrompt();
-      return reply(withUpdate(session, deps), followUp, undefined, [{
-        type: "blocked_missing_auth",
-        message: followUp,
-      }]);
-    }
-
-    const reminder = NOT_READY_RE.test(responseText) || !responseText
-      ? "Before I ask for any key: please sign in on unigox.com with the EVM wallet you want me to reuse. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used."
-      : "I still need you to sign in on unigox.com with that EVM wallet first. Once that is done, tell me you’ve already signed in and I’ll ask which login wallet key you used.";
-    return reply(withUpdate(session, deps), reminder, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
-      type: "blocked_missing_auth",
-      message: reminder,
-    }]);
-  }
-
-  if (session.stage === "awaiting_email_address") {
-    session.status = "blocked";
-    if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
-      session.auth.choice = hintedChoice;
-      return hintedChoice === "generated_evm"
-        ? finalizeGeneratedEvmWalletSetup(session, deps)
-        : finalizeGeneratedTonWalletSetup(session, deps);
-    }
-    if (hintedChoice === "evm") {
-      session.auth.choice = "evm";
-      session.stage = "awaiting_evm_wallet_signin";
-      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
-      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    if (hintedChoice === "ton") {
-      session.auth.choice = "ton";
-      const storedTonAddress = getStoredTonAddress(deps);
-      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
-      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    const emailAddress = parseEmailAddress(responseText) || session.auth.emailAddress || getStoredEmailAddress(deps);
-    if (!emailAddress) {
-      const prompt = buildEmailAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    return startEmailOtpFlow(session, deps, emailAddress);
-  }
-
-  if (session.stage === "awaiting_email_otp") {
-    session.status = "blocked";
-    if (hintedChoice === "generated_evm" || hintedChoice === "generated_ton") {
-      session.auth.choice = hintedChoice;
-      return hintedChoice === "generated_evm"
-        ? finalizeGeneratedEvmWalletSetup(session, deps)
-        : finalizeGeneratedTonWalletSetup(session, deps);
-    }
-    if (hintedChoice === "evm") {
-      session.auth.choice = "evm";
-      session.stage = "awaiting_evm_wallet_signin";
-      const prompt = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
-      return reply(withUpdate(session, deps), prompt, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    if (hintedChoice === "ton") {
-      session.auth.choice = "ton";
-      const storedTonAddress = getStoredTonAddress(deps);
-      session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-      session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
-      session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-      const prompt = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    const emailAddress = session.auth.emailAddress || getStoredEmailAddress(deps);
-    if (!emailAddress) {
-      session.stage = "awaiting_email_address";
-      const prompt = buildEmailAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const otpCode = parseOtpCode(responseText);
-    if (!otpCode) {
-      const prompt = buildEmailOtpPrompt(emailAddress);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const client = await getExecutionClient(deps, {
-      ...session,
-      auth: {
-        ...session.auth,
-        emailAddress,
-        mode: "email",
-      },
-    });
-    return finalizeEmailOtpVerification(session, deps, client, emailAddress, otpCode);
-  }
-
-  if (session.stage === "awaiting_evm_login_key") {
-    session.status = "blocked";
-    if (!responseText || SIGNIN_READY_RE.test(responseText) || NOT_READY_RE.test(responseText)) {
-      const prompt = buildEvmLoginKeyPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const loginKey = parseEvmPrivateKey(responseText);
-    if (!loginKey) {
-      const prompt = looksLikeEvmAddress(responseText)
-        ? buildAddressInsteadOfPrivateKeyPrompt("evm_login_key")
-        : buildInvalidEvmKeyPrompt("evm_login_key");
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const secretHandling = await maybeHandleSensitiveInput(session, "evm_login_key", loginKey, turn, deps);
-    const events: TransferFlowEvent[] = [];
-    if (secretHandling.deleted) {
-      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the login-key message from chat." });
-    }
-    const result = await finalizeEvmLoginKey(session, loginKey, deps, events);
-    if (secretHandling.advisory) {
-      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
-    }
-    return result;
-  }
-
-  if (session.stage === "awaiting_ton_address") {
-    session.status = "blocked";
-    const parsedTonAddress = parseTonAddressInput(responseText);
-    const tonAddress = parsedTonAddress?.raw || session.auth.tonAddress || getStoredTonAddress(deps);
-    const tonAddressDisplay = parsedTonAddress?.display || session.auth.tonAddressDisplay || tonAddress;
-    if (!tonAddress) {
-      const prompt = buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    session.auth.choice = "ton";
-    session.auth.mode = "ton";
-    session.auth.tonAddress = tonAddress;
-    session.auth.tonAddressDisplay = tonAddressDisplay;
-    session.stage = "awaiting_ton_address_confirmation";
-    const prompt = buildTonAddressConfirmationPrompt(tonAddressDisplay);
-    return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.stage === "awaiting_ton_address_confirmation") {
-    session.status = "blocked";
-    const replacementAddress = parseTonAddressInput(responseText);
-    if (replacementAddress && replacementAddress.raw !== session.auth.tonAddress) {
-      session.auth.tonAddress = replacementAddress.raw;
-      session.auth.tonAddressDisplay = replacementAddress.display;
-      const prompt = buildTonAddressConfirmationPrompt(replacementAddress.display);
-      return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (AFFIRMATIVE_RE.test(responseText) || /correct|this address is correct|use this address/i.test(responseText)) {
-      session.stage = "awaiting_ton_auth_method";
-      const prompt = buildTonAuthMethodPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
-      return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (NO_RE.test(responseText) || /different|change|another/i.test(responseText)) {
-      session.stage = "awaiting_ton_address";
-      const prompt = "Okay. Send the exact TON address shown by the wallet you used on UNIGOX, and I’ll use that exact address instead.";
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const prompt = buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || session.auth.tonAddress!);
-    return reply(withUpdate(session, deps), prompt, ["this address is correct", "use a different TON address"], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.stage === "awaiting_ton_auth_method") {
-    session.status = "blocked";
-    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
-    const tonAddressDisplay = session.auth.tonAddressDisplay || tonAddress;
-    if (!tonAddress) {
-      session.stage = "awaiting_ton_address";
-      const prompt = buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const explicitMethod = chooseTonCredentialMethod(responseText);
-    if (explicitMethod === "tonconnect") {
-      return startTonConnectLoginFlow(session, deps);
-    }
-
-    const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
-    if (mnemonic) {
-      const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
-      const events: TransferFlowEvent[] = [];
-      if (secretHandling.deleted) {
-        events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." });
-      }
-      const result = await finalizeTonMnemonic(session, mnemonic, deps, events);
-      if (secretHandling.advisory) {
-        result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
-      }
-      return result;
-    }
-
-    const tonPrivateKey = await normalizeSecretInput("ton_private_key", responseText);
-    if (tonPrivateKey) {
-      const secretHandling = await maybeHandleSensitiveInput(session, "ton_private_key", tonPrivateKey, turn, deps);
-      const events: TransferFlowEvent[] = [];
-      if (secretHandling.deleted) {
-        events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." });
-      }
-      const result = await finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
-      if (secretHandling.advisory) {
-        result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
-      }
-      return result;
-    }
-
-    if (explicitMethod === "mnemonic") {
-      session.stage = "awaiting_ton_mnemonic";
-      const prompt = buildTonMnemonicPrompt(tonAddressDisplay);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (explicitMethod === "private_key") {
-      session.stage = "awaiting_ton_private_key";
-      const prompt = buildTonPrivateKeyPrompt(tonAddressDisplay);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const prompt = buildTonAuthMethodPrompt(tonAddressDisplay);
-    return reply(withUpdate(session, deps), prompt, ["send TON mnemonic", "send TON private key", "TonConnect QR"], [{
-      type: "blocked_missing_auth",
-      message: prompt,
-    }]);
-  }
-
-  if (session.stage === "awaiting_ton_mnemonic") {
-    session.status = "blocked";
-    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
-    if (!tonAddress) {
-      session.stage = "awaiting_ton_address";
-      const prompt = buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const mnemonic = await normalizeSecretInput("ton_mnemonic", responseText);
-    if (!mnemonic) {
-      const prompt = buildInvalidTonMnemonicPrompt(tonAddress);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const secretHandling = await maybeHandleSensitiveInput(session, "ton_mnemonic", mnemonic, turn, deps);
-    const events: TransferFlowEvent[] = [];
-    if (secretHandling.deleted) {
-      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON mnemonic message from chat." });
-    }
-    const result = await finalizeTonMnemonic(session, mnemonic, deps, events);
-    if (secretHandling.advisory) {
-      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
-    }
-    return result;
-  }
-
-  if (session.stage === "awaiting_ton_private_key") {
-    session.status = "blocked";
-    const tonAddress = session.auth.tonAddress || getStoredTonAddress(deps);
-    if (!tonAddress) {
-      session.stage = "awaiting_ton_address";
-      const prompt = buildTonAddressPrompt();
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    if (chooseTonCredentialMethod(responseText) === "tonconnect") {
-      return startTonConnectLoginFlow(session, deps);
-    }
-
-    const tonPrivateKey = await normalizeSecretInput("ton_private_key", responseText);
-    if (!tonPrivateKey) {
-      const prompt = buildInvalidTonPrivateKeyPrompt(tonAddress);
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-
-    const secretHandling = await maybeHandleSensitiveInput(session, "ton_private_key", tonPrivateKey, turn, deps);
-    const events: TransferFlowEvent[] = [];
-    if (secretHandling.deleted) {
-      events.push({ type: "secret_message_deleted", message: secretHandling.note || "Deleted the TON private-key message from chat." });
-    }
-    const result = await finalizeTonPrivateKey(session, tonPrivateKey, deps, events);
-    if (secretHandling.advisory) {
-      result.reply = `${secretHandling.advisory}\n\n${result.reply}`;
-    }
-    return result;
-  }
-
-  if (session.stage === "awaiting_tonconnect_completion") {
-    session.status = "blocked";
-    if (chooseTonCredentialMethod(responseText) === "tonconnect") {
-      return startTonConnectLoginFlow(session, deps);
-    }
-    return finalizeTonConnectLogin(session, deps);
-  }
-
-  return undefined;
 }
 
 function resetPaymentSelection(session: TransferSession): void {
@@ -4271,7 +1549,7 @@ function buildConfirmationMessage(session: TransferSession): string {
     : session.details;
   const detailBlock = buildHumanDetailBlock(displayDetails);
   return [
-    buildUsernameReminder(session.auth.username, session.auth.choice),
+    buildSenderLine(session.auth.username),
     balanceLine,
     buildPreflightQuoteSummary(session.execution.preflight),
     buildAssetCoverageLine(session.execution.preflight),
@@ -4282,24 +1560,21 @@ function buildConfirmationMessage(session: TransferSession): string {
   ].filter(Boolean).join("\n\n");
 }
 
-function getProjectedTradeUsd(session: TransferSession): number {
-  return session.execution.preflight?.sellAssetRequiredUsd
-    ?? session.execution.preflight?.quote?.totalCryptoAmount
-    ?? session.amount
-    ?? 0;
-}
 
+
+/**
+ * Explains that the sender must be verified before this transfer, and how.
+ *
+ * @param session Current session; its amount and currency are named when known.
+ * @returns The explanation with the three steps the person goes through.
+ */
 function buildKycRequirementMessage(session: TransferSession): string {
-  const projectedTotal = (session.auth.totalTradedVolumeUsd || 0) + getProjectedTradeUsd(session);
-  const projectedLine = projectedTotal > 0
-    ? `This transfer would bring your no-KYC volume to about ${formatFixed(projectedTotal, 2)} USD, and UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`
-    : `UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`;
   return [
     `To continue with this ${session.amount ? `${session.amount} ${session.currency}` : "transfer"}, UNIGOX needs KYC first.`,
-    projectedLine,
+    "UNIGOX requires the sender's identity to be verified before every transfer, whatever the amount.",
     "The steps are simple:",
-    "1. You give me your full name and country.",
-    "2. I give you a secure link for the third-party KYC service. You can also complete the same KYC directly in the UNIGOX website or app if you prefer.",
+    "1. You give me your full legal name and country.",
+    "2. I give you a secure link to the verification page.",
     "3. Once UNIGOX approves it, I continue the transfer.",
   ].join(" ");
 }
@@ -4312,38 +1587,17 @@ function buildKycCountryPrompt(session: TransferSession): string {
   ].join(" ");
 }
 
+/**
+ * Answers "do I need KYC?" for the current sender.
+ *
+ * @param session Current session with the sender's last known verification status.
+ * @returns One sentence: already verified, or verification is required before any transfer.
+ */
 function buildKycEligibilityMessage(session: TransferSession): string {
   if (isUserKycVerified(session.auth.kycStatus)) {
-    return "Your UNIGOX account is already KYC-approved, so you do not need to do KYC again for this flow.";
+    return "The sender is already verified on UNIGOX, so there is no KYC step in this flow.";
   }
-
-  const currentVolume = session.auth.totalTradedVolumeUsd;
-  const projectedTradeUsd = getProjectedTradeUsd(session);
-  const projectedTotal = (currentVolume || 0) + projectedTradeUsd;
-
-  if (typeof currentVolume === "number" && projectedTradeUsd > 0) {
-    const needsKycNow = projectedTotal >= MAX_AMOUNT_WITHOUT_KYC;
-    return [
-      `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more.`,
-      `Your recorded volume is about ${formatFixed(currentVolume, 2)} USD right now, and this transfer would bring it to about ${formatFixed(projectedTotal, 2)} USD.`,
-      needsKycNow
-        ? "So yes — KYC is required before I can place this transfer."
-        : "So no — you do not need KYC for this transfer yet."
-    ].join(" ");
-  }
-
-  if (typeof currentVolume === "number") {
-    const needsKycNow = currentVolume >= MAX_AMOUNT_WITHOUT_KYC;
-    return [
-      `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more.`,
-      `Your recorded volume is about ${formatFixed(currentVolume, 2)} USD right now.`,
-      needsKycNow
-        ? "So yes — KYC is already required before I can continue higher-volume transfers."
-        : "So no — you do not need KYC yet for lower-volume transfers."
-    ].join(" ");
-  }
-
-  return `UNIGOX only requires KYC once your total traded volume would reach ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD or more. If you want, I can still start it earlier once you're signed in.`;
+  return "UNIGOX requires the sender's identity to be verified before any transfer, whatever the amount. I can start that with you now.";
 }
 
 function buildCurrentKycStepHint(session: TransferSession): string | undefined {
@@ -4362,15 +1616,14 @@ function buildCurrentKycStepHint(session: TransferSession): string | undefined {
   return undefined;
 }
 
+/**
+ * Opens a reply about a verification that is still in progress.
+ *
+ * @param session Current session; its amount and currency are named when known.
+ * @returns One sentence saying the transfer waits for verification.
+ */
 function buildKycPendingMessage(session: TransferSession): string {
-  const projectedTotal = (session.auth.totalTradedVolumeUsd || 0) + getProjectedTradeUsd(session);
-  const projectedLine = projectedTotal > 0
-    ? `This transfer would bring your no-KYC volume to about ${formatFixed(projectedTotal, 2)} USD, and UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`
-    : `UNIGOX only allows up to ${formatFixed(MAX_AMOUNT_WITHOUT_KYC, 2)} USD without verification.`;
-  return [
-    `To continue with this ${session.amount ? `${session.amount} ${session.currency}` : "transfer"}, UNIGOX needs KYC first.`,
-    projectedLine,
-  ].join(" ");
+  return `To continue with this ${session.amount ? `${session.amount} ${session.currency}` : "transfer"}, UNIGOX needs KYC first.`;
 }
 
 function buildKycVerificationLinkMessage(session: TransferSession, data: KycVerificationData): string {
@@ -4386,23 +1639,9 @@ function buildKycVerificationLinkMessage(session: TransferSession, data: KycVeri
     statusLine,
     link
       ? `Open this link and complete the checks on the verification site: ${link}`
-      : "UNIGOX has started the verification, but the secure link still has not appeared yet. This can take a little longer on the provider side. If it still does not show up, message me again and I’ll re-check immediately, and you can also open KYC directly in the UNIGOX website or app if you prefer.",
-    "If you prefer, you can also complete the same KYC directly from the UNIGOX website or app.",
+      : "UNIGOX has started the verification, but the secure link has not appeared yet. This can take a little longer on the provider side. Message me again and I’ll re-check immediately.",
     "Once UNIGOX shows the verification as approved, message me here and I’ll continue the transfer.",
   ].filter(Boolean).join(" ");
-}
-
-function kycVerificationHasAuthFailure(data: KycVerificationData | undefined): boolean {
-  return Boolean(data?.error_key && KYC_AUTH_FAILURE_KEYS.has(data.error_key));
-}
-
-function buildKycVerificationAuthFailureMessage(session: TransferSession): string {
-  return [
-    buildKycRequirementMessage(session),
-    "I couldn't fetch the secure verification link from chat on this machine right now.",
-    "Please open KYC directly in the UNIGOX website or app and complete it there.",
-    "Once UNIGOX shows the verification as approved, message me here and I’ll continue the transfer.",
-  ].join(" ");
 }
 
 function mergeKycVerificationData(
@@ -4541,9 +1780,6 @@ async function startKycVerificationFlow(
   }
   applyKycVerificationSnapshot(session, resolvedVerification);
   session.stage = "awaiting_kyc_completion";
-  if (kycVerificationHasAuthFailure(resolvedVerification)) {
-    return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
-  }
   return reply(withUpdate(session, deps), buildKycVerificationLinkMessage(session, resolvedVerification));
 }
 
@@ -4557,12 +1793,6 @@ async function maybeEnsureKycReady(
     return {};
   }
 
-  const projectedTradeUsd = getProjectedTradeUsd(session);
-  const totalTradedVolumeUsd = session.auth.totalTradedVolumeUsd || 0;
-  if (!(projectedTradeUsd > 0) || projectedTradeUsd + totalTradedVolumeUsd < MAX_AMOUNT_WITHOUT_KYC) {
-    return {};
-  }
-
   if (client.getKycVerificationStatus) {
     try {
       let verification = await client.getKycVerificationStatus();
@@ -4572,17 +1802,6 @@ async function maybeEnsureKycReady(
       applyKycVerificationSnapshot(session, verification);
       if (isUserKycVerified(session.auth.kycStatus)) {
         return {};
-      }
-      if (kycVerificationHasAuthFailure(verification)) {
-        session.status = "blocked";
-        session.execution.confirmed = false;
-        session.stage = "awaiting_kyc_completion";
-        return {
-          blockedResult: reply(
-            withUpdate(session, deps),
-            buildKycVerificationAuthFailureMessage(session)
-          ),
-        };
       }
       if (kycVerificationNeedsAttention(verification.status)) {
         session.status = "blocked";
@@ -4625,13 +1844,6 @@ async function maybeResumeExistingKycVerification(
       return undefined;
     }
 
-    if (kycVerificationHasAuthFailure(verification)) {
-      session.status = "blocked";
-      session.execution.confirmed = false;
-      session.stage = "awaiting_kyc_completion";
-      return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
-    }
-
     if (kycVerificationNeedsAttention(verification.status)) {
       session.status = "blocked";
       session.execution.confirmed = false;
@@ -4648,7 +1860,7 @@ async function maybeResumeExistingKycVerification(
 function capturePendingPriceChange(session: TransferSession, tradeRequest: TradeRequest): void {
   session.execution.pendingPriceChange = {
     originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
-    originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+    originalCryptoAmount: session.execution.approvedCryptoAmount,
     newFiatAmount: tradeRequest.fiat_amount,
     newCryptoAmount: tradeRequest.total_crypto_amount,
     vendorOfferRate: tradeRequest.vendor_offer_rate,
@@ -4667,7 +1879,7 @@ function buildNewPriceConfirmationMessage(session: TransferSession, tradeRequest
   const priceChange = tradeRequest
     ? {
         originalFiatAmount: session.execution.preflight?.quote?.fiatAmount || session.amount,
-        originalCryptoAmount: session.execution.preflight?.quote?.totalCryptoAmount,
+        originalCryptoAmount: session.execution.approvedCryptoAmount,
         newFiatAmount: tradeRequest.fiat_amount,
         newCryptoAmount: tradeRequest.total_crypto_amount,
         vendorOfferRate: tradeRequest.vendor_offer_rate,
@@ -4700,7 +1912,7 @@ function buildNewPriceConfirmationMessage(session: TransferSession, tradeRequest
     : undefined;
 
   return [
-    "The original quote is no longer available.",
+    originalCrypto ? "The original quote is no longer available." : "I have a live price for this transfer.",
     newCrypto && newFiat ? `Right now this counterparty can do ${newCrypto} for ${newFiat} via ${route}.` : undefined,
     originalFiat && originalCrypto ? `Your original target was ${originalFiat} for about ${originalCrypto}.` : undefined,
     rateLine,
@@ -4878,17 +2090,22 @@ function getPaymentDetailRecipientName(detail: PaymentDetail): string | undefine
   return undefined;
 }
 
+/**
+ * Describes payout details saved with the backend as a contact's stored payment method.
+ *
+ * @param detail Saved details as the backend lists them.
+ * @returns The stored method, identified by institution and rail slug, or `undefined` when the
+ *   backend reports no institution or rail for the details. Numeric ids are 0 because the backend
+ *   does not report them for saved details; the flow matches by slug.
+ */
 function toStoredPaymentMethod(detail: PaymentDetail): StoredPaymentMethod | undefined {
-  if (!detail.payment_method?.id || !detail.payment_network?.id) return undefined;
-  const methodName = cleanText(detail.payment_method.name);
-  const networkName = cleanText(detail.payment_network.name);
-  if (!methodName || !networkName) return undefined;
+  if (!detail.payment_method?.slug || !detail.payment_network?.slug) return undefined;
   return {
-    method: methodName,
-    methodId: detail.payment_method.id,
+    method: cleanText(detail.payment_method.name) || detail.payment_method.slug,
+    methodId: 0,
     methodSlug: detail.payment_method.slug,
-    networkId: detail.payment_network.id,
-    network: networkName,
+    networkId: 0,
+    network: cleanText(detail.payment_network.name) || detail.payment_network.slug,
     networkSlug: detail.payment_network.slug,
     details: { ...(detail.details || {}) },
   };
@@ -4994,7 +2211,7 @@ function buildPaymentNetworkPrompt(method: PaymentMethodInfo, currency: string):
   return `${method.name} has multiple payout routes for ${currency}: ${networkNames}. Which one should I use? ${clarification}`;
 }
 
-function currentFieldPrompt(field: NetworkFieldConfig, session?: TransferSession): string {
+function currentFieldPrompt(field: PaymentFieldConfig, session?: TransferSession): string {
   const optional = field.required ? "" : " Optional — you can say 'skip'.";
   if (field.field === "bank_name") {
     return `Which bank should receive this payout? Please provide the bank name.${optional}`.trim();
@@ -5005,29 +2222,20 @@ function currentFieldPrompt(field: NetworkFieldConfig, session?: TransferSession
       : "";
     return `Please provide the recipient's IBAN for this payout.${sepaNote}${optional}`.trim();
   }
-  const hint = field.placeholder ? ` ${field.placeholder}.` : field.description ? ` ${field.description}.` : "";
-  return `Please provide ${field.label || field.field}.${hint}${optional}`.trim();
+  const hint = field.placeholder ? ` ${field.placeholder}.` : "";
+  const choices = field.options?.length ? ` Options: ${field.options.map((option) => option.name).join(", ")}.` : "";
+  return `Please provide ${field.label || field.field}.${hint}${choices}${optional}`.trim();
 }
 
 async function resolveFieldConfig(session: TransferSession, deps: TransferFlowDeps): Promise<ResolvedPaymentMethodFieldConfig> {
   if (!session.currency || !session.payment) {
     throw new Error("Cannot resolve field config without currency and payment selection");
   }
-  const getFieldConfig = deps.getPaymentMethodFieldConfig || defaultGetPaymentMethodFieldConfig;
-  return getFieldConfig({
+  return resolvePaymentCatalogue(deps).getPaymentMethodFieldConfig({
     currency: session.currency,
-    methodId: session.payment.methodId,
     methodSlug: session.payment.methodSlug,
-    networkId: session.payment.networkId,
     networkSlug: session.payment.networkSlug,
   });
-}
-
-function fieldValidationOptions(config: ResolvedPaymentMethodFieldConfig): { countryCode?: string; formatId?: string } {
-  return {
-    countryCode: config.networkConfig.countryCode,
-    formatId: config.selectedFormatId,
-  };
 }
 
 async function validateStoredContactSelection(
@@ -5057,7 +2265,7 @@ async function validateStoredContactSelection(
   session.payment.selectedFormatId = config.selectedFormatId;
 
   const validate = deps.validatePaymentDetailInput || defaultValidatePaymentDetailInput;
-  const result = validate(session.details, config.fields, fieldValidationOptions(config));
+  const result = validate(session.details, config.fields);
   if (result.valid) {
     session.details = { ...result.normalizedDetails };
     session.detailCollection.index = config.fields.length;
@@ -5406,6 +2614,73 @@ function resolveMatchedFundingAmount(
   return String(quotedCryptoAmount);
 }
 
+/**
+ * Funds a matched trade's escrow from the paying wallet and re-reads the trade.
+ *
+ * @param params.session Current session. On success its trade status and settlement state follow
+ *   the funded trade; on an uncovered wallet it stays in `awaiting_trade_settlement`.
+ * @param params.deps Flow collaborators.
+ * @param params.client Backend; must provide `fundTradeEscrow`.
+ * @param params.tradeId Trade to fund.
+ * @param params.tradeRequestId Request the trade belongs to.
+ * @param params.tradeRequestStatus Last known request status, kept in the settlement state.
+ * @param params.assetCode Asset being spent, for the event and the reply.
+ * @param params.amount Crypto amount being funded, in whole units, for the event.
+ * @param params.events Events gathered so far in this turn; the funding event is appended.
+ * @returns `trade` is the re-read trade (absent when the backend cannot re-read it).
+ *   `blockedResult` is set instead when the wallet cannot cover the trade: nothing was moved and
+ *   the reply tells the person to fund the wallet and ask for status.
+ * @throws Whatever the backend throws for any other funding failure.
+ */
+async function fundMatchedTradeEscrow(params: {
+  session: TransferSession;
+  deps: TransferFlowDeps;
+  client: TransferExecutionClient;
+  tradeId: string;
+  tradeRequestId: string;
+  tradeRequestStatus?: string;
+  assetCode: string;
+  amount: string;
+  events: TransferFlowEvent[];
+}): Promise<{ trade?: SettlementTrade; blockedResult?: TransferFlowResult }> {
+  const { session, deps, client, tradeId, tradeRequestId, events } = params;
+  try {
+    await client.fundTradeEscrow!(tradeId);
+  } catch (error) {
+    if (!(error instanceof TransferExecutionError) || error.reason !== "insufficient_balance") throw error;
+    session.execution.lastError = error.message;
+    session.stage = "awaiting_trade_settlement";
+    session.status = "active";
+    events.push({ type: "blocked_insufficient_balance", message: "The partner wallet could not cover the trade at funding time.", data: { tradeId } });
+    return {
+      blockedResult: reply(
+        withUpdate(session, deps),
+        `A provider accepted this transfer, but the partner wallet does not hold enough ${params.assetCode} to fund it, so nothing has left the wallet. Add funds in My Wallet on unigox.com, then ask me for status and I'll fund it.`,
+        ["status"],
+        events
+      ),
+    };
+  }
+
+  events.push({
+    type: "escrow_funding_submitted",
+    message: `Authorized ${params.amount} ${params.assetCode} into escrow for trade #${tradeId}.`,
+    data: { tradeId, tradeRequestId, assetCode: params.assetCode, amount: params.amount },
+  });
+
+  const fundedTrade = client.getTrade ? await client.getTrade(tradeId) : undefined;
+  if (fundedTrade) {
+    session.execution.tradeStatus = fundedTrade.status;
+    session.execution.settlement = createInitialSettlementState({
+      tradeRequestId,
+      tradeRequestStatus: params.tradeRequestStatus,
+      tradeId: fundedTrade.id,
+      tradeStatus: fundedTrade.status,
+    });
+  }
+  return { trade: fundedTrade };
+}
+
 async function maybeAdvanceMatchedTradePreEscrow(
   session: TransferSession,
   deps: TransferFlowDeps,
@@ -5439,7 +2714,7 @@ async function maybeAdvanceMatchedTradePreEscrow(
       session.execution.partnerDetailCollection = {
         tradeId: currentTrade.id,
         tradeRequestId: matched.id,
-        paymentDetailsId: diff.payment_details_id || session.execution.paymentDetailsId || 0,
+        paymentDetailsId: diff.payment_details_id || session.execution.paymentDetailsId || "",
         partner: currentTrade.partner_short_name || "",
         index: 0,
         fields: fieldsToComplete,
@@ -5515,36 +2790,20 @@ async function maybeAdvanceMatchedTradePreEscrow(
     && client.fundTradeEscrow
     && !tradeNeedsPartnerPaymentDetails(currentTrade)
     && !tradeNeedsBuyerPaymentDetails(currentTrade)
-    && currentTrade?.escrow_address
   ) {
-    const funding = await client.fundTradeEscrow(matchedAssetCode, matchedFundingAmount, currentTrade.escrow_address);
-    events.push({
-      type: "escrow_funding_submitted",
-      message: `Submitted ${matchedFundingAmount} ${matchedAssetCode} to the trade escrow address for trade #${matched.trade.id}.`,
-      data: {
-        tradeId: matched.trade.id,
-        tradeRequestId: matched.id,
-        assetCode: matchedAssetCode,
-        amount: matchedFundingAmount,
-        escrowAddress: currentTrade.escrow_address,
-        txId: funding.txId,
-        txHash: funding.txHash,
-      },
+    const funding = await fundMatchedTradeEscrow({
+      session,
+      deps,
+      client,
+      tradeId: matched.trade.id,
+      tradeRequestId: matched.id,
+      tradeRequestStatus: matched.status,
+      assetCode: matchedAssetCode,
+      amount: matchedFundingAmount,
+      events,
     });
-
-    if (client.getTrade) {
-      const fundedTrade = await client.getTrade(matched.trade.id);
-      if (fundedTrade) {
-        currentTrade = fundedTrade;
-        session.execution.tradeStatus = fundedTrade.status;
-        session.execution.settlement = createInitialSettlementState({
-          tradeRequestId: matched.id,
-          tradeRequestStatus: matched.status,
-          tradeId: fundedTrade.id,
-          tradeStatus: fundedTrade.status,
-        });
-      }
-    }
+    if (funding.blockedResult) return { blockedResult: funding.blockedResult };
+    currentTrade = funding.trade ?? currentTrade;
     escrowJustFunded = true;
   }
 
@@ -5594,11 +2853,54 @@ async function refreshSettlementForSession(
   const state = ensureSettlementState(session);
   if (!state) return undefined;
   const client = await getExecutionClient(deps, session);
-  const snapshot = mode === "poll"
-    ? await pollSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides))
-    : await refreshSettlementSnapshot(state, client, settlementMonitorOptions(deps, overrides));
+  const options = settlementMonitorOptions(deps, overrides);
+  let snapshot = mode === "poll"
+    ? await pollSettlementSnapshot(state, client, options)
+    : await refreshSettlementSnapshot(state, client, options);
+  snapshot = await authorizeOwedRefund(session, client, snapshot, options);
   applySettlementSnapshotToSession(session, snapshot);
   return snapshot;
+}
+
+/**
+ * Signs the refund of a stopped trade whose crypto is still in escrow, then re-reads the trade.
+ *
+ * The refund can only go back to the paying wallet, so no decision is needed from the person.
+ *
+ * @param session Current session; a refused signature is recorded in `execution.lastError`.
+ * @param client Backend.
+ * @param snapshot Settlement snapshot just taken.
+ * @param options Monitor options to use for the re-read.
+ * @returns The original snapshot when no refund is owed or the signature was refused; otherwise a
+ *   fresh snapshot whose prompt says the refund was signed.
+ */
+async function authorizeOwedRefund(
+  session: TransferSession,
+  client: TransferExecutionClient,
+  snapshot: SettlementSnapshot,
+  options: SettlementMonitorOptions
+): Promise<SettlementSnapshot> {
+  const tradeId = snapshot.state.tradeId;
+  if (!tradeId || !client.authorizeRefund || !snapshot.trade?.possible_actions?.includes("action_authorize_refund")) {
+    return snapshot;
+  }
+  try {
+    await client.authorizeRefund(tradeId);
+  } catch (error) {
+    session.execution.lastError = error instanceof Error ? error.message : String(error);
+    return snapshot;
+  }
+  const refreshed = await refreshSettlementSnapshot(snapshot.state, client, options);
+  return {
+    ...refreshed,
+    prompt: "This transfer ended without a payout. I signed the refund, so the funds are on their way back to the partner wallet. Ask me for status to check that they arrived.",
+    options: ["status"],
+    events: [
+      ...snapshot.events,
+      { type: "status_changed", message: `Authorized the escrow refund for trade #${tradeId}.`, data: { tradeId } },
+      ...refreshed.events,
+    ],
+  };
 }
 
 function settlementStageActive(session: TransferSession): boolean {
@@ -5618,171 +2920,46 @@ function settlementDecisionStageActive(session: TransferSession): boolean {
   ].includes(session.stage);
 }
 
-async function maybeHandleTopUpTurn(
+/**
+ * Handles a reply while the transfer waits for the partner wallet to be funded.
+ *
+ * @param session Current session, in `awaiting_balance_resolution`.
+ * @param turn The person's reply: a recheck request, a new amount, or anything else.
+ * @param deps Flow collaborators.
+ * @returns `undefined` when the session is not waiting on the balance or the reply is neither a
+ *   recheck nor an amount; otherwise the confirmation prompt, or the balance block again.
+ */
+async function maybeHandleBalanceResolutionTurn(
   session: TransferSession,
   turn: TransferTurn,
   deps: TransferFlowDeps
 ): Promise<TransferFlowResult | undefined> {
-  if (![
-    "awaiting_topup_method",
-    "awaiting_external_deposit_asset",
-    "awaiting_external_deposit_chain",
-    "awaiting_balance_resolution",
-  ].includes(session.stage)) {
-    return undefined;
-  }
+  if (session.stage !== "awaiting_balance_resolution") return undefined;
 
   const hints = parseIntentHints(turn.text);
-  if (hints.changeAmount || hints.changeCurrency) {
-    return undefined;
-  }
+  if (hints.changeAmount || hints.changeCurrency) return undefined;
 
   const selectionText = turn.option || turn.text;
+  const parsed = parseAmountAndCurrency(selectionText);
+  const wantsRefresh = wantsBalanceRecheck(selectionText) || looksLikeTopUpCompletion(selectionText || "") || Boolean(parsed.amount);
+  if (!wantsRefresh) return undefined;
 
-  if (session.stage === "awaiting_balance_resolution") {
-    const parsed = parseAmountAndCurrency(selectionText);
-    const wantsRefresh = wantsBalanceRecheck(selectionText) || looksLikeTopUpCompletion(selectionText) || Boolean(parsed.amount);
-    if (wantsRefresh) {
-      if (parsed.amount) {
-        session.amount = parsed.amount;
-        session.execution.confirmed = false;
-      }
-      if (parsed.currency && parsed.currency !== session.currency) {
-        setCurrency(session, parsed.currency);
-      } else {
-        invalidateBalanceState(session);
-      }
-      const client = await getExecutionClient(deps, session);
-      const preflight = await ensureExecutionPreflight(session, deps, client);
-      if (preflight.blockedResult) {
-        return preflight.blockedResult;
-      }
-      session.status = "active";
-      session.topUp = undefined;
-      session.stage = "awaiting_confirmation";
-      return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, preflight.events);
-    }
-
-    const methodChoice = chooseTopUpMethod(selectionText);
-    if (methodChoice || /\b(top up|fund wallet|deposit)\b/i.test(cleanText(selectionText))) {
-      session.stage = "awaiting_topup_method";
-      return maybeHandleTopUpTurn(session, turn, deps);
-    }
-
-    return undefined;
+  if (parsed.amount) {
+    session.amount = parsed.amount;
+    session.execution.confirmed = false;
   }
-
-  const methodChoice = chooseTopUpMethod(selectionText);
-
-  if (session.stage === "awaiting_topup_method") {
-    if (methodChoice === "internal_username") {
-      const client = await getExecutionClient(deps, session);
-      await maybeHydrateAuthIdentity(session, deps, client);
-      session.status = "blocked";
-      session.topUp = { method: methodChoice };
-      session.stage = "awaiting_balance_resolution";
-      return reply(
-        withUpdate(session, deps),
-        buildInternalTopUpInstructions(session.auth.username, session.execution.preflight),
-        ["recheck balance", "external / on-chain deposit", "change amount"]
-      );
-    }
-
-    if (methodChoice === "external_deposit") {
-      const client = await getExecutionClient(deps, session);
-      if (!client.getSupportedDepositOptions) {
-        throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
-      }
-      const options = await client.getSupportedDepositOptions();
-      session.status = "blocked";
-      session.topUp = { method: methodChoice };
-      session.stage = "awaiting_external_deposit_asset";
-      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
-    }
-
-    const parsed = parseAmountAndCurrency(selectionText);
-    const wantsRefresh = wantsBalanceRecheck(selectionText) || looksLikeTopUpCompletion(selectionText) || Boolean(parsed.amount);
-    if (wantsRefresh) {
-      if (parsed.amount) {
-        session.amount = parsed.amount;
-        session.execution.confirmed = false;
-      }
-      if (parsed.currency && parsed.currency !== session.currency) {
-        setCurrency(session, parsed.currency);
-      } else {
-        invalidateBalanceState(session);
-      }
-      const client = await getExecutionClient(deps, session);
-      const preflight = await ensureExecutionPreflight(session, deps, client);
-      if (preflight.blockedResult) {
-        return preflight.blockedResult;
-      }
-      session.status = "active";
-      session.topUp = undefined;
-      session.stage = "awaiting_confirmation";
-      return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, preflight.events);
-    }
-
-    if (!methodChoice) {
-      return reply(
-        withUpdate(session, deps),
-        buildTopUpMethodPrompt(session.auth.username),
-        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"]
-      );
-    }
+  if (parsed.currency && parsed.currency !== session.currency) {
+    setCurrency(session, parsed.currency);
+  } else {
+    invalidateBalanceState(session);
   }
-
   const client = await getExecutionClient(deps, session);
-  if (!client.getSupportedDepositOptions) {
-    throw new Error("This UNIGOX client cannot load supported deposit options for external top-ups.");
-  }
-  const options = await client.getSupportedDepositOptions();
+  const preflight = await ensureExecutionPreflight(session, deps, client);
+  if (preflight.blockedResult) return preflight.blockedResult;
 
-  if (session.stage === "awaiting_external_deposit_asset") {
-    const asset = chooseDepositAssetOption(options, selectionText);
-    if (!asset) {
-      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
-    }
-    session.topUp = {
-      ...session.topUp,
-      method: "external_deposit",
-      assetCode: asset.assetCode,
-      chainId: undefined,
-    };
-    session.stage = "awaiting_external_deposit_chain";
-    return reply(withUpdate(session, deps), buildExternalDepositChainPrompt(asset), asset.chains.map((chain) => chain.chainName));
-  }
-
-  if (session.stage === "awaiting_external_deposit_chain") {
-    const asset = options.find((option) => option.assetCode === session.topUp?.assetCode);
-    if (!asset) {
-      session.stage = "awaiting_external_deposit_asset";
-      return reply(withUpdate(session, deps), buildExternalDepositAssetPrompt(options), options.map((option) => option.assetCode));
-    }
-    const chain = chooseDepositChainOption(asset.chains, selectionText);
-    if (!chain) {
-      return reply(withUpdate(session, deps), buildExternalDepositChainPrompt(asset), asset.chains.map((entry) => entry.chainName));
-    }
-    if (!client.describeDepositSelection) {
-      throw new Error("This UNIGOX client cannot resolve a single deposit address for the chosen external top-up route.");
-    }
-    const resolved = await client.describeDepositSelection({ assetCode: asset.assetCode, chainId: chain.chainId });
-    session.status = "blocked";
-    session.topUp = {
-      ...session.topUp,
-      method: "external_deposit",
-      assetCode: asset.assetCode,
-      chainId: chain.chainId,
-    };
-    session.stage = "awaiting_balance_resolution";
-    return reply(
-      withUpdate(session, deps),
-      buildExternalDepositInstructions(resolved),
-      ["recheck balance", "another UNIGOX user sends to my username", "change amount"]
-    );
-  }
-
-  return undefined;
+  session.status = "active";
+  session.stage = "awaiting_confirmation";
+  return reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, preflight.events);
 }
 
 async function maybeHandlePartnerPaymentDetailsTurn(
@@ -5898,7 +3075,6 @@ async function maybeHandlePartnerPaymentDetailsTurn(
       status: session.execution.tradeRequestStatus || "accepted_by_vendor",
       trade: currentTrade ? { id: currentTrade.id, status: currentTrade.status } : undefined,
       total_crypto_amount: currentTrade?.total_crypto_amount,
-      trade_type: "SELL",
     },
     session,
     session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0
@@ -5909,36 +3085,20 @@ async function maybeHandlePartnerPaymentDetailsTurn(
     && tradeCanFundEscrow(currentTrade, currentTrade.status)
     && client.fundTradeEscrow
     && !tradeNeedsBuyerPaymentDetails(currentTrade)
-    && currentTrade.escrow_address
   ) {
-    const funding = await client.fundTradeEscrow(matchedAssetCode, matchedFundingAmount, currentTrade.escrow_address);
-    events.push({
-      type: "escrow_funding_submitted",
-      message: `Submitted ${matchedFundingAmount} ${matchedAssetCode} to the trade escrow address for trade #${currentTrade.id}.`,
-      data: {
-        tradeId: currentTrade.id,
-        tradeRequestId: collection.tradeRequestId,
-        assetCode: matchedAssetCode,
-        amount: matchedFundingAmount,
-        escrowAddress: currentTrade.escrow_address,
-        txId: funding.txId,
-        txHash: funding.txHash,
-      },
+    const funding = await fundMatchedTradeEscrow({
+      session,
+      deps,
+      client,
+      tradeId: currentTrade.id,
+      tradeRequestId: collection.tradeRequestId,
+      tradeRequestStatus: session.execution.tradeRequestStatus,
+      assetCode: matchedAssetCode,
+      amount: matchedFundingAmount,
+      events,
     });
-
-    if (client.getTrade) {
-      const fundedTrade = await client.getTrade(currentTrade.id);
-      if (fundedTrade) {
-        currentTrade = fundedTrade;
-        session.execution.tradeStatus = fundedTrade.status;
-        session.execution.settlement = createInitialSettlementState({
-          tradeRequestId: collection.tradeRequestId,
-          tradeRequestStatus: session.execution.tradeRequestStatus,
-          tradeId: fundedTrade.id,
-          tradeStatus: fundedTrade.status,
-        });
-      }
-    }
+    if (funding.blockedResult) return funding.blockedResult;
+    currentTrade = funding.trade ?? currentTrade;
     escrowJustFunded = true;
   }
 
@@ -6016,7 +3176,7 @@ async function maybeHandleSettlementTurn(
       session.stage = "awaiting_manual_settlement_followup";
       return reply(
         withUpdate(session, deps),
-        `${deferred.prompt} Confirmation attempt failed: ${message}`,
+        `${deferred.prompt} UNIGOX did not accept the receipt confirmation just now, so nothing was released. Ask me for status and try again.`,
         deferred.options,
         [...events, ...deferred.events.map(mapSettlementEvent)]
       );
@@ -6045,37 +3205,6 @@ async function maybeHandleKycTurn(
 ): Promise<TransferFlowResult | undefined> {
   if (!["awaiting_kyc_full_name", "awaiting_kyc_country", "awaiting_kyc_completion"].includes(session.stage)) {
     return undefined;
-  }
-
-  // Interrupt: handle wc:/tc:// browser-login links even during KYC
-  const interruptWcUri = parseWalletConnectUriInput(turn.text);
-  const interruptTcUri = parseTonConnectUniversalLinkInput(turn.text);
-  if (interruptWcUri || interruptTcUri) {
-    const savedStage = session.stage;
-    const walletChoice = session.auth.choice;
-    if (interruptWcUri && (walletChoice === "ton" || walletChoice === "generated_ton")) {
-      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
-      return reply(withUpdate(session, deps), prompt);
-    }
-    if (interruptTcUri && (walletChoice === "evm" || walletChoice === "generated_evm")) {
-      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
-      return reply(withUpdate(session, deps), prompt);
-    }
-    if (interruptWcUri) {
-      const browserLoginResult = await tryApproveProvidedEvmWalletConnectBrowserLink(session, turn, deps);
-      if (browserLoginResult) {
-        browserLoginResult.session.stage = savedStage;
-        return browserLoginResult;
-      }
-    }
-    if (interruptTcUri) {
-      const browserLoginResult = await tryApproveProvidedTonConnectBrowserLink(session, turn, deps);
-      if (browserLoginResult) {
-        browserLoginResult.session.stage = savedStage;
-        return browserLoginResult;
-      }
-    }
-    session.stage = savedStage;
   }
 
   const client = await getExecutionClient(deps, session);
@@ -6169,9 +3298,6 @@ async function maybeHandleKycTurn(
     );
   }
 
-  if (kycVerificationHasAuthFailure(verification)) {
-    return reply(withUpdate(session, deps), buildKycVerificationAuthFailureMessage(session));
-  }
 
   if (kycVerificationNeedsAttention(verification.status)) {
     return reply(withUpdate(session, deps), buildKycVerificationLinkMessage(session, verification));
@@ -6216,13 +3342,7 @@ async function maybeHandleKycInfoTurn(
 
   if (wantsStart) {
     if (!session.auth.available || !client) {
-      session.status = "blocked";
-      session.stage = "awaiting_auth_choice";
-      const prompt = `${buildKycEligibilityMessage(session)} I can start KYC for you once you're signed in to UNIGOX. Which sign-in method would you like to use?`;
-      return reply(withUpdate(session, deps), prompt, [...AUTH_CHOICE_OPTIONS], [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
+      return replyWithSetupInstructions(session, deps);
     }
 
     if (isUserKycVerified(session.auth.kycStatus)) {
@@ -6231,7 +3351,7 @@ async function maybeHandleKycInfoTurn(
 
     session.status = "blocked";
     session.execution.confirmed = false;
-    const intro = `${buildKycEligibilityMessage(session)} Yes — you can complete KYC earlier if you want, and I can start it from here.`;
+    const intro = buildKycEligibilityMessage(session);
 
     if (!session.auth.kycFullName) {
       session.stage = "awaiting_kyc_full_name";
@@ -6253,11 +3373,11 @@ async function maybeHandleKycInfoTurn(
   }
 
   const currentStepHint = buildCurrentKycStepHint(session);
-  const earlyLine = earlyQuestion
-    ? " Yes — you can complete KYC earlier if you want. Say `I wanna do KYC` or `give me the KYC link` and I’ll start it here."
+  const earlyLine = earlyQuestion && !isUserKycVerified(session.auth.kycStatus)
+    ? " You can do it right away, before sending anything. Say `I want to do KYC` or `give me the KYC link` and I’ll start it here."
     : "";
   const signInLine = !session.auth.available
-    ? " If you want me to check your exact status or start KYC from here, sign in to UNIGOX first."
+    ? " To check your exact status or start KYC from here, this skill's UNIGOX settings need to be configured first."
     : "";
   const stepLine = currentStepHint ? ` ${currentStepHint}` : "";
   return reply(withUpdate(session, deps), `${buildKycEligibilityMessage(session)}${earlyLine}${signInLine}${stepLine}`);
@@ -6314,125 +3434,69 @@ async function maybeHandleOutstandingTradeReminderTurn(
       }]
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    session.execution.lastError = error instanceof Error ? error.message : String(error);
     return reply(
       withUpdate(session, deps),
-      `I tried to confirm receipt for ${amountLabel} to ${outstanding.recipient}, but the signed confirm-payment step failed: ${message}`,
+      `I tried to confirm receipt for ${amountLabel} to ${outstanding.recipient}, but UNIGOX did not accept the confirmation just now, so nothing was released. Please try again in a moment.`,
     );
   }
 }
 
+/**
+ * Handles the answer to "the live price is higher than you approved".
+ *
+ * Nothing was placed when the question was asked, so confirming approves the new crypto cost and
+ * places the transfer again, and cancelling only drops the offer.
+ *
+ * @param session Current session, in `awaiting_new_price_confirmation` with a pending price change.
+ * @param turn The person's reply.
+ * @param deps Flow collaborators.
+ * @returns `undefined` when the session is not waiting for this answer; otherwise the next reply.
+ */
 async function maybeHandlePendingPriceChangeTurn(
   session: TransferSession,
   turn: TransferTurn,
   deps: TransferFlowDeps
 ): Promise<TransferFlowResult | undefined> {
-  if (session.stage !== "awaiting_new_price_confirmation" || !session.execution.tradeRequestId) return undefined;
+  const pending = session.execution.pendingPriceChange;
+  if (session.stage !== "awaiting_new_price_confirmation" || !pending) return undefined;
 
   const responseText = cleanText(turn.option || turn.text);
   const wantsConfirm = /^(confirm(?: new price)?|accept(?: new price)?|go ahead|proceed|continue)$/i.test(responseText);
   const wantsCancel = /^(cancel|stop|reject(?: new price)?|decline)$/i.test(responseText);
-  const client = await getExecutionClient(deps, session);
-  const tradeRequestId = session.execution.tradeRequestId;
-  const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || session.amount || 0;
-  const sellAssetCode = session.execution.preflight?.selectedAssetCode
-    || session.execution.preflight?.quote?.cryptoCurrencyCode
-    || "USDC";
-  const events: TransferFlowEvent[] = [];
-
-  const latest = client.getTradeRequest ? await client.getTradeRequest(tradeRequestId) : undefined;
-  if (latest?.status) {
-    session.execution.tradeRequestStatus = latest.status;
-  }
-
-  if (latest?.status === "accepted_by_vendor" && latest.trade?.id) {
-    return continueFromMatchedTradeRequest(session, deps, client, latest, events, sellAssetCode, quotedCryptoAmount);
-  }
-
-  if (latest?.status === "new_price_refused_by_initiator" || latest?.status === "canceled_by_initiator") {
-    clearPendingPriceChange(session);
-    session.stage = "awaiting_no_match_resolution";
-    session.status = "active";
-    return reply(
-      withUpdate(session, deps),
-      "That updated quote has already been cancelled. You can retry, change the method, or change the currency.",
-      ["retry", "change method", "change currency", "change amount"],
-      events
-    );
-  }
-
-  if (!wantsConfirm && !wantsCancel) {
-    if (latest?.status === "new_price_confirming_by_initiator") {
-      capturePendingPriceChange(session, latest);
-    }
-    return reply(
-      withUpdate(session, deps),
-      buildNewPriceConfirmationMessage(session, latest),
-      ["confirm new price", "cancel"],
-      events
-    );
-  }
 
   if (wantsCancel) {
-    if (client.refuseTradeRequestPrice) {
-      const refused = await client.refuseTradeRequestPrice(tradeRequestId);
-      session.execution.tradeRequestStatus = refused.status;
-    }
     clearPendingPriceChange(session);
+    session.execution.confirmed = false;
     session.stage = "awaiting_no_match_resolution";
     session.status = "active";
-    events.push({
-      type: "trade_price_change_cancelled",
-      message: `Cancelled the updated quote for trade request #${tradeRequestId}.`,
-      data: { tradeRequestId },
-    });
     return reply(
       withUpdate(session, deps),
-      "Okay, I cancelled that updated quote. If you want, I can retry the transfer, change the method, or change the currency.",
+      "Okay, I dropped that updated price and nothing was sent. If you want, I can retry the transfer, change the method, or change the currency.",
       ["retry", "change method", "change currency", "change amount"],
-      events
+      [{ type: "trade_price_change_cancelled", message: "The person declined the updated price." }]
     );
   }
 
-  if (!client.confirmTradeRequestPrice) {
-    return reply(
-      withUpdate(session, deps),
-      "This setup cannot confirm a changed vendor price yet. Please cancel this request or retry the transfer.",
-      ["cancel", "retry"],
-      events
-    );
+  if (!wantsConfirm || typeof pending.newCryptoAmount !== "number") {
+    return reply(withUpdate(session, deps), buildNewPriceConfirmationMessage(session), ["confirm new price", "cancel"]);
   }
 
-  const confirmed = await client.confirmTradeRequestPrice(tradeRequestId);
-  session.execution.tradeRequestStatus = confirmed.status;
+  session.execution.approvedCryptoAmount = pending.newCryptoAmount;
   clearPendingPriceChange(session);
-  events.push({
-    type: "trade_price_change_confirmed",
-    message: `Confirmed the updated quote for trade request #${tradeRequestId}.`,
-    data: { tradeRequestId, status: confirmed.status },
-  });
-
-  const resolved = confirmed.trade?.id || confirmed.status === "accepted_by_vendor"
-    ? confirmed
-    : await client.waitForTradeMatch(tradeRequestId, deps.waitForMatchTimeoutMs || 120_000);
-
-  if (resolved.status === "new_price_confirming_by_initiator") {
-    capturePendingPriceChange(session, resolved);
-    session.stage = "awaiting_new_price_confirmation";
-    return reply(
-      withUpdate(session, deps),
-      buildNewPriceConfirmationMessage(session, resolved),
-      ["confirm new price", "cancel"],
-      events
-    );
-  }
-
-  return continueFromMatchedTradeRequest(session, deps, client, resolved, events, sellAssetCode, quotedCryptoAmount);
+  session.execution.confirmed = true;
+  const result = await handleExecution(session, deps);
+  result.events = [
+    { type: "trade_price_change_confirmed", message: "The person approved the updated price.", data: { approvedCryptoAmount: pending.newCryptoAmount } },
+    ...result.events,
+  ];
+  return result;
 }
 
 async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedHints, deps: TransferFlowDeps): Promise<TransferFlowResult | undefined> {
   if (!hints.checkStatus || !session.execution.tradeRequestId) return undefined;
 
+  const client = await getExecutionClient(deps, session);
   const snapshot = await refreshSettlementForSession(session, deps, "refresh");
   if (snapshot) {
     const events = snapshot.events.map(mapSettlementEvent);
@@ -6483,22 +3547,11 @@ async function maybeHandleStatusRequest(session: TransferSession, hints: ParsedH
     return reply(withUpdate(session, deps), snapshot.prompt, snapshot.options, events);
   }
 
-  const client = await getExecutionClient(deps, session);
   let tradeRequest: TradeRequest | undefined;
   if (client.getTradeRequest) {
     tradeRequest = await client.getTradeRequest(session.execution.tradeRequestId);
     session.execution.tradeRequestStatus = tradeRequest.status;
     if (tradeRequest.trade?.id) session.execution.tradeId = tradeRequest.trade.id;
-    if (tradeRequest.status === "new_price_confirming_by_initiator") {
-      capturePendingPriceChange(session, tradeRequest);
-      session.stage = "awaiting_new_price_confirmation";
-      session.status = "active";
-      return reply(
-        withUpdate(session, deps),
-        buildNewPriceConfirmationMessage(session, tradeRequest),
-        ["confirm new price", "cancel"]
-      );
-    }
   }
 
   let tradeStatus = session.execution.tradeStatus;
@@ -6527,13 +3580,6 @@ function applyHintsToSession(session: TransferSession, hints: ParsedHints): void
   if (typeof hints.amount === "number" && !session.amount) {
     session.amount = hints.amount;
   }
-  if (hints.authChoice) {
-    const hintedMode = authChoiceToMode(hints.authChoice);
-    const storedChoiceForMode = hintedMode
-      ? resolveStoredChoiceForMode(hintedMode, session.auth.availableChoices)
-      : undefined;
-    session.auth.choice = storedChoiceForMode || hints.authChoice;
-  }
 }
 
 function applyMidFlowChanges(session: TransferSession, hints: ParsedHints): boolean {
@@ -6553,7 +3599,7 @@ function applyMidFlowChanges(session: TransferSession, hints: ParsedHints): bool
 
 function maybeConsumeStructuredFieldValue(
   turn: TransferTurn,
-  field: NetworkFieldConfig
+  field: PaymentFieldConfig
 ): string | undefined {
   if (!turn.fields) return undefined;
   const direct = turn.fields[field.field];
@@ -6650,7 +3696,6 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
 
   const config = await resolveFieldConfig(session, deps);
   const validate = deps.validatePaymentDetailInput || defaultValidatePaymentDetailInput;
-  const options = fieldValidationOptions(config);
   const fields = config.fields;
   let consumedText = false;
 
@@ -6678,7 +3723,7 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
       continue;
     }
 
-    const partialResult = validate({ [field.field]: provided }, [field], options);
+    const partialResult = validate({ [field.field]: provided }, [field]);
     if (!partialResult.valid) {
       const hadPreviousError = Boolean(session.detailCollection.lastError);
       session.detailCollection.lastError = partialResult.errors[0]?.message;
@@ -6694,7 +3739,7 @@ async function collectPaymentDetails(session: TransferSession, turn: TransferTur
   }
 
   const effectiveFields = isEurSepaIban(session) ? fields.filter((f) => f.field !== "bank_name") : fields;
-  const fullValidation = validate(session.details, effectiveFields, options);
+  const fullValidation = validate(session.details, effectiveFields);
   session.details = { ...session.details, ...fullValidation.normalizedDetails };
   if (!fullValidation.valid) {
     const firstError = fullValidation.errors[0];
@@ -6724,9 +3769,11 @@ async function maybeHandlePaymentRouteCorrection(
   const query = cleanText(turn.option || turn.text);
   if (!query || CONFIRM_RE.test(query) || /^confirm\b/i.test(query)) return undefined;
 
-  const getMethods = deps.getPaymentMethodsForCurrency || defaultGetPaymentMethodsForCurrency;
-  const currencyData = await getMethods(session.currency);
-  const currentMethod = currencyData.paymentMethods.find((method) => method.id === session.payment?.methodId);
+  const currencyData = await resolvePaymentCatalogue(deps).getPaymentMethodsForCurrency(
+    session.currency,
+    tokenizeSelectionTerms(`${query} ${session.payment.methodName}`)
+  );
+  const currentMethod = currencyData.paymentMethods.find((method) => method.slug === session.payment?.methodSlug);
   const selectedMethod = chooseMentionedMethod(currencyData.paymentMethods, query).method;
   const nextMethod = selectedMethod || currentMethod;
   if (!nextMethod) return undefined;
@@ -6735,7 +3782,7 @@ async function maybeHandlePaymentRouteCorrection(
     || (nextMethod.networks.length === 1 ? nextMethod.networks[0] : undefined);
 
   if (!nextNetwork) {
-    if (!selectedMethod || selectedMethod.id === session.payment.methodId) return undefined;
+    if (!selectedMethod || selectedMethod.slug === session.payment.methodSlug) return undefined;
     session.payment = {
       methodId: nextMethod.id,
       methodSlug: nextMethod.slug,
@@ -6757,7 +3804,7 @@ async function maybeHandlePaymentRouteCorrection(
     );
   }
 
-  if (nextMethod.id === session.payment.methodId && nextNetwork.id === session.payment.networkId) {
+  if (nextMethod.slug === session.payment.methodSlug && nextNetwork.slug === session.payment.networkSlug) {
     return undefined;
   }
 
@@ -6784,7 +3831,7 @@ async function maybeHandlePaymentRouteCorrection(
       .filter(([, value]) => typeof value === "string" && cleanText(value).length > 0)
   ) as Record<string, string>;
   const validate = deps.validatePaymentDetailInput || defaultValidatePaymentDetailInput;
-  const validation = validate(relevantDetails, config.fields, fieldValidationOptions(config));
+  const validation = validate(relevantDetails, config.fields);
   session.details = { ...validation.normalizedDetails };
   session.payment = {
     ...session.payment,
@@ -6834,6 +3881,17 @@ async function maybeHandlePaymentRouteCorrection(
   );
 }
 
+/**
+ * Checks, once per amount and currency, that the transfer can be paid: reads the partner wallet,
+ * saves the payout details, prices the transfer per asset and picks the asset that covers it.
+ *
+ * @param session Current session. Its preflight, balance and saved-details id are updated.
+ * @param deps Flow collaborators.
+ * @param client Backend.
+ * @returns Events describing what was checked. `blockedResult` is set, and the session moves to
+ *   `awaiting_balance_resolution`, when no single asset covers the transfer.
+ * @throws Whatever the backend throws when the balance cannot be read or the details are refused.
+ */
 async function ensureExecutionPreflight(
   session: TransferSession,
   deps: TransferFlowDeps,
@@ -6852,29 +3910,48 @@ async function ensureExecutionPreflight(
   session.auth.balanceUsd = balance.totalUsd;
   session.auth.walletBalance = balance;
 
-  let paymentDetailsId: number | undefined;
   const paymentDetail = await client.ensurePaymentDetail({
-    paymentMethodId: session.payment!.methodId,
-    paymentNetworkId: session.payment!.networkId,
     fiatCurrencyCode: session.currency!,
+    paymentMethodSlug: session.payment!.methodSlug,
+    paymentNetworkSlug: session.payment!.networkSlug,
     details: session.details,
   });
-  paymentDetailsId = paymentDetail.id;
-  session.execution.paymentDetailsId = paymentDetail.id;
+  const paymentDetailsId = paymentDetail.id;
+  session.execution.paymentDetailsId = paymentDetailsId;
   events.push({
     type: "payment_detail_ensured",
-    message: `Ensured payment detail #${paymentDetail.id}.`,
-    data: { paymentDetailId: paymentDetail.id },
+    message: `Ensured payment detail #${paymentDetailsId}.`,
+    data: { paymentDetailId: paymentDetailsId },
   });
 
   const assetCoverageState = await buildAssetCoverageState({
     client,
     balance,
     amount,
-    paymentDetailsId: paymentDetail.id,
+    currency: session.currency!,
+    paymentMethodSlug: session.payment!.methodSlug,
+    paymentNetworkSlug: session.payment!.networkSlug,
     tradePartner: settings.tradePartner,
   });
   const quote = assetCoverageState.quote;
+
+  if (client.getPreflightQuote && !quote) {
+    // Without a price there is nothing to compare the balance against and nothing to show for
+    // confirmation, so the transfer stops here instead of guessing the cost.
+    session.execution.confirmed = false;
+    session.status = "blocked";
+    session.stage = "awaiting_no_match_resolution";
+    events.push({ type: "blocked_no_vendor_match", message: "No estimate was available for any funding asset." });
+    return {
+      events,
+      blockedResult: reply(
+        withUpdate(session, deps),
+        "I couldn't get a price for this transfer right now, so nothing was placed. You can retry, change the amount, or switch payment method / currency.",
+        ["retry", "change method", "change currency", "change amount"],
+        events
+      ),
+    };
+  }
 
   session.execution.preflight = {
     balanceUsd: balance.totalUsd,
@@ -6916,19 +3993,18 @@ async function ensureExecutionPreflight(
 
   if (!session.execution.preflight.selectedAssetCode) {
     session.status = "blocked";
-    session.topUp = undefined;
-    session.stage = "awaiting_topup_method";
+    session.stage = "awaiting_balance_resolution";
     const message = [
-      buildUsernameReminder(session.auth.username, session.auth.choice),
+      buildSenderLine(session.auth.username),
       buildWalletBalanceLine(balance, balance.totalUsd),
       buildPreflightQuoteSummary(session.execution.preflight),
       buildAssetCoverageLine(session.execution.preflight),
       buildTopUpShortfallLine(session.execution.preflight),
       quote
-        ? "Until one asset covers that current estimate on its own, I will not place the trade."
-        : `Until one asset covers the requested ${amount} ${session.currency} on its own, I will not place the trade.`,
+        ? "Until one asset covers that current estimate on its own, I will not place the transfer."
+        : `Until one asset covers the requested ${amount} ${session.currency} on its own, I will not place the transfer.`,
       buildPreflightQuoteCaveat(session.execution.preflight),
-      buildTopUpMethodPrompt(session.auth.username),
+      FUND_PARTNER_WALLET_PROMPT,
     ].filter(Boolean).join(" ");
     events.push({
       type: "blocked_insufficient_balance",
@@ -6943,18 +4019,25 @@ async function ensureExecutionPreflight(
     });
     return {
       events,
-      blockedResult: reply(
-        withUpdate(session, deps),
-        message,
-        ["another UNIGOX user sends to my username", "external / on-chain deposit", "change amount"],
-        events
-      ),
+      blockedResult: reply(withUpdate(session, deps), message, [...BALANCE_RESOLUTION_OPTIONS], events),
     };
   }
 
   return { events };
 }
 
+/**
+ * Places the confirmed transfer and follows it until something is needed from the person.
+ *
+ * Runs the preflight, places the order for at most the crypto cost the person approved, waits for
+ * a provider, funds the escrow and starts settlement monitoring.
+ *
+ * @param session Current session with recipient, method, details, amount and confirmation.
+ * @param deps Flow collaborators.
+ * @returns The next reply: settlement progress, a request to confirm a higher price, a balance or
+ *   KYC block, or a no-match prompt.
+ * @throws Whatever the backend throws for a failure the flow has no wording for.
+ */
 async function handleExecution(session: TransferSession, deps: TransferFlowDeps): Promise<TransferFlowResult> {
   const events: TransferFlowEvent[] = [];
   const client = await getExecutionClient(deps, session);
@@ -6968,53 +4051,56 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
     return preflight.blockedResult;
   }
 
-  let paymentDetailsId = session.execution.preflight?.paymentDetailsId;
-  if (!paymentDetailsId) {
-    const paymentDetail = await client.ensurePaymentDetail({
-      paymentMethodId: session.payment!.methodId,
-      paymentNetworkId: session.payment!.networkId,
-      fiatCurrencyCode: session.currency!,
-      details: session.details,
-    });
-    paymentDetailsId = paymentDetail.id;
-    session.execution.paymentDetailsId = paymentDetail.id;
-    events.push({
-      type: "payment_detail_ensured",
-      message: `Ensured payment detail #${paymentDetail.id}.`,
-      data: { paymentDetailId: paymentDetail.id },
-    });
-  }
-
+  const paymentDetailsId = session.execution.preflight?.paymentDetailsId;
   if (!paymentDetailsId) {
     throw new Error("Missing payment details id for trade execution.");
   }
 
-  const quotedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount || amount;
-  const sellAssetCode = session.execution.preflight?.selectedAssetCode || session.execution.preflight?.quote?.cryptoCurrencyCode || "USDC";
+  // No approved price (the estimate was unavailable, or the confirmation did not follow a shown
+  // price) is treated as zero, so the live price is shown and confirmed before anything is placed.
+  const approvedCryptoAmount = session.execution.approvedCryptoAmount ?? 0;
+  const sellAssetCode = session.execution.preflight?.selectedAssetCode || session.execution.preflight?.quote?.cryptoCurrencyCode || SELLABLE_ASSET_ORDER[0];
   let tradeRequest: TradeRequest;
   try {
     tradeRequest = await client.createTradeRequest({
-      tradeType: "SELL",
       cryptoCurrencyCode: sellAssetCode,
       fiatCurrencyCode: session.currency!,
       fiatAmount: amount,
-      cryptoAmount: quotedCryptoAmount,
+      cryptoAmount: approvedCryptoAmount,
       paymentDetailsId,
-      paymentMethodId: session.payment!.methodId,
-      paymentNetworkId: session.payment!.networkId,
       tradePartner: settings.tradePartner,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/kyc_verification_needed/i.test(message)) {
+    if (!(error instanceof TransferExecutionError)) throw error;
+    session.execution.lastError = error.message;
+    if (error.reason === "kyc_required") {
       session.execution.confirmed = false;
       const kycCheck = await maybeEnsureKycReady(session, deps, client);
-      if (kycCheck.blockedResult) {
-        return kycCheck.blockedResult;
-      }
-      return startKycVerificationFlow(session, deps, client);
+      return kycCheck.blockedResult ?? startKycVerificationFlow(session, deps, client);
     }
-    throw error;
+    return replyToUnplacedTransfer(session, deps, error, events);
+  }
+
+  if (tradeRequest.status === "new_price_confirming_by_initiator") {
+    capturePendingPriceChange(session, tradeRequest);
+    session.stage = "awaiting_new_price_confirmation";
+    session.status = "active";
+    events.push({
+      type: "trade_price_changed",
+      message: "The live price is higher than the confirmed estimate; nothing was placed.",
+      data: {
+        newFiatAmount: tradeRequest.fiat_amount,
+        newCryptoAmount: tradeRequest.total_crypto_amount,
+        originalFiatAmount: session.amount,
+        originalCryptoAmount: session.execution.approvedCryptoAmount,
+      },
+    });
+    return reply(
+      withUpdate(session, deps),
+      buildNewPriceConfirmationMessage(session, tradeRequest),
+      ["confirm new price", "cancel"],
+      events
+    );
   }
 
   session.execution.tradeRequestId = tradeRequest.id;
@@ -7026,36 +4112,13 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
   });
 
   try {
-    const matched = await client.waitForTradeMatch(tradeRequest.id, deps.waitForMatchTimeoutMs || 120_000);
-    if (matched.status === "new_price_confirming_by_initiator") {
-      capturePendingPriceChange(session, matched);
-      session.stage = "awaiting_new_price_confirmation";
-      session.status = "active";
-      events.push({
-        type: "trade_price_changed",
-        message: `Trade request #${matched.id} needs a new price confirmation before funding.`,
-        data: {
-          tradeRequestId: matched.id,
-          newFiatAmount: matched.fiat_amount,
-          newCryptoAmount: matched.total_crypto_amount,
-          originalFiatAmount: matched.best_deal_fiat_amount || session.amount,
-          originalCryptoAmount: matched.best_deal_crypto_amount || quotedCryptoAmount,
-        },
-      });
-      return reply(
-        withUpdate(session, deps),
-        buildNewPriceConfirmationMessage(session, matched),
-        ["confirm new price", "cancel"],
-        events
-      );
-    }
-
-    return continueFromMatchedTradeRequest(session, deps, client, matched, events, sellAssetCode, quotedCryptoAmount);
+    const matched = await client.waitForTradeMatch(tradeRequest.id, deps.waitForMatchTimeoutMs ?? DEFAULT_WAIT_FOR_MATCH_TIMEOUT_MS);
+    return await continueFromMatchedTradeRequest(session, deps, client, matched, events, sellAssetCode, approvedCryptoAmount);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    session.execution.lastError = message;
+    if (!(error instanceof TransferExecutionError)) throw error;
+    session.execution.lastError = error.message;
 
-    if (/timed out/i.test(message)) {
+    if (error.reason === "match_timeout") {
       session.status = "active";
       session.stage = "awaiting_match_status";
       events.push({
@@ -7065,30 +4128,57 @@ async function handleExecution(session: TransferSession, deps: TransferFlowDeps)
       });
       return reply(
         withUpdate(session, deps),
-        `Trade request #${tradeRequest.id} is still waiting for a vendor match. You can ask for status, retry later, or change the method / currency.`,
+        "Your transfer is placed and still waiting for a provider to accept it. You can ask for status, retry later, or change the method / currency.",
         ["status", "change method", "change currency"],
         events
       );
     }
-
-    if (/not_accepted_by_any_vendor|matching_timeout_reached|escrow_deployment_failed/i.test(message)) {
-      session.status = "blocked";
-      session.stage = "awaiting_no_match_resolution";
-      events.push({
-        type: "blocked_no_vendor_match",
-        message,
-        data: { tradeRequestId: tradeRequest.id },
-      });
-      return reply(
-        withUpdate(session, deps),
-        `Trade request #${tradeRequest.id} could not get a vendor match (${message}). You can retry, change the amount, or switch payment method / currency.`,
-        ["retry", "change method", "change currency", "change amount"],
-        events
-      );
-    }
-
-    throw error;
+    return replyToUnplacedTransfer(session, deps, error, events);
   }
+}
+
+/**
+ * Tells the person a transfer could not go ahead and what they can do next.
+ *
+ * @param session Current session. Moves to the stage that fits the failure.
+ * @param deps Flow collaborators.
+ * @param error The failure, by reason. Its message is engineering detail and is not shown.
+ * @param events Events gathered so far in this turn; the failure is appended.
+ * @returns The reply for the failure: recheck balance, retry at a new price, or change something.
+ */
+function replyToUnplacedTransfer(
+  session: TransferSession,
+  deps: TransferFlowDeps,
+  error: TransferExecutionError,
+  events: TransferFlowEvent[]
+): TransferFlowResult {
+  if (error.reason === "insufficient_balance") {
+    invalidateBalanceState(session);
+    session.execution.confirmed = false;
+    session.status = "blocked";
+    session.stage = "awaiting_balance_resolution";
+    events.push({ type: "blocked_insufficient_balance", message: "The partner wallet could not cover the order at funding time." });
+    return reply(
+      withUpdate(session, deps),
+      `The partner wallet no longer holds enough to fund this transfer, so nothing was sent. ${FUND_PARTNER_WALLET_PROMPT}`,
+      [...BALANCE_RESOLUTION_OPTIONS],
+      events
+    );
+  }
+
+  session.execution.confirmed = false;
+  session.status = "blocked";
+  session.stage = "awaiting_no_match_resolution";
+  events.push({ type: "blocked_no_vendor_match", message: `Transfer not placed: ${error.reason}.` });
+  const explanation = error.reason === "price_changed"
+    ? "The price moved while I was placing the transfer, so nothing was sent."
+    : "No provider can take this transfer right now, so nothing was sent.";
+  return reply(
+    withUpdate(session, deps),
+    `${explanation} You can retry, change the amount, or switch payment method / currency.`,
+    ["retry", "change method", "change currency", "change amount"],
+    events
+  );
 }
 
 export async function startTransferFlow(turn: TransferTurn | string, deps: TransferFlowDeps = {}): Promise<TransferFlowResult> {
@@ -7113,7 +4203,7 @@ export async function advanceTransferFlow(
     delete stageAwareHints.amount;
     delete stageAwareHints.currency;
   }
-  if (["awaiting_auth_profile_choice", "awaiting_auth_choice", "awaiting_email_address", "awaiting_email_otp", "awaiting_wallet_setup_choice", "awaiting_evm_wallet_signin", "awaiting_evm_login_key", "awaiting_ton_address", "awaiting_ton_address_confirmation", "awaiting_ton_auth_method", "awaiting_ton_private_key", "awaiting_ton_mnemonic", "awaiting_tonconnect_completion", "awaiting_secret_cleanup_confirmation", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
+  if (["awaiting_setup", "awaiting_saved_recipient_confirmation"].includes(inputSession.stage)) {
     delete stageAwareHints.recipient;
     delete stageAwareHints.currency;
     delete stageAwareHints.amount;
@@ -7226,46 +4316,27 @@ export async function advanceTransferFlow(
     }
   }
 
-  if (!session.auth.checked) {
-    const auth = resolveInitialAuthState(deps.authState);
+  if (!session.auth.available) {
+    const auth: ResolvedAuthState = deps.authState ?? detectAuthState();
     session.auth = {
+      ...session.auth,
       checked: true,
       available: auth.hasReplayableAuth,
-      mode: auth.authMode,
-      choice: auth.choice || session.auth.choice,
-      availableChoices: auth.availableChoices,
-      username: auth.username,
-      balanceUsd: auth.balanceUsd,
-      startupSnapshotShown: false,
+      missingSettings: auth.missingSettings,
+      username: auth.username ?? session.auth.username,
+      balanceUsd: auth.balanceUsd ?? session.auth.balanceUsd,
+      walletBalance: auth.walletBalance ?? session.auth.walletBalance,
     };
-    if (session.goal === "transfer" && session.auth.available) {
-      await maybeHydrateStartupAuthStatus(session, deps);
+    if (session.auth.available) {
+      if (session.stage === "awaiting_setup") {
+        session.status = "active";
+        session.stage = "resolving";
+      }
+      if (session.goal === "transfer") {
+        await maybeHydrateStartupAuthStatus(session, deps);
+      }
     }
   }
-
-  await maybeRefreshStoredAuthState(session, deps);
-
-  const explicitWalletConnectLink = Boolean(parseWalletConnectUriInput(normalizedTurn.text));
-  const explicitTonConnectLink = Boolean(parseTonConnectUniversalLinkInput(normalizedTurn.text));
-  const requestedStoredAuthMode = resolveRequestedStoredAuthMode(hints, explicitWalletConnectLink, explicitTonConnectLink);
-  if (session.goal !== "save_contact_only" && session.auth.available && session.auth.availableChoices?.length) {
-    const selectedStoredChoice = resolveStoredChoiceForMode(requestedStoredAuthMode, session.auth.availableChoices);
-
-    if (selectedStoredChoice) {
-      applySelectedStoredAuthChoice(session, selectedStoredChoice);
-    } else if (hasMultipleStoredWalletChoices(session.auth.availableChoices) && !session.auth.choice) {
-      session.status = "blocked";
-      session.stage = "awaiting_auth_profile_choice";
-      const prompt = buildStoredAuthProfileChoicePrompt(session.auth.availableChoices);
-      return reply(withUpdate(session, deps), prompt, buildStoredAuthProfileChoiceOptions(session.auth.availableChoices), [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-  }
-
-  const generatedWalletExportReply = await maybeHandleGeneratedWalletExportTurn(session, normalizedTurn, deps);
-  if (generatedWalletExportReply) return generatedWalletExportReply;
 
   if (!handledSavedRecipientDecision) {
     const outstandingReminderReply = await maybeHandleOutstandingTradeReminderTurn(session, normalizedTurn, deps);
@@ -7274,9 +4345,6 @@ export async function advanceTransferFlow(
 
   const kycInfoReply = await maybeHandleKycInfoTurn(session, normalizedTurn, deps);
   if (kycInfoReply) return kycInfoReply;
-
-  const authOnboardingReply = await maybeHandleAuthOnboardingTurn(session, normalizedTurn, deps);
-  if (authOnboardingReply) return authOnboardingReply;
 
   const kycReply = await maybeHandleKycTurn(session, normalizedTurn, deps);
   if (kycReply) return kycReply;
@@ -7332,110 +4400,11 @@ export async function advanceTransferFlow(
   const paymentRouteCorrectionReply = await maybeHandlePaymentRouteCorrection(session, normalizedTurn, deps);
   if (paymentRouteCorrectionReply) return paymentRouteCorrectionReply;
 
-  const topUpReply = await maybeHandleTopUpTurn(session, normalizedTurn, deps);
-  if (topUpReply) return topUpReply;
-
-  if (session.goal === "sign_in_only" && session.auth.available) {
-    await maybeHydrateAuthIdentity(session, deps);
-    session.status = "blocked";
-    const walletChoice = session.auth.choice;
-    if (explicitTonConnectLink && (walletChoice === "evm" || walletChoice === "generated_evm")) {
-      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "tonconnect");
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    if (explicitWalletConnectLink && (walletChoice === "ton" || walletChoice === "generated_ton")) {
-      const prompt = buildBrowserLoginProtocolMismatchPrompt(walletChoice, "walletconnect");
-      return reply(withUpdate(session, deps), prompt, undefined, [{
-        type: "blocked_missing_auth",
-        message: prompt,
-      }]);
-    }
-    if (explicitWalletConnectLink) {
-      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
-      if (walletConnectBrowserLogin) {
-        return walletConnectBrowserLogin;
-      }
-    } else if (explicitTonConnectLink) {
-      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
-      if (tonConnectBrowserLogin) {
-        return tonConnectBrowserLogin;
-      }
-    } else if (walletChoice === "evm" || walletChoice === "generated_evm") {
-      const walletConnectBrowserLogin = await tryApproveProvidedEvmWalletConnectBrowserLink(session, normalizedTurn, deps);
-      if (walletConnectBrowserLogin) {
-        return walletConnectBrowserLogin;
-      }
-    } else {
-      const tonConnectBrowserLogin = await tryApproveProvidedTonConnectBrowserLink(session, normalizedTurn, deps);
-      if (tonConnectBrowserLogin) {
-        return tonConnectBrowserLogin;
-      }
-    }
-
-    const followUp = buildBrowserLoginContinuationPrompt(session.auth.username, session.auth.choice);
-    return reply(withUpdate(session, deps), followUp, undefined, [{
-      type: "blocked_missing_auth",
-      message: followUp,
-    }]);
-  }
+  const balanceReply = await maybeHandleBalanceResolutionTurn(session, normalizedTurn, deps);
+  if (balanceReply) return balanceReply;
 
   if (session.goal !== "save_contact_only" && !session.auth.available) {
-    session.status = "blocked";
-    session.stage = "awaiting_auth_choice";
-    if (hints.authChoice) {
-      session.auth.choice = hints.authChoice;
-      if (hints.authChoice === "evm") {
-        const followUp = "Before I ask for any key: have you already signed in on unigox.com with that EVM wallet? If not, please do that first, then tell me once it’s done. After that I’ll ask which login wallet key you used.";
-        session.stage = "awaiting_evm_wallet_signin";
-        return reply(withUpdate(session, deps), followUp, ["I signed in", "Create dedicated EVM wallet", "Create dedicated TON wallet", "TON wallet connection", "email OTP"], [{
-          type: "blocked_missing_auth",
-          message: followUp,
-        }]);
-      }
-
-      if (hints.authChoice === "ton") {
-        const storedTonAddress = getStoredTonAddress(deps);
-        session.auth.tonAddress = storedTonAddress || session.auth.tonAddress;
-        session.auth.tonAddressDisplay = storedTonAddress || session.auth.tonAddressDisplay;
-        const followUp = storedTonAddress ? buildTonAddressConfirmationPrompt(session.auth.tonAddressDisplay || storedTonAddress) : buildTonAddressPrompt();
-        session.stage = storedTonAddress ? "awaiting_ton_address_confirmation" : "awaiting_ton_address";
-        return reply(withUpdate(session, deps), followUp, ["this address is correct", "use a different TON address"], [{
-          type: "blocked_missing_auth",
-          message: followUp,
-        }]);
-      }
-
-      if (hints.authChoice === "generated_evm" || hints.authChoice === "generated_ton") {
-        return hints.authChoice === "generated_evm"
-          ? finalizeGeneratedEvmWalletSetup(session, deps)
-          : finalizeGeneratedTonWalletSetup(session, deps);
-      }
-
-      const storedEmail = session.auth.emailAddress || getStoredEmailAddress(deps);
-      if (storedEmail) {
-        return startEmailOtpFlow(session, deps, storedEmail);
-      }
-
-      session.stage = "awaiting_email_address";
-      const followUp = buildEmailAddressPrompt();
-      return reply(withUpdate(session, deps), followUp, undefined, [{
-        type: "blocked_missing_auth",
-        message: followUp,
-      }]);
-    }
-
-    return reply(
-      withUpdate(session, deps),
-      getUnigoxWalletConnectionPrompt(),
-      [...AUTH_CHOICE_OPTIONS],
-      [{
-        type: "blocked_missing_auth",
-        message: getUnigoxWalletConnectionPrompt(),
-      }]
-    );
+    return replyWithSetupInstructions(session, deps);
   }
 
   if (!session.recipientMode && !session.recipientQuery && !session.recipientName) {
@@ -7592,8 +4561,10 @@ export async function advanceTransferFlow(
   }
 
   if (!session.payment) {
-    const getMethods = deps.getPaymentMethodsForCurrency || defaultGetPaymentMethodsForCurrency;
-    const currencyData = await getMethods(session.currency!);
+    const currencyData = await resolvePaymentCatalogue(deps).getPaymentMethodsForCurrency(
+      session.currency!,
+      tokenizeSelectionTerms(normalizedTurn.option || normalizedTurn.text)
+    );
     const selection = await maybeSelectPaymentMethodFromText(session, normalizedTurn, currencyData);
 
     if (selection.matched) {
@@ -7642,10 +4613,12 @@ export async function advanceTransferFlow(
     }
   }
 
-  if (session.payment && !session.payment.networkId) {
-    const getMethods = deps.getPaymentMethodsForCurrency || defaultGetPaymentMethodsForCurrency;
-    const currencyData = await getMethods(session.currency!);
-    const method = currencyData.paymentMethods.find((entry) => entry.id === session.payment?.methodId);
+  if (session.payment && !session.payment.networkSlug) {
+    const currencyData = await resolvePaymentCatalogue(deps).getPaymentMethodsForCurrency(
+      session.currency!,
+      tokenizeSelectionTerms(session.payment.methodName)
+    );
+    const method = currencyData.paymentMethods.find((entry) => entry.slug === session.payment?.methodSlug);
     if (!method) {
       resetPaymentSelection(session);
       return prependReplyContext(
@@ -7758,9 +4731,13 @@ export async function advanceTransferFlow(
     || (session.stage === "awaiting_confirmation" && /^confirm\b/i.test(cleanText(normalizedTurn.text)));
 
   if (!session.execution.confirmed) {
+    const answersShownConfirmation = inputSession.stage === "awaiting_confirmation";
     session.stage = "awaiting_confirmation";
     if (confirmationReply) {
       session.execution.confirmed = true;
+      if (answersShownConfirmation) {
+        session.execution.approvedCryptoAmount = session.execution.preflight?.quote?.totalCryptoAmount;
+      }
     } else {
       return prependReplyContext(
         reply(withUpdate(session, deps), buildConfirmationMessage(session), undefined, events),

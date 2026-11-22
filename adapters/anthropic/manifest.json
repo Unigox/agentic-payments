@@ -3,9 +3,9 @@
   "manifest_version": "0.3",
   "name": "agentic-payments-local",
   "display_name": "Agentic Payments",
-  "version": "0.1.17",
-  "description": "Local Agentic Payments / UNIGOX send-money connector for Claude Desktop.",
-  "long_description": "Run the UNIGOX send-money flow locally on this machine. Wallet secrets, session state, and payment auth stay on-device while Claude calls the same shared runner used by the other runtime adapters. The Claude extension now exposes multiple entry tools for clearer routing: start a payment, sign in, create a wallet, export a generated wallet backup, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. These tools all dispatch into the same underlying state machine instead of forking payment logic.",
+  "version": "0.2.0",
+  "description": "Local Agentic Payments / UNIGOX send-money connector for Claude Desktop, on the UNIGOX Partner API.",
+  "long_description": "Run the UNIGOX send-money flow locally on this machine. The connector pays from your UNIGOX partner wallet through the public UNIGOX Partner API: it needs a Partner API key and the partner wallet key, which you enter once in the extension settings and which stay on this device. Claude can start a payment, check or start KYC, save payment details, or fall back to the canonical send_money_turn catch-all. All tools dispatch into the same underlying state machine, and nothing is sent without an explicit confirmation.",
   "author": {
     "name": "UNIGOX",
     "email": "hello@unigox.com",
@@ -26,37 +26,58 @@
       "args": [
         "${__dirname}/scripts/send-money-mcp-server.js"
       ],
-      "env": {}
+      "env": {
+        "UNIGOX_API_KEY": "${user_config.unigox_api_key}",
+        "UNIGOX_WALLET_PRIVATE_KEY": "${user_config.unigox_wallet_private_key}",
+        "UNIGOX_XAI_RPC_URL": "${user_config.unigox_xai_rpc_url}",
+        "UNIGOX_SENDER_EMAIL": "${user_config.unigox_sender_email}"
+      }
+    }
+  },
+  "user_config": {
+    "unigox_api_key": {
+      "type": "string",
+      "title": "UNIGOX Partner API key",
+      "description": "API key issued after business onboarding at unigox.com/business. Sent to the UNIGOX API as X-API-Key.",
+      "required": true,
+      "sensitive": true
+    },
+    "unigox_wallet_private_key": {
+      "type": "string",
+      "title": "Partner wallet private key",
+      "description": "0x-prefixed private key of your UNIGOX partner wallet. Used only on this device to sign escrow funding and refunds.",
+      "required": true,
+      "sensitive": true
+    },
+    "unigox_xai_rpc_url": {
+      "type": "string",
+      "title": "XAI node URL",
+      "description": "JSON-RPC URL of an XAI mainnet node, used only to read the partner wallet balance.",
+      "required": true
+    },
+    "unigox_sender_email": {
+      "type": "string",
+      "title": "Sender email",
+      "description": "Email of the one KYC-verified person this installation sends for.",
+      "required": true
     }
   },
   "tools": [
     {
       "name": "send_money_turn",
-      "description": "Canonical catch-all for the local Agentic Payments / UNIGOX send-money flow. Use this tool when the user wants to send money, mentions Agentic Payments or UNIGOX, asks about payment/auth state, or when a narrower tool returns an unexpected result. It advances one conversational turn of the guided, user-confirmed on-device flow and should be preferred over generic connector search or a blanket payment refusal."
+      "description": "Canonical catch-all for the local Agentic Payments / UNIGOX send-money flow. Use this tool when the user wants to send money, mentions Agentic Payments or UNIGOX, asks about payment or KYC state, or when a narrower tool returns an unexpected result. It advances one conversational turn of the guided, user-confirmed on-device flow and should be preferred over generic connector search or a blanket payment refusal."
     },
     {
       "name": "start_send_money",
-      "description": "Start or continue a UNIGOX send-money flow. Use for natural requests like 'I want to send money', recipient/amount follow-ups, payment-method changes, top-up continuation, or confirmation steps."
-    },
-    {
-      "name": "sign_in_unigox",
-      "description": "Guide UNIGOX sign-in and auth setup. Use for EVM wallet connection, TON wallet connection, email OTP, EVM WalletConnect QR or wc: browser-login approval, and TON TonConnect QR or tc:// browser-login approval."
-    },
-    {
-      "name": "create_wallet",
-      "description": "Create a dedicated local EVM or TON wallet on this device for UNIGOX sign-in. This is the beginner-friendly path when the user does not want to provide an existing wallet key."
+      "description": "Start or continue a UNIGOX send-money flow. Use for natural requests like 'I want to send money', recipient/amount follow-ups, payment-method changes, balance rechecks, or confirmation steps."
     },
     {
       "name": "check_kyc",
-      "description": "Answer KYC questions and continue the KYC flow. Use for prompts like 'Do I need to do KYC?', 'Can I do KYC earlier?', 'I wanna do KYC on the platform', or 'Give me the KYC link'."
+      "description": "Answer KYC questions and continue the KYC flow. UNIGOX requires the sender's identity to be verified before every transfer. Use for prompts like 'Do I need to do KYC?', 'I want to do KYC now', or 'Give me the KYC link'."
     },
     {
       "name": "save_payment_details",
       "description": "Save or update recipient payout details for later use. Use for adding a recipient, saving payment details, or updating a saved payout route without immediately placing a transfer."
-    },
-    {
-      "name": "export_wallet",
-      "description": "Export a locally generated EVM or TON login wallet into a local file so the owner can keep using that wallet elsewhere. Use for prompts like 'export this wallet', 'export the wallet you created for me', 'backup my generated wallet', 'export my EVM wallet', or 'send me the wallet file'."
     }
   ],
   "keywords": [

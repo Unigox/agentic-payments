@@ -8,19 +8,11 @@
 
 Claude Desktop requires **two install steps**, then a **restart**:
 
-1. Open the `.mcpb` extension bundle
+1. Open the `.mcpb` extension bundle and enter your settings
 2. Upload the companion Skill ZIP
 3. Restart Claude Desktop
 
 > Both steps are required. The `.mcpb` registers the local MCP server that runs the payment engine. The Skill ZIP teaches Claude *when* to call that server. Without the Skill, Claude may not route payment requests to the local tools reliably.
-
-## Video Tutorial
-
-If you want to follow the install visually, watch:
-
-- [Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)
-
----
 
 ## Step 1: Install the Extension (.mcpb)
 
@@ -40,7 +32,7 @@ open /path/to/agentic-payments/adapters/anthropic/installed.mcpb
 
 Double-click `installed.mcpb`. Claude Desktop should open and show an extension install prompt.
 
-Click **Install** when prompted. You should see "Agentic Payments" appear under your extensions.
+Click **Install** when prompted. Claude Desktop then asks for four settings: the UNIGOX Partner API key, the partner wallet private key, an XAI node URL and the sender email. See [Settings and credentials](authentication.md) for what each one is. You should see "Agentic Payments" appear under your extensions.
 
 ---
 
@@ -83,7 +75,7 @@ or:
 I want to send money using Agentic Payments.
 ```
 
-You should see the sign-in setup flow begin. If you have previously configured authentication, it should detect your saved credentials automatically.
+With settings in place, the reply starts with the sender and the partner wallet balance. Without them, it names the settings that are missing.
 
 ---
 
@@ -104,9 +96,9 @@ All three steps are needed on every update. The extension and Skill are separate
 | Problem | Likely cause | Fix |
 |---------|-------------|-----|
 | Claude says "I don't have payment tools" | Skill ZIP not uploaded | Do Step 2 |
-| Claude suggests TonConnect for an EVM wallet | Old extension still running | Do Step 3 (restart) |
+| Claude asks you to sign in or paste a key | Old extension or old Skill still installed | Redo Steps 1 to 3 |
 | Claude routes to public connector search | Skill not active or extension disabled | Check both are installed, restart |
-| Auth credentials not detected | MCP server running from stale bundle | Restart Claude Desktop |
+| "Missing settings" although you entered them | MCP server running from a stale bundle | Restart Claude Desktop, then check the extension settings |
 | "MCP server not found" errors | `.mcpb` install failed | Redo Step 1, then restart |
 
 ---
@@ -127,4 +119,4 @@ This produces:
 
 ## Next Steps
 
-- [Configure authentication](authentication.md) (wallet setup, sign-in paths)
+- [Settings and credentials](authentication.md)

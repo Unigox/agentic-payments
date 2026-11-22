@@ -4,33 +4,37 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { detectAuthState, loadUnigoxConfigFromEnv, startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
+import { detectAuthState, startTransferFlow, advanceTransferFlow } from "./transfer-orchestrator.ts";
 
 process.env.SEND_MONEY_DISABLE_ENV_FILE_LOOKUP = "1";
-import { validatePaymentDetailInput } from "./unigox-client.ts";
+import { validatePaymentDetailInput } from "./payment-catalogue.ts";
 import type {
   CurrencyPaymentData,
-  DepositFlowSelection,
+  PaymentFieldConfig,
+  ResolvedPaymentMethodFieldConfig,
+} from "./payment-catalogue.ts";
+import { TransferExecutionError } from "./transfer-execution.ts";
+import type {
   InitiatorTradeSummary,
   KycVerificationData,
-  NetworkFieldConfig,
   PartnerPaymentDetailsDiffData,
   PaymentDetail,
   PreflightQuote,
-  ResolvedPaymentMethodFieldConfig,
-  SupportedDepositAssetOption,
+  SettlementTrade,
   TradeRequest,
+  TransferExecutionClient,
+  TransferExecutionFailure,
   UserProfile,
   WalletBalance,
-} from "./unigox-client.ts";
-import type { LoginWalletExportRequest, TransferExecutionClient, TransferFlowDeps } from "./transfer-orchestrator.ts";
+} from "./transfer-execution.ts";
+import type { TransferFlowDeps } from "./transfer-orchestrator.ts";
 
-const VALID_LOGIN_KEY = "0x1111111111111111111111111111111111111111111111111111111111111111";
-const VALID_SIGNING_KEY = "0x2222222222222222222222222222222222222222222222222222222222222222";
-const ANOTHER_VALID_KEY = "0x3333333333333333333333333333333333333333333333333333333333333333";
-const VALID_TON_MNEMONIC = "hospital stove relief fringe tongue always charge angry urge sentence again match nerve inquiry senior coconut label tumble carry category beauty bean road solution";
-const VALID_TON_PRIVATE_KEY = "4444444444444444444444444444444444444444444444444444444444444444";
-
+/**
+ * Creates a contacts file in a fresh temporary directory.
+ *
+ * @param initialContacts Contents to write; defaults to an empty store.
+ * @returns The directory and the file path.
+ */
 function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { lastUpdated: "" } }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "send-money-flow-"));
   const file = path.join(dir, "contacts.json");
@@ -38,6 +42,13 @@ function makeTempContactsFile(initialContacts: any = { contacts: {}, _meta: { la
   return { dir, file };
 }
 
+/**
+ * Runs a function with environment variables temporarily set or removed.
+ *
+ * @param vars Variables to set; `undefined` removes one.
+ * @param fn Function to run. May be async.
+ * @returns What `fn` returns. The previous environment is restored afterwards, also on failure.
+ */
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
   const original: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(vars)) {
@@ -74,563 +85,207 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
 
 const PAYMENT_DATA: Record<string, CurrencyPaymentData> = {
   EUR: {
-    currency: { code: "EUR", name: "Euro" },
+    currency: { code: "EUR", name: "EUR" },
     paymentMethods: [
       {
         id: 2,
         name: "Revolut",
         slug: "revolut",
-        type: "Digital Banks",
+        type: "BANK",
         typeSlug: "digital-banks",
-        fiatCurrencyCodes: ["EUR"],
         networks: [
-          { id: 3, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: true },
-          { id: 47, name: "Revolut Username", slug: "revolut-username", fiatCurrencyCode: "EUR", default: false },
+          { id: 3, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR" },
+          { id: 47, name: "Revolut Username", slug: "revolut-username", fiatCurrencyCode: "EUR" },
         ],
       },
       {
         id: 1,
         name: "Wise",
         slug: "wise",
-        type: "Digital Banks",
+        type: "BANK",
         typeSlug: "digital-banks",
-        fiatCurrencyCodes: ["EUR"],
         networks: [
-          { id: 46, name: "Wise Tag", slug: "wise-tag", fiatCurrencyCode: "EUR", default: true },
-          { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: false },
+          { id: 46, name: "Wise Tag", slug: "wise-tag", fiatCurrencyCode: "EUR" },
+          { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR" },
         ],
       },
       {
         id: 519,
         name: "Other Bank",
         slug: "other-bank",
-        type: "Traditional Banks",
+        type: "BANK",
         typeSlug: "traditional-banks",
-        fiatCurrencyCodes: ["EUR"],
         networks: [
-          { id: 49, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR", default: true },
+          { id: 49, name: "European Transfer (SEPA)", slug: "iban-sepa", fiatCurrencyCode: "EUR" },
         ],
       },
     ],
   },
   INR: {
-    currency: { code: "INR", name: "Indian Rupee" },
+    currency: { code: "INR", name: "INR" },
     paymentMethods: [
       {
         id: 2001,
         name: "IMPS or NEFT Transfer",
         slug: "imps-or-neft-transfer",
-        type: "Traditional Banks",
+        type: "BANK",
         typeSlug: "traditional-banks",
-        fiatCurrencyCodes: ["INR"],
         networks: [
-          { id: 551, name: "IMPS or NEFT India", slug: "imps-neft-india", fiatCurrencyCode: "INR", default: true },
+          { id: 551, name: "IMPS or NEFT India", slug: "imps-neft-india", fiatCurrencyCode: "INR" },
         ],
       },
     ],
   },
   NGN: {
-    currency: { code: "NGN", name: "Nigerian Naira" },
+    currency: { code: "NGN", name: "NGN" },
     paymentMethods: [
       {
         id: 1001,
         name: "Kuda Bank",
         slug: "kuda-bank",
-        type: "Digital Banks",
+        type: "BANK",
         typeSlug: "digital-banks",
-        fiatCurrencyCodes: ["NGN"],
         networks: [
-          { id: 501, name: "NIP Nigeria", slug: "nip-nigeria", fiatCurrencyCode: "NGN", default: true },
+          { id: 501, name: "NIP Nigeria", slug: "nip-nigeria", fiatCurrencyCode: "NGN" },
         ],
       },
     ],
   },
   KES: {
-    currency: { code: "KES", name: "Kenyan Shilling" },
+    currency: { code: "KES", name: "KES" },
     paymentMethods: [
       {
         id: 3001,
         name: "M-PESA",
         slug: "m-pesa",
-        type: "Mobile Money",
+        type: "WALLET",
         typeSlug: "mobile-money",
-        fiatCurrencyCodes: ["KES"],
         networks: [
-          { id: 601, name: "Pesalink", slug: "pesalink", fiatCurrencyCode: "KES", default: true },
+          { id: 601, name: "Pesalink", slug: "pesalink", fiatCurrencyCode: "KES" },
         ],
       },
     ],
   },
 };
 
-const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
-  "EUR:revolut:revolut-username": {
-    currency: PAYMENT_DATA.EUR.currency,
-    method: PAYMENT_DATA.EUR.paymentMethods[0],
-    network: PAYMENT_DATA.EUR.paymentMethods[0].networks[1],
-    selectedFormatId: undefined,
-    networkConfig: {
-      slug: "revolut-username",
-      name: "Revolut Username",
-      description: "Revolut Username",
-      fields: [
-        {
-          field: "revtag",
-          label: "RevTag",
-          description: "Recipient's Revolut tag",
-          placeholder: "Enter @username",
-          type: "text",
-          required: true,
-          validators: [
-            {
-              validatorName: "revTag",
-              pattern: "^[a-zA-Z0-9_-]+$",
-              message: "RevTag must contain only letters, numbers, underscores or hyphens",
-            },
-          ],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "revtag",
-        label: "RevTag",
-        description: "Recipient's Revolut tag",
-        placeholder: "Enter @username",
-        type: "text",
-        required: true,
-        validators: [
-          {
-            validatorName: "revTag",
-            pattern: "^[a-zA-Z0-9_-]+$",
-            message: "RevTag must contain only letters, numbers, underscores or hyphens",
-          },
-        ],
-      },
-    ],
-  },
-  "EUR:wise:wise-tag": {
-    currency: PAYMENT_DATA.EUR.currency,
-    method: PAYMENT_DATA.EUR.paymentMethods[1],
-    network: PAYMENT_DATA.EUR.paymentMethods[1].networks[0],
-    selectedFormatId: undefined,
-    networkConfig: {
-      slug: "wise-tag",
-      name: "Wise Tag",
-      description: "Wise Tag",
-      fields: [
-        {
-          field: "email",
-          label: "Wise Email",
-          description: "Email linked to the recipient's Wise account",
-          placeholder: "name@example.com",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "email", message: "Invalid email format" }],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "email",
-        label: "Wise Email",
-        description: "Email linked to the recipient's Wise account",
-        placeholder: "name@example.com",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "email", message: "Invalid email format" }],
-      },
-    ],
-  },
-  "EUR:wise:iban-sepa": {
-    currency: PAYMENT_DATA.EUR.currency,
-    method: PAYMENT_DATA.EUR.paymentMethods[1],
-    network: PAYMENT_DATA.EUR.paymentMethods[1].networks[1],
-    selectedFormatId: undefined,
-    networkConfig: {
-      slug: "iban-sepa",
-      name: "European Transfer (SEPA)",
-      description: "European Transfer (SEPA)",
-      fields: [
-        {
-          field: "iban",
-          label: "IBAN",
-          description: "Recipient IBAN",
-          placeholder: "EE382200221020145685",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
-        },
-        {
-          field: "full_name",
-          label: "Full Name",
-          description: "Recipient legal name",
-          placeholder: "Recipient full name",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "iban",
-        label: "IBAN",
-        description: "Recipient IBAN",
-        placeholder: "EE382200221020145685",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
-      },
-      {
-        field: "full_name",
-        label: "Full Name",
-        description: "Recipient legal name",
-        placeholder: "Recipient full name",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-      },
-    ],
-  },
-  "EUR:other-bank:iban-sepa": {
-    currency: PAYMENT_DATA.EUR.currency,
-    method: PAYMENT_DATA.EUR.paymentMethods[2],
-    network: PAYMENT_DATA.EUR.paymentMethods[2].networks[0],
-    selectedFormatId: undefined,
-    networkConfig: {
-      slug: "iban-sepa",
-      name: "European Transfer (SEPA)",
-      description: "European Transfer (SEPA)",
-      fields: [
-        {
-          field: "iban",
-          label: "IBAN",
-          description: "Recipient IBAN",
-          placeholder: "EE382200221020145685",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
-        },
-        {
-          field: "full_name",
-          label: "Full Name",
-          description: "Recipient legal name",
-          placeholder: "Recipient full name",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-        },
-        {
-          field: "bank_name",
-          label: "Bank Name",
-          description: "Receiving bank name",
-          placeholder: "Bank name",
-          type: "text",
-          required: true,
-          validators: [],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "iban",
-        label: "IBAN",
-        description: "Recipient IBAN",
-        placeholder: "EE382200221020145685",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "iban", message: "Invalid IBAN format" }],
-      },
-      {
-        field: "full_name",
-        label: "Full Name",
-        description: "Recipient legal name",
-        placeholder: "Recipient full name",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-      },
-      {
-        field: "bank_name",
-        label: "Bank Name",
-        description: "Receiving bank name",
-        placeholder: "Bank name",
-        type: "text",
-        required: true,
-        validators: [],
-      },
-    ],
-  },
-  "INR:imps-or-neft-transfer:imps-neft-india": {
-    currency: PAYMENT_DATA.INR.currency,
-    method: PAYMENT_DATA.INR.paymentMethods[0],
-    network: PAYMENT_DATA.INR.paymentMethods[0].networks[0],
-    selectedFormatId: undefined,
-    networkConfig: {
-      slug: "imps-neft-india",
-      name: "IMPS or NEFT India",
-      description: "IMPS or NEFT India",
-      countryCode: "IN",
-      fields: [
-        {
-          field: "bank_name",
-          label: "Bank Name",
-          description: "Receiving bank name",
-          placeholder: "Example Bank",
-          type: "text",
-          required: true,
-          validators: [],
-        },
-        {
-          field: "ifsc_code",
-          label: "IFSC Code",
-          description: "Recipient bank IFSC code",
-          placeholder: "TEST0001234",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "ifscCode", message: "IFSC code must be 11 characters (e.g., HDFC0001234)" }],
-        },
-        {
-          field: "account_number",
-          label: "Account Number",
-          description: "Recipient bank account number",
-          placeholder: "123456789012",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "indiaBankAccount", message: "Account number must be 10-16 digits" }],
-        },
-        {
-          field: "full_name",
-          label: "Full Name",
-          description: "Recipient legal name",
-          placeholder: "Bhim Example",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "bank_name",
-        label: "Bank Name",
-        description: "Receiving bank name",
-        placeholder: "Example Bank",
-        type: "text",
-        required: true,
-        validators: [],
-      },
-      {
-        field: "ifsc_code",
-        label: "IFSC Code",
-        description: "Recipient bank IFSC code",
-        placeholder: "TEST0001234",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "ifscCode", message: "IFSC code must be 11 characters (e.g., HDFC0001234)" }],
-      },
-      {
-        field: "account_number",
-        label: "Account Number",
-        description: "Recipient bank account number",
-        placeholder: "123456789012",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "indiaBankAccount", message: "Account number must be 10-16 digits" }],
-      },
-      {
-        field: "full_name",
-        label: "Full Name",
-        description: "Recipient legal name",
-        placeholder: "Bhim Example",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-      },
-    ],
-  },
-  "NGN:kuda-bank:nip-nigeria": {
-    currency: PAYMENT_DATA.NGN.currency,
-    method: PAYMENT_DATA.NGN.paymentMethods[0],
-    network: PAYMENT_DATA.NGN.paymentMethods[0].networks[0],
-    selectedFormatId: "banks",
-    networkConfig: {
-      slug: "nip-nigeria",
-      name: "NIP Nigeria",
-      description: "NIP Nigeria",
-      countryCode: "NG",
-      fields: [
-        {
-          field: "account_number",
-          label: "Account Number",
-          description: "10-digit account number",
-          placeholder: "0123456789",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "accountNumber", pattern: "^\\d{10}$", message: "Account number must be 10 digits" }],
-        },
-        {
-          field: "full_name",
-          label: "Full Name",
-          description: "Optional account name",
-          placeholder: "Recipient full name",
-          type: "text",
-          required: false,
-          validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "account_number",
-        label: "Account Number",
-        description: "10-digit account number",
-        placeholder: "0123456789",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "accountNumber", pattern: "^\\d{10}$", message: "Account number must be 10 digits" }],
-      },
-      {
-        field: "full_name",
-        label: "Full Name",
-        description: "Optional account name",
-        placeholder: "Recipient full name",
-        type: "text",
-        required: false,
-        validators: [{ validatorName: "fullName", message: "Invalid full name" }],
-      },
-    ],
-  },
-  "KES:m-pesa:pesalink": {
-    currency: PAYMENT_DATA.KES.currency,
-    method: PAYMENT_DATA.KES.paymentMethods[0],
-    network: PAYMENT_DATA.KES.paymentMethods[0].networks[0],
-    selectedFormatId: "mobile-money",
-    networkConfig: {
-      slug: "pesalink",
-      name: "Pesalink",
-      description: "Pesalink",
-      countryCode: "KE",
-      fields: [
-        {
-          field: "phone_number",
-          label: "Phone Number",
-          description: "Kenyan mobile number",
-          placeholder: "+254712345678",
-          type: "text",
-          required: true,
-          validators: [{ validatorName: "internationalPhone", message: "Invalid phone number" }],
-        },
-      ],
-      formats: [],
-    },
-    fields: [
-      {
-        field: "phone_number",
-        label: "Phone Number",
-        description: "Kenyan mobile number",
-        placeholder: "+254712345678",
-        type: "text",
-        required: true,
-        validators: [{ validatorName: "internationalPhone", message: "Invalid phone number" }],
-      },
-    ],
-  },
-};
-
-const DEPOSIT_OPTIONS: SupportedDepositAssetOption[] = [
-  {
-    assetCode: "USDC",
-    tokenCodes: ["USDC"],
-    chains: [
-      {
-        assetCode: "USDC",
-        tokenCode: "USDC",
-        tokenName: "USD Coin",
-        tokenAddress: "0xusdc",
-        chainId: 1,
-        chainName: "Ethereum",
-        chainType: "EVM",
-        addressKey: "evmAddress",
-      },
-      {
-        assetCode: "USDC",
-        tokenCode: "USDC",
-        tokenName: "USD Coin",
-        tokenAddress: "So11111111111111111111111111111111111111112",
-        chainId: 1399811149,
-        chainName: "Solana",
-        chainType: "Solana",
-        addressKey: "solanaAddress",
-      },
-    ],
-  },
-  {
-    assetCode: "USDT",
-    tokenCodes: ["USDT"],
-    chains: [
-      {
-        assetCode: "USDT",
-        tokenCode: "USDT",
-        tokenName: "Tether USD",
-        tokenAddress: "TetherTronToken",
-        chainId: 728126428,
-        chainName: "Tron",
-        chainType: "TVM",
-        addressKey: "tronAddress",
-      },
-      {
-        assetCode: "USDT",
-        tokenCode: "USDT",
-        tokenName: "Tether USD",
-        tokenAddress: "TonTokenAddress",
-        chainId: -239,
-        chainName: "TON",
-        chainType: "TON",
-        addressKey: "tonAddress",
-      },
-    ],
-  },
-];
-
-function makeFieldConfigKey(currency: string, methodSlug?: string, networkSlug?: string) {
-  return `${currency.toUpperCase()}:${methodSlug}:${networkSlug}`;
+/**
+ * Builds one payout field definition the way the catalogue returns it.
+ *
+ * @param field Field key.
+ * @param label Human-readable name.
+ * @param placeholder Example value.
+ * @param required Whether the rail requires it.
+ * @param pattern Regular expression the value must match, when the rail publishes one.
+ * @returns The field definition.
+ */
+function fieldConfig(field: string, label: string, placeholder: string, required: boolean, pattern?: string): PaymentFieldConfig {
+  return { field, label, placeholder, type: "text", required, pattern };
 }
 
+// Patterns as the live Partner API publishes them for these rails.
+const IBAN_FIELD = fieldConfig("iban", "IBAN", "EE382200221020145685", true, "^[A-Z]{2}\\d{2}[A-Z0-9]{1,30}$");
+const FULL_NAME_PATTERN = "^[a-zA-ZÀ-ÿ\\u0100-\\u017F\\u0400-\\u04FF\\s'-]{2,50}$";
+
+/**
+ * Builds the field config the catalogue would resolve for one fixture method and network.
+ *
+ * @param currency Currency code of the fixture.
+ * @param methodIndex Index of the method in `PAYMENT_DATA[currency].paymentMethods`.
+ * @param networkIndex Index of the network on that method.
+ * @param fields Fields to collect.
+ * @param selectedFormatId Rail format id, when the rail has formats.
+ * @returns The resolved field config.
+ */
+function resolvedConfig(
+  currency: string,
+  methodIndex: number,
+  networkIndex: number,
+  fields: PaymentFieldConfig[],
+  selectedFormatId?: string
+): ResolvedPaymentMethodFieldConfig {
+  const method = PAYMENT_DATA[currency].paymentMethods[methodIndex];
+  return { method, network: method.networks[networkIndex], selectedFormatId, fields };
+}
+
+const FIELD_CONFIGS: Record<string, ResolvedPaymentMethodFieldConfig> = {
+  "EUR:revolut:revolut-username": resolvedConfig("EUR", 0, 1, [
+    fieldConfig("revtag", "RevTag", "Enter @username", true, "^[a-zA-Z0-9_-]+$"),
+  ]),
+  "EUR:wise:wise-tag": resolvedConfig("EUR", 1, 0, [
+    fieldConfig("email", "Wise Email", "name@example.com", true, "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"),
+  ]),
+  "EUR:wise:iban-sepa": resolvedConfig("EUR", 1, 1, [
+    IBAN_FIELD,
+    fieldConfig("full_name", "Full Name", "Recipient full name", true, FULL_NAME_PATTERN),
+  ]),
+  "EUR:other-bank:iban-sepa": resolvedConfig("EUR", 2, 0, [
+    IBAN_FIELD,
+    fieldConfig("full_name", "Full Name", "Recipient full name", true, FULL_NAME_PATTERN),
+    fieldConfig("bank_name", "Bank Name", "Bank name", true),
+  ]),
+  "INR:imps-or-neft-transfer:imps-neft-india": resolvedConfig("INR", 0, 0, [
+    fieldConfig("bank_name", "Bank Name", "Example Bank", true),
+    fieldConfig("ifsc_code", "IFSC Code", "TEST0001234", true, "^[A-Z]{4}0[A-Z0-9]{6}$"),
+    fieldConfig("account_number", "Account Number", "123456789012", true),
+    fieldConfig("full_name", "Full Name", "Bhim Example", true, FULL_NAME_PATTERN),
+  ]),
+  "NGN:kuda-bank:nip-nigeria": resolvedConfig("NGN", 0, 0, [
+    fieldConfig("account_number", "Account Number", "0123456789", true, "^\\d{10}$"),
+    fieldConfig("full_name", "Full Name", "Recipient full name", false, FULL_NAME_PATTERN),
+  ], "banks"),
+  "KES:m-pesa:pesalink": resolvedConfig("KES", 0, 0, [
+    fieldConfig("phone_number", "Phone Number", "+254712345678", true, "^\\+[1-9]\\d{6,14}$"),
+  ], "mobile-money"),
+};
+
+/**
+ * Fake catalogue: lists the fixture methods for a currency.
+ *
+ * @param currency Currency code.
+ * @returns The fixture methods.
+ * @throws Error for a currency without fixtures.
+ */
 async function stubGetPaymentMethodsForCurrency(currency: string): Promise<CurrencyPaymentData> {
   const data = PAYMENT_DATA[currency.toUpperCase()];
   if (!data) throw new Error(`Unsupported test currency ${currency}`);
   return data;
 }
 
+/**
+ * Fake catalogue: resolves the fixture field config for a method and network.
+ *
+ * @param params Currency, institution slug and rail slug.
+ * @returns The fixture field config.
+ * @throws Error when no fixture exists for the combination.
+ */
 async function stubGetPaymentMethodFieldConfig(params: {
   currency: string;
-  methodSlug?: string;
-  methodId?: number;
-  networkSlug?: string;
-  networkId?: number;
+  methodSlug: string;
+  networkSlug: string;
 }): Promise<ResolvedPaymentMethodFieldConfig> {
-  const data = PAYMENT_DATA[params.currency.toUpperCase()];
-  const method = data.paymentMethods.find((entry) => entry.id === params.methodId || entry.slug === params.methodSlug);
-  if (!method) throw new Error(`Method not found for test config: ${JSON.stringify(params)}`);
-  const network = params.networkId
-    ? method.networks.find((entry) => entry.id === params.networkId)
-    : params.networkSlug
-      ? method.networks.find((entry) => entry.slug === params.networkSlug)
-      : method.networks.find((entry) => entry.default) || method.networks[0];
-  if (!network) throw new Error(`Network not found for test config: ${JSON.stringify(params)}`);
-  const config = FIELD_CONFIGS[makeFieldConfigKey(params.currency, method.slug, network.slug)];
+  const config = FIELD_CONFIGS[`${params.currency.toUpperCase()}:${params.methodSlug}:${params.networkSlug}`];
   if (!config) throw new Error(`Field config not found for test config: ${JSON.stringify(params)}`);
   return config;
 }
 
+/** What the fake backend recorded and how it can be steered. Returned by `makeClient`. */
+type FakeClient = TransferExecutionClient & {
+  /** Names of the port methods called, in order, some with their key arguments appended. */
+  calls: string[];
+  /** Arguments of the most recent `createTradeRequest` call. */
+  lastCreateTradeRequestParams?: Parameters<TransferExecutionClient["createTradeRequest"]>[0];
+};
+
+/**
+ * Builds an in-memory backend for flow tests.
+ *
+ * By default the sender is verified, the wallet holds 1000 USDC, every transfer is matched and its
+ * escrow is already funded.
+ *
+ * @param options Overrides: balances, saved details, how matching ends, trade status sequence,
+ *   failures to raise, profile and KYC state, and quote values.
+ * @returns The fake backend with its call log.
+ */
 function makeClient(options: {
   balance?: number;
   balances?: Partial<Record<"USDC" | "USDT", number>>;
@@ -639,42 +294,22 @@ function makeClient(options: {
   waitMode?: "matched" | "no_match" | "timeout" | "new_price";
   matchedTradeStatus?: string;
   getTradeStatuses?: string[];
-  tradeOverrides?: Record<string, unknown>;
+  tradeOverrides?: Partial<SettlementTrade>;
   tradeRequestOverrides?: Partial<TradeRequest>;
   fundTradeEscrowStatusAfter?: string;
-  fundTradeEscrowError?: string;
+  fundTradeEscrowFailure?: TransferExecutionFailure;
   revalidateTradeStatusAfter?: string;
   partnerPaymentDetailsDiff?: PartnerPaymentDetailsDiffData;
   confirmFiatReceivedStatus?: string;
   confirmFiatReceivedError?: string;
   username?: string;
-  depositOptions?: SupportedDepositAssetOption[];
   preflightQuote?: Partial<PreflightQuote>;
   preflightQuotesByAsset?: Partial<Record<"USDC" | "USDT", Partial<PreflightQuote> | null>>;
   profile?: Partial<UserProfile>;
   kycStatus?: KycVerificationData;
   initializeKycResponse?: KycVerificationData;
-  createTradeRequestError?: string;
-  requestEmailOtpError?: string;
-  verifyEmailOtpError?: string;
-  verifyEmailOtpToken?: string;
-  generatedEvmWallet?: { address: string; privateKey: string };
-  generatedTonWallet?: { address: string; privateKey: string; walletVersion: "v4" | "v5r1"; mnemonic?: string };
-} = {}): TransferExecutionClient & {
-  calls: string[];
-  lastCreateTradeRequestParams?: {
-    tradeType: "BUY" | "SELL";
-    cryptoCurrencyCode?: string;
-    fiatCurrencyCode: string;
-    fiatAmount: number;
-    cryptoAmount: number;
-    paymentDetailsId: number;
-    paymentMethodId: number;
-    paymentNetworkId: number;
-    preferredVendor?: string;
-    tradePartner?: "licensed" | "p2p" | "all";
-  };
-} {
+  createTradeRequestFailure?: TransferExecutionFailure;
+} = {}): FakeClient {
   const calls: string[] = [];
   const usdcBalance = options.balances?.USDC ?? options.balance ?? 1000;
   const usdtBalance = options.balances?.USDT ?? 0;
@@ -682,19 +317,11 @@ function makeClient(options: {
   const paymentDetails = options.paymentDetails ?? [];
   const initiatorTrades = options.initiatorTrades ?? [];
   const waitMode = options.waitMode ?? "matched";
-  const username = options.username ?? "grape404";
-  const depositOptions = options.depositOptions ?? DEPOSIT_OPTIONS;
+  const username = options.username ?? "sender@example.test";
   const profile: UserProfile = {
-    user_id: 42,
-    evm_address: "0xprofile",
     username,
-    first_name: undefined,
-    last_name: undefined,
-    kyc_country_code: undefined,
-    id_verification_status: "NOT_VERIFIED",
-    total_traded_volume_usd: 0,
+    id_verification_status: "VERIFIED",
     ...options.profile,
-    username,
   };
   let currentTradeStatus = options.matchedTradeStatus ?? "escrow_funded_or_reserved_awaiting_payment_proof_from_buyer";
   const tradeStatuses = [...(options.getTradeStatuses || [currentTradeStatus])];
@@ -702,8 +329,9 @@ function makeClient(options: {
   const revalidateTradeStatusAfter = options.revalidateTradeStatusAfter ?? "awaiting_escrow_funding_by_seller";
   const partnerPaymentDetailsDiff = options.partnerPaymentDetailsDiff;
   let tradeStatusIndex = 0;
+  let newPriceReported = false;
 
-  const client: TransferExecutionClient & { calls: string[]; lastCreateTradeRequestParams?: any } = {
+  const client: FakeClient = {
     calls,
     async getProfile() {
       calls.push("getProfile");
@@ -731,7 +359,7 @@ function makeClient(options: {
     },
     async ensurePaymentDetail(): Promise<PaymentDetail> {
       calls.push("ensurePaymentDetail");
-      return { id: 9001, fiat_currency_code: "EUR", details: {} } as PaymentDetail;
+      return { id: "9001", fiat_currency_code: "EUR", details: {} };
     },
     async getKycVerificationStatus(): Promise<KycVerificationData> {
       calls.push("getKycVerificationStatus");
@@ -745,43 +373,15 @@ function makeClient(options: {
         verification_seconds_left: 900,
       };
     },
-    async requestEmailOTP(): Promise<void> {
-      calls.push("requestEmailOTP");
-      if (options.requestEmailOtpError) {
-        throw new Error(options.requestEmailOtpError);
-      }
-    },
-    async verifyEmailOTP(code: string): Promise<string> {
-      calls.push(`verifyEmailOTP:${code}`);
-      if (options.verifyEmailOtpError) {
-        throw new Error(options.verifyEmailOtpError);
-      }
-      return options.verifyEmailOtpToken ?? "email-token";
-    },
-    async generateAndLinkWallet() {
-      calls.push("generateAndLinkWallet");
-      return options.generatedEvmWallet ?? {
-        address: "0xGeneratedWallet000000000000000000000000000000",
-        privateKey: VALID_LOGIN_KEY,
-      };
-    },
-    async generateAndLinkTonWallet() {
-      calls.push("generateAndLinkTonWallet");
-      return options.generatedTonWallet ?? {
-        address: "0:1111111111111111111111111111111111111111111111111111111111111111",
-        privateKey: VALID_TON_PRIVATE_KEY,
-        walletVersion: "v4",
-      };
-    },
     async getPreflightQuote(params): Promise<PreflightQuote | undefined> {
-      const assetCode = (params.cryptoCurrencyCode || "USDC") as "USDC" | "USDT";
+      const assetCode = params.cryptoCurrencyCode as "USDC" | "USDT";
       calls.push(`getPreflightQuote:${assetCode}:${params.fiatAmount}`);
       const override = options.preflightQuotesByAsset?.[assetCode];
       if (override === null) return undefined;
       return {
         quoteType: "estimate",
         source: "best_offer",
-        cryptoCurrencyCode: assetCode,
+        cryptoCurrencyCode: override?.cryptoCurrencyCode || options.preflightQuote?.cryptoCurrencyCode || assetCode,
         fiatCurrencyCode: "EUR",
         fiatAmount: params.fiatAmount,
         totalCryptoAmount: params.fiatAmount + 1.25,
@@ -791,101 +391,68 @@ function makeClient(options: {
         paymentNetworkName: "Revolut Username",
         ...options.preflightQuote,
         ...override,
-        cryptoCurrencyCode: override?.cryptoCurrencyCode || options.preflightQuote?.cryptoCurrencyCode || assetCode,
       };
     },
     async createTradeRequest(params): Promise<TradeRequest> {
       calls.push("createTradeRequest");
-      if (options.createTradeRequestError) {
-        throw new Error(options.createTradeRequestError);
+      if (options.createTradeRequestFailure) {
+        throw new TransferExecutionError(options.createTradeRequestFailure, "engineering detail that must not reach the reply");
       }
       client.lastCreateTradeRequestParams = params;
-      return { id: 7001, status: "created", trade_type: "SELL", ...options.tradeRequestOverrides } as TradeRequest;
+      if (waitMode === "new_price" && !newPriceReported) {
+        newPriceReported = true;
+        return {
+          id: "",
+          status: "new_price_confirming_by_initiator",
+          fiat_currency_code: params.fiatCurrencyCode,
+          crypto_currency_code: params.cryptoCurrencyCode,
+          fiat_amount: params.fiatAmount,
+          total_crypto_amount: params.cryptoAmount + 5,
+          vendor_offer_rate: 0.8164,
+          ...options.tradeRequestOverrides,
+        };
+      }
+      return { id: "7001", status: "awaiting_liquidity_provider", ...options.tradeRequestOverrides };
     },
     async waitForTradeMatch(): Promise<TradeRequest> {
       calls.push("waitForTradeMatch");
-      if (waitMode === "matched") {
-        return {
-          id: 7001,
-          status: "accepted_by_vendor",
-          trade_type: "SELL",
-          trade: { id: 8801, status: currentTradeStatus },
-          ...options.tradeRequestOverrides,
-        } as TradeRequest;
-      }
-      if (waitMode === "new_price") {
-        return {
-          id: 7001,
-          status: "new_price_confirming_by_initiator",
-          trade_type: "SELL",
-          fiat_currency_code: "EUR",
-          crypto_currency_code: "USDT",
-          fiat_amount: 40.82,
-          total_crypto_amount: 50,
-          best_deal_fiat_amount: 50,
-          best_deal_crypto_amount: 60.795681,
-          vendor_offer_rate: 0.8164,
-          payment_method_name: "Wise",
-          payment_network_name: "European Transfer (SEPA)",
-          ...options.tradeRequestOverrides,
-        } as TradeRequest;
-      }
       if (waitMode === "no_match") {
-        throw new Error("Trade request 7001 ended: not_accepted_by_any_vendor");
+        throw new TransferExecutionError("no_match", "order ended as cancelled before a provider accepted it");
       }
-      throw new Error("Trade request 7001 timed out after 120s");
+      if (waitMode === "timeout") {
+        throw new TransferExecutionError("match_timeout", "no provider accepted within 120000 ms");
+      }
+      return {
+        id: "7001",
+        status: "accepted_by_vendor",
+        trade: { id: "8801", status: currentTradeStatus },
+        ...options.tradeRequestOverrides,
+      };
     },
     async getTradeRequest(): Promise<TradeRequest> {
       calls.push("getTradeRequest");
       return {
-        id: 7001,
-        status: waitMode === "matched"
-          ? "accepted_by_vendor"
-          : waitMode === "new_price"
-            ? "new_price_confirming_by_initiator"
-            : "created",
-        trade_type: "SELL",
-        trade: { id: 8801, status: currentTradeStatus },
+        id: "7001",
+        status: waitMode === "matched" || waitMode === "new_price" ? "accepted_by_vendor" : "awaiting_liquidity_provider",
+        trade: { id: "8801", status: currentTradeStatus },
         fiat_currency_code: "EUR",
         crypto_currency_code: "USDT",
         fiat_amount: 40.82,
         total_crypto_amount: 50,
-        best_deal_fiat_amount: 50,
-        best_deal_crypto_amount: 60.795681,
         vendor_offer_rate: 0.8164,
         payment_method_name: "Wise",
         payment_network_name: "European Transfer (SEPA)",
         ...options.tradeRequestOverrides,
-      } as TradeRequest;
+      };
     },
-    async confirmTradeRequestPrice(): Promise<TradeRequest> {
-      calls.push("confirmTradeRequestPrice");
-      return {
-        id: 7001,
-        status: "accepted_by_vendor",
-        trade_type: "SELL",
-        trade: { id: 8801, status: currentTradeStatus },
-        ...options.tradeRequestOverrides,
-      } as TradeRequest;
-    },
-    async refuseTradeRequestPrice(): Promise<TradeRequest> {
-      calls.push("refuseTradeRequestPrice");
-      return {
-        id: 7001,
-        status: "new_price_refused_by_initiator",
-        trade_type: "SELL",
-        ...options.tradeRequestOverrides,
-      } as TradeRequest;
-    },
-    async getTrade() {
+    async getTrade(): Promise<SettlementTrade> {
       calls.push("getTrade");
       const next = tradeStatuses[Math.min(tradeStatusIndex, tradeStatuses.length - 1)] || currentTradeStatus;
       tradeStatusIndex += 1;
       currentTradeStatus = next;
       return {
-        id: 8801,
+        id: "8801",
         status: currentTradeStatus,
-        escrow_address: "0xEscrowAddress0000000000000000000000000000001",
         payment_window_seconds_left: 900,
         claim_autorelease_seconds_left: 1800,
         ...options.tradeOverrides,
@@ -893,44 +460,25 @@ function makeClient(options: {
     },
     async getPartnerPaymentDetailsDiff() {
       calls.push("getPartnerPaymentDetailsDiff");
-      if (!partnerPaymentDetailsDiff) {
-        return {
-          payment_details_id: 9001,
-          differences: {
-            missing_fields: [],
-            invalid_fields: [],
-          },
-        };
-      }
-      return partnerPaymentDetailsDiff;
+      return partnerPaymentDetailsDiff ?? { payment_details_id: "9001", differences: { missing_fields: [], invalid_fields: [] } };
     },
-    async createOrUpdatePartnerPaymentDetails(params: { internalDetailsId: number; partner: string; details: Record<string, string> }) {
+    async createOrUpdatePartnerPaymentDetails(params: { internalDetailsId: string; partner: string; details: Record<string, string> }) {
       calls.push(`createOrUpdatePartnerPaymentDetails:${params.internalDetailsId}:${params.partner}`);
-      return {
-        internal_details_id: params.internalDetailsId,
-        partner: params.partner,
-        details: params.details,
-      };
+      return { details: params.details };
     },
     async revalidateTradePaymentDetails() {
       calls.push("revalidateTradePaymentDetails");
       currentTradeStatus = revalidateTradeStatusAfter;
       tradeStatuses.push(currentTradeStatus);
-      return {
-        trade: {
-          id: 8801,
-          status: currentTradeStatus,
-        },
-      };
+      return { trade: { id: "8801", status: currentTradeStatus } };
     },
-    async fundTradeEscrow(tokenCode: "USDC" | "USDT", amount: string, escrowAddress: string) {
-      calls.push(`fundTradeEscrow:${tokenCode}:${amount}:${escrowAddress}`);
-      if (options.fundTradeEscrowError) {
-        throw new Error(options.fundTradeEscrowError);
+    async fundTradeEscrow(tradeId: string) {
+      calls.push(`fundTradeEscrow:${tradeId}`);
+      if (options.fundTradeEscrowFailure) {
+        throw new TransferExecutionError(options.fundTradeEscrowFailure, "engineering detail that must not reach the reply");
       }
       currentTradeStatus = fundTradeEscrowStatusAfter;
       tradeStatuses.push(currentTradeStatus);
-      return { txId: 5001, txHash: "0xescrowfunded" };
     },
     async confirmFiatReceived() {
       calls.push("confirmFiatReceived");
@@ -939,37 +487,30 @@ function makeClient(options: {
       }
       currentTradeStatus = options.confirmFiatReceivedStatus ?? "fiat_payment_confirmed_by_seller_escrow_release_started";
       tradeStatuses.push(currentTradeStatus);
-      return { id: 8801, status: currentTradeStatus };
+      return { id: "8801", status: currentTradeStatus };
     },
-    async getSupportedDepositOptions(): Promise<SupportedDepositAssetOption[]> {
-      calls.push("getSupportedDepositOptions");
-      return depositOptions;
-    },
-    async describeDepositSelection(selection: DepositFlowSelection) {
-      calls.push(`describeDepositSelection:${selection.assetCode}:${selection.chainId}`);
-      const asset = depositOptions.find((entry) => entry.assetCode === selection.assetCode);
-      const chain = asset?.chains.find((entry) => entry.chainId === selection.chainId);
-      if (!asset || !chain) throw new Error(`Unsupported test deposit selection: ${JSON.stringify(selection)}`);
-      const addresses = {
-        evmAddress: "0xEvmDepositAddress",
-        solanaAddress: "So1anaDepositAddress111111111111111111111111111",
-        tronAddress: "TRON-DEPOSIT-ADDRESS",
-        tonAddress: "TON-DEPOSIT-ADDRESS",
-      } as const;
-      return {
-        ...chain,
-        depositAddress: addresses[chain.addressKey],
-      };
+    async authorizeRefund(tradeId: string) {
+      calls.push(`authorizeRefund:${tradeId}`);
+      currentTradeStatus = "escrow_refunded_to_seller";
+      tradeStatuses.push(currentTradeStatus);
     },
   };
 
   return client;
 }
 
+/**
+ * Builds flow collaborators around a fake backend and the fixture catalogue.
+ *
+ * @param contactsFilePath Contacts file for this test.
+ * @param client Fake backend.
+ * @param overrides Collaborators or timings to replace.
+ * @returns Collaborators with credentials reported as configured and near-zero polling waits.
+ */
 function makeDeps(contactsFilePath: string, client: ReturnType<typeof makeClient>, overrides: Partial<TransferFlowDeps> = {}): TransferFlowDeps {
   return {
     contactsFilePath,
-    authState: { hasReplayableAuth: true, authMode: "evm", emailFallbackAvailable: true },
+    authState: { hasReplayableAuth: true },
     client,
     waitForSettlementTimeoutMs: 1,
     receiptConfirmationHandoffTimeoutMs: 1,
@@ -1017,7 +558,7 @@ test("happy path: new recipient transfer goes from chat prompts to matched trade
   assert.match(res.reply, /Current wallet balance: 1000\.00 USD/i);
   assert.match(res.reply, /Current best-offer estimate:/i);
   assert.match(res.reply, /not a locked quote/i);
-  assert.match(res.reply, /@grape404/i);
+  assert.match(res.reply, /sending as sender@example\.test/i);
 
   res = await advanceTransferFlow(res.session, "confirm", deps);
   assert.equal(res.session.stage, "awaiting_trade_settlement");
@@ -1096,7 +637,7 @@ test("matched trade with seller-side funding required auto-funds escrow before s
   assert.ok(res.events.some((event) => event.type === "escrow_funding_submitted"));
   assert.ok(client.calls.includes("createTradeRequest"));
   assert.ok(client.calls.includes("waitForTradeMatch"));
-  assert.ok(client.calls.includes("fundTradeEscrow:USDT:60.768185:0xEscrowAddress0000000000000000000000000000001"));
+  assert.ok(client.calls.includes("fundTradeEscrow:8801"));
   assert.match(res.reply, /The transfer is live and escrow is funded/i);
   assert.doesNotMatch(res.reply, /Trade request #|trade #|Vendor:/i);
 });
@@ -1130,7 +671,7 @@ test("matched partner trade collects partner address fields, revalidates, and th
       total_crypto_amount: 60.740716,
     },
     partnerPaymentDetailsDiff: {
-      payment_details_id: 9001,
+      payment_details_id: "9001",
       differences: {
         missing_fields: [
           { partner_field_name: "holder_city" },
@@ -1168,7 +709,7 @@ test("matched partner trade collects partner address fields, revalidates, and th
   assert.equal(res.session.stage, "awaiting_trade_settlement");
   assert.ok(client.calls.includes("createOrUpdatePartnerPaymentDetails:9001:switch"));
   assert.ok(client.calls.includes("revalidateTradePaymentDetails"));
-  assert.ok(client.calls.includes("fundTradeEscrow:USDC:60.740716:0xEscrowAddress0000000000000000000000000000001"));
+  assert.ok(client.calls.includes("fundTradeEscrow:8801"));
   assert.match(res.reply, /The transfer is live and escrow is funded/i);
   assert.doesNotMatch(res.reply, /Trade request #|trade #|Vendor:/i);
 });
@@ -1209,7 +750,7 @@ test("after escrow funding the skill keeps watching until it can ask for receipt
       total_crypto_amount: 60.740716,
     },
     partnerPaymentDetailsDiff: {
-      payment_details_id: 9001,
+      payment_details_id: "9001",
       differences: {
         missing_fields: [
           { partner_field_name: "holder_city" },
@@ -1233,7 +774,7 @@ test("after escrow funding the skill keeps watching until it can ask for receipt
   res = await advanceTransferFlow(res.session, "Oismae tee 140", deps);
 
   assert.equal(res.session.stage, "awaiting_receipt_confirmation");
-  assert.ok(client.calls.includes("fundTradeEscrow:USDC:60.740716:0xEscrowAddress0000000000000000000000000000001"));
+  assert.ok(client.calls.includes("fundTradeEscrow:8801"));
   assert.match(res.reply, /Please let me know once you receive the payment/i);
   assert.match(res.reply, /on the way from the counterparty bank/i);
 });
@@ -1266,7 +807,7 @@ test("matched partner trade with required partner fields stays blocked before fu
       partner_details_checked_at: null,
     },
     partnerPaymentDetailsDiff: {
-      payment_details_id: 9001,
+      payment_details_id: "9001",
       differences: {
         missing_fields: [
           { partner_field_name: "holder_city", required: true },
@@ -1287,7 +828,7 @@ test("matched partner trade with required partner fields stays blocked before fu
   assert.ok(!client.calls.some((call) => call.startsWith("fundTradeEscrow:")));
 });
 
-test("new vendor price requires explicit confirmation before funding", async () => {
+test("a live price above the approved estimate places nothing until the person confirms it", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       aleksandr: {
@@ -1335,20 +876,24 @@ test("new vendor price requires explicit confirmation before funding", async () 
   res = await advanceTransferFlow(res.session, "confirm", deps);
   assert.equal(res.session.stage, "awaiting_new_price_confirmation");
   assert.match(res.reply, /original quote is no longer available/i);
-  assert.match(res.reply, /40\.82 EUR/i);
-  assert.match(res.reply, /50 USDT/i);
+  assert.match(res.reply, /65\.795681 USDT for 50 EUR/i);
+  assert.match(res.reply, /about 60\.795681 USDT/i);
   assert.match(res.reply, /I have not funded escrow/i);
   assert.ok(res.events.some((event) => event.type === "trade_price_changed"));
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 60.795681);
+  assert.equal(res.session.execution.tradeRequestId, undefined);
+  assert.ok(!client.calls.includes("waitForTradeMatch"));
   assert.ok(!client.calls.some((call) => call.startsWith("fundTradeEscrow:")));
 
   res = await advanceTransferFlow(res.session, "confirm new price", deps);
   assert.equal(res.session.stage, "awaiting_trade_settlement");
-  assert.ok(client.calls.includes("confirmTradeRequestPrice"));
-  assert.ok(client.calls.includes("fundTradeEscrow:USDT:60.795681:0xEscrowAddress0000000000000000000000000000001"));
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 65.795681);
+  assert.ok(res.events.some((event) => event.type === "trade_price_change_confirmed"));
+  assert.ok(client.calls.includes("fundTradeEscrow:8801"));
   assert.match(res.reply, /The transfer is live and escrow is funded/i);
 });
 
-test("new vendor price can be cancelled cleanly", async () => {
+test("declining a higher live price sends nothing", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       aleksandr: {
@@ -1392,8 +937,9 @@ test("new vendor price can be cancelled cleanly", async () => {
 
   res = await advanceTransferFlow(res.session, "cancel", deps);
   assert.equal(res.session.stage, "awaiting_no_match_resolution");
-  assert.ok(client.calls.includes("refuseTradeRequestPrice"));
-  assert.match(res.reply, /cancelled that updated quote/i);
+  assert.ok(!client.calls.includes("waitForTradeMatch"));
+  assert.ok(res.events.some((event) => event.type === "trade_price_change_cancelled"));
+  assert.match(res.reply, /dropped that updated price and nothing was sent/i);
 });
 
 test("stale saved contact gets revalidated, updated, and then used", async () => {
@@ -1486,10 +1032,10 @@ test("mid-flow saved payment details question re-checks saved UNIGOX payout deta
   const client = makeClient({
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1531,10 +1077,10 @@ test("remote saved UNIGOX payout details resolve directly when the send amount i
     balances: { USDC: 1, USDT: 71 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1555,7 +1101,7 @@ test("remote saved UNIGOX payout details resolve directly when the send amount i
   assert.equal(res.session.currency, "EUR");
   assert.equal(res.session.payment?.methodSlug, "wise");
   assert.equal(res.session.payment?.networkSlug, "iban-sepa");
-  assert.match(res.reply, /signed in as @grape404/i);
+  assert.match(res.reply, /sending as sender@example\.test/i);
   assert.match(res.reply, /I found saved UNIGOX payout details for Aleksandr Example/i);
   assert.match(res.reply, /saved EUR via Wise \/ European Transfer \(SEPA\) payout route by default/i);
   assert.match(res.reply, /Reply 'confirm' to place the trade/i);
@@ -1586,13 +1132,13 @@ test("fresh transfer flow gently reminds about an older action-required trade on
   const client = makeClient({
     initiatorTrades: [
       {
-        id: 7098,
+        id: "7098",
         status: "fiat_payment_proof_submitted_by_buyer",
         fiat_amount: 50,
         fiat_currency_code: "EUR",
         status_changed_at: "2026-03-27T01:02:03.000Z",
         initiator_payment_details: {
-          id: 3413,
+          id: "3413",
           details: { full_name: "Aleksandr Example" },
           payment_method_name: "Wise",
           payment_network_name: "European Transfer (SEPA)",
@@ -1642,13 +1188,13 @@ test("receipt confirmation on an older startup reminder executes confirm-payment
   const client = makeClient({
     initiatorTrades: [
       {
-        id: 7098,
+        id: "7098",
         status: "fiat_payment_proof_submitted_by_buyer",
         fiat_amount: 50,
         fiat_currency_code: "EUR",
         status_changed_at: "2026-03-27T01:02:03.000Z",
         initiator_payment_details: {
-          id: 3413,
+          id: "3413",
           details: { full_name: "Aleksandr Example" },
           payment_method_name: "Wise",
           payment_network_name: "European Transfer (SEPA)",
@@ -1681,10 +1227,10 @@ test("follow-up transfer flow confirms a fuzzy saved-recipient match before cont
     balances: { USDC: 1, USDT: 71 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1735,10 +1281,10 @@ test("fuzzy typo in a saved UNIGOX payout recipient asks for confirmation before
     balances: { USDC: 1, USDT: 71 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1765,10 +1311,10 @@ test("preflight KYC gating blocks before confirmation and asks only for the full
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1777,7 +1323,6 @@ test("preflight KYC gating blocks before confirmation and asks only for the full
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: undefined,
       last_name: undefined,
       kyc_country_code: undefined,
@@ -1794,9 +1339,9 @@ test("preflight KYC gating blocks before confirmation and asks only for the full
   assert.equal(res.session.stage, "awaiting_kyc_full_name");
   assert.equal(res.session.status, "blocked");
   assert.match(res.reply, /UNIGOX needs KYC first/i);
-  assert.match(res.reply, /1\. You give me your full name and country\./i);
-  assert.match(res.reply, /2\. I give you a secure link for the third-party KYC service\./i);
-  assert.match(res.reply, /You can also complete the same KYC directly in the UNIGOX website or app if you prefer\./i);
+  assert.match(res.reply, /before every transfer, whatever the amount/i);
+  assert.match(res.reply, /1\. You give me your full legal name and country\./i);
+  assert.match(res.reply, /2\. I give you a secure link to the verification page\./i);
   assert.match(res.reply, /First, what full legal name should I use for the verification\?/i);
   assert.ok(client.calls.includes("getProfile"));
   assert.ok(client.calls.includes("getKycVerificationStatus"));
@@ -1809,10 +1354,10 @@ test("saved payment details question during KYC keeps asking for the legal name"
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1821,7 +1366,6 @@ test("saved payment details question during KYC keeps asking for the legal name"
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: undefined,
       last_name: undefined,
       kyc_country_code: undefined,
@@ -1850,10 +1394,10 @@ test("generic KYC intent during the legal-name step does not get mistaken for a 
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1862,7 +1406,6 @@ test("generic KYC intent during the legal-name step does not get mistaken for a 
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: undefined,
       last_name: undefined,
       kyc_country_code: undefined,
@@ -1891,10 +1434,10 @@ test("preflight KYC gating asks only for country when the full name is already k
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1903,7 +1446,6 @@ test("preflight KYC gating asks only for country when the full name is already k
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: undefined,
@@ -1933,10 +1475,10 @@ test("known KYC name and country start the verification link and resume after ap
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -1945,7 +1487,6 @@ test("known KYC name and country start the verification link and resume after ap
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -1975,7 +1516,6 @@ test("known KYC name and country start the verification link and resume after ap
   assert.equal(res.session.stage, "awaiting_kyc_completion");
   assert.match(res.reply, /The verification link is ready\./i);
   assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
-  assert.match(res.reply, /You can also complete the same KYC directly from the UNIGOX website or app/i);
   assert.doesNotMatch(res.reply, /You give me your full name and country/i);
   assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
   assert.ok(!client.calls.includes("createTradeRequest"));
@@ -2003,10 +1543,10 @@ test("generic KYC intent during awaiting_kyc_completion repeats the verification
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2015,7 +1555,6 @@ test("generic KYC intent during awaiting_kyc_completion repeats the verification
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2050,16 +1589,16 @@ test("generic KYC intent during awaiting_kyc_completion repeats the verification
   assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
 });
 
-test("KYC FAQ explains the 100 USD threshold without forcing KYC early", async () => {
+test("KYC FAQ says verification is required before every transfer and repeats the open link", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2068,7 +1607,6 @@ test("KYC FAQ explains the 100 USD threshold without forcing KYC early", async (
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2077,26 +1615,26 @@ test("KYC FAQ explains the 100 USD threshold without forcing KYC early", async (
   const deps = makeDeps(file, client);
 
   let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
-  assert.equal(res.session.stage, "awaiting_confirmation");
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.ok(!client.calls.includes("createTradeRequest"));
 
   res = await advanceTransferFlow(res.session, "Do I need to do KYC?", deps);
 
-  assert.equal(res.session.stage, "awaiting_confirmation");
-  assert.match(res.reply, /reach 100(?:\.00)? USD or more/i);
-  assert.match(res.reply, /recorded volume is about 40(?:\.00)? USD right now/i);
-  assert.match(res.reply, /so no — you do not need KYC for this transfer yet/i);
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /requires the sender's identity to be verified before any transfer, whatever the amount/i);
+  assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
 });
 
-test("KYC FAQ explains that KYC can be done earlier", async () => {
+test("KYC FAQ offers to start verification right away, and says nothing is needed once verified", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2105,7 +1643,6 @@ test("KYC FAQ explains that KYC can be done earlier", async () => {
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2114,29 +1651,29 @@ test("KYC FAQ explains that KYC can be done earlier", async () => {
   const deps = makeDeps(file, client);
 
   let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
-  assert.equal(res.session.stage, "awaiting_confirmation");
-
   res = await advanceTransferFlow(res.session, "Can I do KYC earlier?", deps);
 
-  assert.equal(res.session.stage, "awaiting_confirmation");
-  assert.match(res.reply, /Yes — you can complete KYC earlier if you want/i);
-  assert.match(res.reply, /I wanna do KYC/i);
+  assert.equal(res.session.stage, "awaiting_kyc_completion");
+  assert.match(res.reply, /You can do it right away, before sending anything/i);
   assert.match(res.reply, /give me the KYC link/i);
+
+  const verifiedDeps = makeDeps(file, makeClient());
+  let verified = await startTransferFlow("send 20 EUR to Aleksandr", verifiedDeps);
+  verified = await advanceTransferFlow(verified.session, "Do I need to do KYC?", verifiedDeps);
+  assert.match(verified.reply, /already verified on UNIGOX/i);
+  assert.doesNotMatch(verified.reply, /right away/i);
 });
 
-test("voluntary KYC start returns the live verification link before KYC is required", async () => {
+test("asking to do KYC up front returns the live verification link", async () => {
   const { file } = makeTempContactsFile();
-  let verificationState: KycVerificationData = {
-    status: "not_started",
-  };
   const client = makeClient({
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2145,34 +1682,17 @@ test("voluntary KYC start returns the live verification link before KYC is requi
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
     },
   });
-  client.getKycVerificationStatus = async () => {
-    client.calls.push(`getKycVerificationStatus:${verificationState.status}`);
-    return verificationState;
-  };
-  client.initializeKycVerification = async (params: { fullName: string; country: string }) => {
-    client.calls.push(`initializeKycVerification:${params.fullName}:${params.country}`);
-    verificationState = {
-      status: "in_progress",
-      verification_url: "https://verify.example/kyc-session",
-      verification_seconds_left: 900,
-    };
-    return verificationState;
-  };
   const deps = makeDeps(file, client);
 
-  let res = await startTransferFlow("send 20 EUR to Aleksandr", deps);
-  assert.equal(res.session.stage, "awaiting_confirmation");
-
-  res = await advanceTransferFlow(res.session, "I wanna do KYC on the platform", deps);
+  const res = await startTransferFlow("I wanna do KYC on the platform", deps);
 
   assert.equal(res.session.stage, "awaiting_kyc_completion");
-  assert.match(res.reply, /Yes — you can complete KYC earlier if you want/i);
+  assert.match(res.reply, /requires the sender's identity to be verified before any transfer/i);
   assert.match(res.reply, /The verification link is ready\./i);
   assert.match(res.reply, /https:\/\/verify\.example\/kyc-session/i);
   assert.ok(client.calls.includes("initializeKycVerification:Alex Grape:EE"));
@@ -2184,10 +1704,10 @@ test("verified profile is not downgraded by a stale active KYC session", async (
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2196,7 +1716,6 @@ test("verified profile is not downgraded by a stale active KYC session", async (
     ],
     profile: {
       id_verification_status: "VERIFIED",
-      total_traded_volume_usd: 58,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2228,10 +1747,10 @@ test("awaiting_kyc_completion trusts verified profile even if /kyc still looks a
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2240,7 +1759,6 @@ test("awaiting_kyc_completion trusts verified profile even if /kyc still looks a
     ],
     profile: {
       id_verification_status: "VERIFIED",
-      total_traded_volume_usd: 58,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2270,51 +1788,16 @@ test("awaiting_kyc_completion trusts verified profile even if /kyc still looks a
   assert.match(res.reply, /Reply 'confirm' to place the trade/i);
 });
 
-test("wc: link during awaiting_kyc_completion is handled as a browser-login interrupt and KYC stage is preserved", async () => {
-  const { file } = makeTempContactsFile();
-  const approvedUris: string[] = [];
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "evm", choice: "generated_evm", emailFallbackAvailable: false },
-    approveEvmWalletConnectLink: async (uri) => {
-      approvedUris.push(uri);
-      return {
-        sessionTopic: "session-topic",
-        pairingTopic: "pairing-topic",
-        requestedChains: ["eip155:1"],
-        approvedChains: ["eip155:1"],
-        requestedMethods: ["eth_accounts"],
-        handledMethods: ["eth_accounts"],
-        requestCount: 1,
-      };
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  // Force the session into KYC completion stage
-  res.session.stage = "awaiting_kyc_completion";
-  res.session.auth.kycVerificationUrl = "https://verify.example/test";
-
-  const wcLink = "wc:abc123@2?relay-protocol=irn&symKey=def456";
-  res = await advanceTransferFlow(res.session, `I'll do KYC later, but approve this WalletConnect first. ${wcLink}`, deps);
-
-  // The wc: link should have been consumed as a browser login
-  assert.deepEqual(approvedUris, [wcLink]);
-  assert.match(res.reply, /approved.*WalletConnect browser-login/i);
-  // The session should return to the KYC stage, not jump to signing key
-  assert.equal(res.session.stage, "awaiting_kyc_completion");
-});
-
 test("existing active KYC verification link is reused instead of asking for KYC details again", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient({
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2323,7 +1806,6 @@ test("existing active KYC verification link is reused instead of asking for KYC 
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: null,
       last_name: null,
       kyc_country_code: null,
@@ -2360,10 +1842,10 @@ test("combined KYC full-name and country reply starts verification in one turn",
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2372,7 +1854,6 @@ test("combined KYC full-name and country reply starts verification in one turn",
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: undefined,
       last_name: undefined,
       kyc_country_code: undefined,
@@ -2406,10 +1887,10 @@ test("comma-separated KYC full-name and country reply starts verification in one
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2418,7 +1899,6 @@ test("comma-separated KYC full-name and country reply starts verification in one
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: undefined,
       last_name: undefined,
       kyc_country_code: undefined,
@@ -2455,10 +1935,10 @@ test("KYC start refetches verification status so the link is returned even if th
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2467,7 +1947,6 @@ test("KYC start refetches verification status so the link is returned even if th
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2507,10 +1986,10 @@ test("KYC start keeps polling until the verification link appears", async () => 
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2519,7 +1998,6 @@ test("KYC start keeps polling until the verification link appears", async () => 
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2563,47 +2041,6 @@ test("KYC start keeps polling until the verification link appears", async () => 
   assert.ok(client.calls.includes("getKycVerificationStatus:3:with_link"));
 });
 
-test("KYC start surfaces auth failure instead of pretending the verification link is on the way", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({
-    balances: { USDC: 1, USDT: 110.2 },
-    paymentDetails: [
-      {
-        id: 3413,
-        fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
-        details: {
-          iban: "EE382200221020145685",
-          full_name: "Aleksandr Example",
-        },
-      },
-    ],
-    profile: {
-      id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
-      first_name: "Alex",
-      last_name: "Grape",
-      kyc_country_code: "EE",
-    },
-    initializeKycResponse: {
-      error_key: "invalid_auth_token",
-    },
-    kycStatus: {
-      error_key: "invalid_auth_token",
-    },
-  });
-  const deps = makeDeps(file, client);
-
-  const res = await startTransferFlow("send 60 EUR to Aleksandr", deps);
-
-  assert.equal(res.session.stage, "awaiting_kyc_completion");
-  assert.match(res.reply, /couldn't fetch the secure verification link from chat on this machine right now/i);
-  assert.match(res.reply, /open KYC directly in the UNIGOX website or app/i);
-  assert.doesNotMatch(res.reply, /verification link is ready/i);
-  assert.doesNotMatch(res.reply, /has started the verification/i);
-});
-
 test("awaiting KYC completion keeps polling until the verification link becomes available", async () => {
   const { file } = makeTempContactsFile();
   let pollCount = 0;
@@ -2611,10 +2048,10 @@ test("awaiting KYC completion keeps polling until the verification link becomes 
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
@@ -2623,7 +2060,6 @@ test("awaiting KYC completion keeps polling until the verification link becomes 
     ],
     profile: {
       id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 40,
       first_name: "Alex",
       last_name: "Grape",
       kyc_country_code: "EE",
@@ -2681,28 +2117,21 @@ test("trade placement KYC failure falls back into the guided KYC flow", async ()
     balances: { USDC: 1, USDT: 110.2 },
     paymentDetails: [
       {
-        id: 3413,
+        id: "3413",
         fiat_currency_code: "EUR",
-        payment_method: { id: 1, name: "Wise", slug: "wise" },
-        payment_network: { id: 48, name: "European Transfer (SEPA)", slug: "iban-sepa" },
+        payment_method: { name: "Wise", slug: "wise" },
+        payment_network: { name: "European Transfer (SEPA)", slug: "iban-sepa" },
         details: {
           iban: "EE382200221020145685",
           full_name: "Aleksandr Example",
         },
       },
     ],
-    profile: {
-      id_verification_status: "NOT_VERIFIED",
-      total_traded_volume_usd: 0,
-      first_name: undefined,
-      last_name: undefined,
-      kyc_country_code: undefined,
-    },
     preflightQuotesByAsset: {
       USDC: { totalCryptoAmount: 51.1, feeCryptoAmount: 0.3, vendorOfferRate: 0.823 },
       USDT: { totalCryptoAmount: 50.8, feeCryptoAmount: 0.3, vendorOfferRate: 0.823 },
     },
-    createTradeRequestError: "kyc_verification_needed",
+    createTradeRequestFailure: "kyc_required",
   });
   const deps = makeDeps(file, client);
 
@@ -2941,10 +2370,7 @@ test("India IMPS details validate and normalize placeholder IMPS payout fields",
     ifsc_code: "test0001234",
     account_number: "123456789012",
     full_name: "Bhim Example",
-  }, config.fields, {
-    countryCode: config.networkConfig.countryCode,
-    formatId: config.selectedFormatId,
-  });
+  }, config.fields);
 
   assert.equal(result.valid, true);
   assert.deepEqual(result.errors, []);
@@ -2971,13 +2397,7 @@ test("India IMPS flow reaches confirmation with placeholder bank details", async
   });
   const deps = makeDeps(file, client);
 
-  await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: VALID_LOGIN_KEY,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: VALID_SIGNING_KEY,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, async () => {
+  {
     let res = await startTransferFlow("send 45 INR to Bhim", deps);
     assert.equal(res.session.stage, "awaiting_payment_method");
     assert.match(res.reply, /Available examples for INR: IMPS or NEFT Transfer/i);
@@ -3010,10 +2430,10 @@ test("India IMPS flow reaches confirmation with placeholder bank details", async
     assert.match(res.reply, /Bank Name: Example Bank/i);
     assert.match(res.reply, /IFSC Code: TEST0001234/i);
     assert.match(res.reply, /Account Number: 123456789012/i);
-  });
+  }
 });
 
-test("insufficient balance blocks before trade creation and asks for top-up method first", async () => {
+test("insufficient balance blocks before trade creation and says how to fund the partner wallet", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3038,7 +2458,7 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   const deps = makeDeps(file, client);
 
   const res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_topup_method");
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
   assert.equal(res.session.status, "blocked");
   assert.ok(res.events.some((event) => event.type === "balance_checked"));
   assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
@@ -3047,10 +2467,10 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   assert.match(res.reply, /1 USDC ≈ 0\.95 EUR/i);
   assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
   assert.match(res.reply, /not a locked quote/i);
-  assert.match(res.reply, /will not place the trade/i);
-  assert.match(res.reply, /How would you like to top up the wallet/i);
-  assert.match(res.reply, /Another UNIGOX user sends funds directly to your username/i);
-  assert.match(res.reply, /External \/ on-chain deposit/i);
+  assert.match(res.reply, /will not place the transfer/i);
+  assert.match(res.reply, /Add USDC or USDT to the partner wallet in My Wallet on unigox\.com/i);
+  assert.deepEqual(res.options, ["recheck balance", "change amount"]);
+  assert.ok(!client.calls.includes("createTradeRequest"));
   assert.deepEqual(client.calls, [
     "getProfile",
     "getWalletBalance",
@@ -3063,57 +2483,7 @@ test("insufficient balance blocks before trade creation and asks for top-up meth
   ]);
 });
 
-test("internal UNIGOX top-up shows username and skips token-chain questions", async () => {
-  const { file } = makeTempContactsFile({
-    contacts: {
-      mom: {
-        name: "Mom",
-        aliases: ["mom"],
-        paymentMethods: {
-          EUR: {
-            method: "Revolut",
-            methodId: 2,
-            methodSlug: "revolut",
-            networkId: 47,
-            network: "Revolut Username",
-            networkSlug: "revolut-username",
-            details: { revtag: "mom_ok" },
-          },
-        },
-      },
-    },
-    _meta: { lastUpdated: "" },
-  });
-  const client = makeClient({ balance: 10, username: "alexwallet" });
-  const deps = makeDeps(file, client);
-
-  let res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_topup_method");
-
-  res = await advanceTransferFlow(res.session, "top up from another UNIGOX wallet", deps);
-  assert.equal(res.session.stage, "awaiting_balance_resolution");
-  assert.equal(res.session.topUp?.method, "internal_username");
-  assert.match(res.reply, /@alexwallet/i);
-  assert.match(res.reply, /Current best-offer estimate:/i);
-  assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
-  assert.match(res.reply, /send about 16\.25 USD more directly to @alexwallet inside UNIGOX/i);
-  assert.match(res.reply, /not a locked quote/i);
-  assert.doesNotMatch(res.reply, /Which token do you want to deposit/i);
-  assert.doesNotMatch(res.reply, /Which network should I use/i);
-  assert.deepEqual(client.calls, [
-    "getProfile",
-    "getWalletBalance",
-    "listInitiatorTrades",
-    "getProfile",
-    "getWalletBalance",
-    "ensurePaymentDetail",
-    "getPreflightQuote:USDC:25",
-    "getPreflightQuote:USDT:25",
-    "getProfile",
-  ]);
-});
-
-test("top-up flow accepts a natural topped-up reply, refreshes balance, and resumes with a fresh quote", async () => {
+test("a natural topped-up reply refreshes the balance and resumes with a fresh quote", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3152,7 +2522,7 @@ test("top-up flow accepts a natural topped-up reply, refreshes balance, and resu
   const deps = makeDeps(file, client);
 
   let res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_topup_method");
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
   assert.match(res.reply, /You need about 16\.25 USD more in one asset/i);
 
   currentUsdc = 1;
@@ -3168,64 +2538,6 @@ test("top-up flow accepts a natural topped-up reply, refreshes balance, and resu
   assert.match(res.reply, /to deliver 50 EUR/i);
   assert.match(res.reply, /This transfer is currently coverable with USDT/i);
   assert.ok(client.calls.filter((entry) => entry === "getWalletBalance").length >= 3);
-});
-
-test("external top-up keeps token then chain then single-address flow", async () => {
-  const { file } = makeTempContactsFile({
-    contacts: {
-      mom: {
-        name: "Mom",
-        aliases: ["mom"],
-        paymentMethods: {
-          EUR: {
-            method: "Revolut",
-            methodId: 2,
-            methodSlug: "revolut",
-            networkId: 47,
-            network: "Revolut Username",
-            networkSlug: "revolut-username",
-            details: { revtag: "mom_ok" },
-          },
-        },
-      },
-    },
-    _meta: { lastUpdated: "" },
-  });
-  const client = makeClient({ balance: 10, username: "alexwallet" });
-  const deps = makeDeps(file, client);
-
-  let res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_topup_method");
-
-  res = await advanceTransferFlow(res.session, "external / on-chain deposit", deps);
-  assert.equal(res.session.stage, "awaiting_external_deposit_asset");
-  assert.match(res.reply, /which token do you want to deposit/i);
-  assert.match(res.reply, /USDC, USDT/i);
-
-  res = await advanceTransferFlow(res.session, "USDT", deps);
-  assert.equal(res.session.stage, "awaiting_external_deposit_chain");
-  assert.match(res.reply, /Which network should I use for USDT/i);
-  assert.match(res.reply, /Tron, TON/i);
-
-  res = await advanceTransferFlow(res.session, "Tron", deps);
-  assert.equal(res.session.stage, "awaiting_balance_resolution");
-  assert.match(res.reply, /Send USDT on Tron to this deposit address: TRON-DEPOSIT-ADDRESS/i);
-  assert.match(res.reply, /single relevant address/i);
-  assert.doesNotMatch(res.reply, /TON-DEPOSIT-ADDRESS/i);
-  assert.deepEqual(client.calls, [
-    "getProfile",
-    "getWalletBalance",
-    "listInitiatorTrades",
-    "getProfile",
-    "getWalletBalance",
-    "ensurePaymentDetail",
-    "getPreflightQuote:USDC:25",
-    "getPreflightQuote:USDT:25",
-    "getSupportedDepositOptions",
-    "getSupportedDepositOptions",
-    "getSupportedDepositOptions",
-    "describeDepositSelection:USDT:728126428",
-  ]);
 });
 
 test("trade creation reuses the preflight quote amount instead of the raw fiat amount", async () => {
@@ -3344,7 +2656,7 @@ test("aggregate balance is not treated as sellable when no single asset covers t
   const deps = makeDeps(file, client);
 
   const res = await startTransferFlow("send 25 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_topup_method");
+  assert.equal(res.session.stage, "awaiting_balance_resolution");
   assert.equal(res.session.status, "blocked");
   assert.match(res.reply, /Current wallet balance: 30\.00 USD total/i);
   assert.match(res.reply, /USDC: 20\.00 USD/i);
@@ -3572,101 +2884,7 @@ test("no vendor match lands in explicit retry/change branch", async () => {
   assert.ok(res.events.some((event) => event.type === "blocked_no_vendor_match"));
 });
 
-
-test("detectAuthState recognizes TON private-key auth without requiring mnemonic env", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, () => detectAuthState());
-
-  assert.equal(result.hasReplayableAuth, true);
-  assert.equal(result.authMode, "ton");
-  assert.equal(result.emailFallbackAvailable, true);
-});
-
-test("detectAuthState preserves generated TON wallet origin from env", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: undefined,
-    UNIGOX_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, () => detectAuthState());
-
-  assert.equal(result.hasReplayableAuth, true);
-  assert.equal(result.authMode, "ton");
-  assert.equal(result.choice, "generated_ton");
-});
-
-test("detectAuthState keeps EVM and TON stored wallet origins separate when both exist", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-    UNIGOX_LOGIN_WALLET_ORIGIN: "generated_ton",
-    UNIGOX_EVM_LOGIN_WALLET_ORIGIN: "generated_evm",
-    UNIGOX_TON_LOGIN_WALLET_ORIGIN: "generated_ton",
-  }, () => detectAuthState());
-
-  assert.equal(result.hasReplayableAuth, true);
-  assert.equal(result.authMode, undefined);
-  assert.equal(result.choice, undefined);
-  assert.deepEqual(result.availableChoices, ["generated_evm", "generated_ton"]);
-  assert.equal(result.emailFallbackAvailable, true);
-});
-
-
-test("loadUnigoxConfigFromEnv prefers TON private-key auth when present", () => {
-  const result = withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_TON_ADDRESS: "0:abcd",
-    UNIGOX_TON_WALLET_VERSION: "v5r1",
-    UNIGOX_EMAIL: "agent@example.com",
-  }, () => loadUnigoxConfigFromEnv());
-
-  assert.equal(result.authMode, "ton");
-  assert.equal(result.tonPrivateKey, VALID_TON_PRIVATE_KEY);
-  assert.equal(result.tonAddress, "0:abcd");
-  assert.equal(result.tonWalletVersion, "v5r1");
-  assert.equal(result.email, "agent@example.com");
-});
-
-test("stored split EVM auth overrides stale injected auth state and shows username plus split balance at flow start", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
-
-  const res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, async () => startTransferFlow("Hey I want to make a transfer", makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  })));
-
-  assert.equal(res.session.stage, "awaiting_recipient_mode");
-  assert.match(res.reply, /@stateful/i);
-  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
-  assert.match(res.reply, /USDC: 200\.00 USD/i);
-  assert.match(res.reply, /USDT: 50\.00 USD/i);
-  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
-  assert.deepEqual(client.calls.slice(0, 2), ["getProfile", "getWalletBalance"]);
-  assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
-});
-
-
-
-test("stored auth added after a session starts still skips onboarding on the next turn", async () => {
+test("funding refused for balance after a provider accepted keeps the transfer open and hides the API text", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3687,61 +2905,25 @@ test("stored auth added after a session starts still skips onboarding on the nex
     },
     _meta: { lastUpdated: "" },
   });
-  const client = makeClient({ username: "stateful", balances: { USDC: 200, USDT: 50 } });
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+  const client = makeClient({
+    matchedTradeStatus: "awaiting_escrow_funding_by_seller",
+    fundTradeEscrowFailure: "insufficient_balance",
   });
+  const deps = makeDeps(file, client);
 
-  let res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: undefined,
-  }, async () => startTransferFlow("send 20 EUR to mom", deps));
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
 
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-  assert.match(res.reply, /Which UNIGOX sign-in path should I set up/i);
-  assert.match(res.reply, /5\.\s*Email OTP/i);
-
-  res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: "0xlogin",
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: "0xsign",
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "agent@example.com",
-  }, async () => advanceTransferFlow(res.session, "continue", deps));
-
-  assert.equal(res.session.stage, "awaiting_confirmation");
-  assert.match(res.reply, /@stateful/i);
-  assert.match(res.reply, /Current wallet balance: 250\.00 USD total/i);
-  assert.doesNotMatch(res.reply, /Which wallet connection path should I use/i);
-  assert.equal(res.events.some((event) => event.type === "blocked_missing_auth"), false);
+  assert.equal(res.session.stage, "awaiting_trade_settlement");
+  assert.equal(res.session.status, "active");
+  assert.ok(client.calls.includes("fundTradeEscrow:8801"));
+  assert.match(res.reply, /does not hold enough USDC to fund it, so nothing has left the wallet/i);
+  assert.match(res.reply, /ask me for status and I'll fund it/i);
+  assert.doesNotMatch(res.reply, /engineering detail/i);
+  assert.ok(res.events.some((event) => event.type === "blocked_insufficient_balance"));
 });
 
-test("missing EVM auth asks the user to sign in on unigox.com before requesting the login key", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
-
-  const res = await startTransferFlow("send 50 EUR to mom", deps);
-  const chooseEvm = await advanceTransferFlow(res.session, "evm", deps);
-
-  assert.equal(chooseEvm.session.stage, "awaiting_evm_wallet_signin");
-  assert.match(chooseEvm.reply, /Before I ask for any key/i);
-  assert.match(chooseEvm.reply, /signed in on unigox\.com/i);
-  assert.doesNotMatch(chooseEvm.reply, /paste the login wallet private key/i);
-
-  const afterSignin = await advanceTransferFlow(chooseEvm.session, "done", deps);
-  assert.equal(afterSignin.session.stage, "awaiting_evm_login_key");
-  assert.match(afterSignin.reply, /account private key for the EVM wallet you used to sign in on UNIGOX/i);
-  assert.match(afterSignin.reply, /NEWLY CREATED \/ ISOLATED wallet/i);
-  assert.match(afterSignin.reply, /must NOT be your main wallet/i);
-});
-
-test("email OTP choice asks for an email address when none is configured, then offers generated wallet setup after OTP verification", async () => {
+test("a transfer that cannot be placed is explained without the backend's wording", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3762,47 +2944,24 @@ test("email OTP choice asks for an email address when none is configured, then o
     },
     _meta: { lastUpdated: "" },
   });
-  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
+  for (const [failure, expected] of [
+    ["no_match", /No provider can take this transfer right now, so nothing was sent/i],
+    ["price_changed", /The price moved while I was placing the transfer, so nothing was sent/i],
+  ] as const) {
+    const client = makeClient({ createTradeRequestFailure: failure });
+    const deps = makeDeps(file, client);
 
-  const res = await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: undefined,
-  }, async () => {
-    let result = await startTransferFlow("send 20 EUR to mom", deps);
-    assert.equal(result.session.stage, "awaiting_auth_choice");
+    let res = await startTransferFlow("send 25 EUR to mom", deps);
+    res = await advanceTransferFlow(res.session, "confirm", deps);
 
-    result = await advanceTransferFlow(result.session, "email OTP", deps);
-    assert.equal(result.session.stage, "awaiting_email_address");
-    assert.match(result.reply, /What email address should I use/i);
-
-    result = await advanceTransferFlow(result.session, "eyesonaleks@gmail.com", deps);
-    assert.equal(result.session.stage, "awaiting_email_otp");
-    assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
-
-    result = await advanceTransferFlow(result.session, "123456", deps);
-    assert.equal(result.session.stage, "awaiting_wallet_setup_choice");
-    assert.equal(result.session.auth.mode, "email");
-    assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
-    assert.equal(result.session.auth.emailAuthToken, "email-login-token");
-    assert.match(result.reply, /Email OTP worked/i);
-    assert.match(result.reply, /Create a dedicated EVM wallet/i);
-    assert.match(result.reply, /Create a dedicated TON wallet/i);
-    assert.match(result.reply, /Stay on email OTP for now/i);
-    return result;
-  });
-
-  assert.ok(client.calls.includes("requestEmailOTP"));
-  assert.ok(client.calls.includes("verifyEmailOTP:123456"));
-  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
+    assert.equal(res.session.stage, "awaiting_no_match_resolution");
+    assert.match(res.reply, expected);
+    assert.doesNotMatch(res.reply, /engineering detail/i);
+    assert.ok(!client.calls.includes("waitForTradeMatch"));
+  }
 });
 
-test("configured recovery email skips the email-address step and still offers wallet setup after OTP verification", async () => {
+test("a stopped trade with crypto still in escrow gets its refund signed without asking", async () => {
   const { file } = makeTempContactsFile({
     contacts: {
       mom: {
@@ -3823,696 +2982,152 @@ test("configured recovery email skips the email-address step and still offers wa
     },
     _meta: { lastUpdated: "" },
   });
-  const client = makeClient({ username: "emailuser" });
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: true },
+  const client = makeClient({
+    getTradeStatuses: ["escrow_funded_or_reserved_awaiting_payment_proof_from_buyer", "escrow_refund_authorization_required"],
+    tradeOverrides: { possible_actions: ["action_authorize_refund"] },
   });
+  const deps = makeDeps(file, client);
 
-  await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_EVM_SIGNING_PRIVATE_KEY: undefined,
-    UNIGOX_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_EMAIL: "eyesonaleks@gmail.com",
-  }, async () => {
-    let result = await startTransferFlow("send 20 EUR to mom", deps);
-    result = await advanceTransferFlow(result.session, "email OTP", deps);
-    assert.equal(result.session.stage, "awaiting_email_otp");
-    assert.equal(result.session.auth.emailAddress, "eyesonaleks@gmail.com");
-    assert.match(result.reply, /I sent a 6-digit code to eyesonaleks@gmail.com/i);
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  res = await advanceTransferFlow(res.session, "status", deps);
 
-    result = await advanceTransferFlow(result.session, "123456", deps);
-    assert.equal(result.session.stage, "awaiting_wallet_setup_choice");
-    assert.match(result.reply, /Create a dedicated EVM wallet/i);
-    assert.match(result.reply, /Create a dedicated TON wallet/i);
-  });
-
-  assert.ok(client.calls.includes("requestEmailOTP"));
-  assert.ok(client.calls.includes("verifyEmailOTP:123456"));
+  assert.ok(client.calls.includes("authorizeRefund:8801"));
+  assert.match(res.reply, /I signed the refund, so the funds are on their way back to the partner wallet/i);
+  assert.equal(res.session.execution.tradeStatus, "escrow_refunded_to_seller");
+  assert.equal(res.session.status, "completed");
 });
 
-test("generated EVM wallet choice creates the wallet directly without asking for email OTP first", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "evmstarter" });
-  const persisted = { login: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedEvmWallet: async () => ({
-      address: "0x1111111111111111111111111111111111111111",
-      privateKey: VALID_LOGIN_KEY,
-    }),
-    verifyEvmLoginKey: async () => ({ success: true, username: "evmstarter" }),
-    persistEvmLoginKey: async (loginKey) => {
-      persisted.login.push(loginKey);
-    },
-  });
-
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.equal(res.session.auth.mode, "evm");
-  assert.equal(res.session.auth.choice, "generated_evm");
-  assert.doesNotMatch(res.reply, /What email address should I use/i);
-  assert.equal(client.calls.includes("requestEmailOTP"), false);
-  assert.equal(client.calls.includes("generateAndLinkWallet"), false);
-  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-});
-
-test("login-only start asks for auth choice instead of falling into the transfer recipient flow", async () => {
+test("without Partner API settings the flow stops with setup instructions and resumes once they exist", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
+  const missing = makeDeps(file, client, { authState: { hasReplayableAuth: false, missingSettings: ["UNIGOX_API_KEY", "UNIGOX_WALLET_PRIVATE_KEY"] } });
 
-  const res = await startTransferFlow("I need to sign in to UNIGOX.", deps);
+  let res = await startTransferFlow("send 25 EUR to mom", missing);
 
-  assert.equal(res.session.goal, "sign_in_only");
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-  assert.match(res.reply, /Which sign-in path would you like to use|Which wallet connection path should I use|Which UNIGOX sign-in path should I set up/i);
-  assert.doesNotMatch(res.reply, /Who do you want to send money to|saved contact|new recipient/i);
+  assert.equal(res.session.stage, "awaiting_setup");
+  assert.equal(res.session.status, "blocked");
+  assert.match(res.reply, /not connected to UNIGOX yet/i);
+  assert.match(res.reply, /Missing settings: UNIGOX_API_KEY, UNIGOX_WALLET_PRIVATE_KEY\./);
+  assert.match(res.reply, /don't paste keys into this chat/i);
+  assert.ok(res.events.some((event) => event.type === "blocked_missing_auth"));
+  assert.deepEqual(client.calls, []);
+
+  res = await advanceTransferFlow(res.session, "send 25 EUR to mom", makeDeps(file, client));
+
+  assert.notEqual(res.session.stage, "awaiting_setup");
+  assert.equal(res.session.auth.available, true);
+  assert.ok(client.calls.includes("getWalletBalance"));
 });
 
-test("generated EVM wallet choice in a login-only flow stays focused on browser login before signing-key export", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "evmstarter" });
-  const persisted = { login: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedEvmWallet: async () => ({
-      address: "0x1111111111111111111111111111111111111111",
-      privateKey: VALID_LOGIN_KEY,
-    }),
-    verifyEvmLoginKey: async () => ({ success: true, username: "evmstarter" }),
-    persistEvmLoginKey: async (loginKey) => {
-      persisted.login.push(loginKey);
-    },
-  });
-
-  let res = await startTransferFlow("I need to sign in to UNIGOX.", deps);
-  assert.equal(res.session.goal, "sign_in_only");
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.auth.mode, "evm");
-  assert.equal(res.session.auth.choice, "generated_evm");
-  assert.doesNotMatch(res.reply, /How to get it: open your UNIGOX account settings and export/i);
-  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-});
-
-
-test("generated EVM auth rejects a tc:// browser-login request as the wrong protocol", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "artistic_osprey_3298" });
-  const deps = makeDeps(file, client, {
-    authState: {
-      hasReplayableAuth: true,
-      authMode: "evm",
-      choice: "generated_evm",
-      username: "artistic_osprey_3298",
-    },
-  });
-
-  const res = await advanceTransferFlow({
-    id: "transfer-stale-protocol",
-    goal: "sign_in_only",
-    status: "blocked",
-    stage: "resolving",
-    startedAt: "2026-04-07T09:21:48.214Z",
-    updatedAt: "2026-04-07T09:26:16.164Z",
-    details: {},
-    detailCollection: { index: 0 },
-    contactExists: false,
-    contactStale: false,
-    auth: {
-      checked: true,
-      available: true,
-      mode: "evm",
-      choice: "generated_evm",
-      username: "artistic_osprey_3298",
-      startupSnapshotShown: true,
-      totalTradedVolumeUsd: 0,
-      kycStatus: "NOT_VERIFIED",
-      outstandingTradeReminderShown: true,
-    },
-    execution: { confirmed: false },
-    notes: [],
-  }, "tc://?v=2&id=847713b4405340f86154885739ecdc315a8b41cc08f1f03e50b2ad287a091c3d&trace_id=019d6740-73a1-72cb-9878-de6ed7001c1a&r=%7B%22manifestUrl%22%3A%22https%3A%2F%2Fwww.unigox.com%2Fapi%2Ftonconnect-manifest%22%2C%22items%22%3A%5B%7B%22name%22%3A%22ton_addr%22%7D%2C%7B%22name%22%3A%22ton_proof%22%2C%22payload%22%3A%228a60c2ff7deedf1ee6208c5d882e8a709d289256c5e86fd808f34d525e40f583%22%7D%5D%7D&ret=none", deps);
-
-  assert.match(res.reply, /WalletConnect, not TonConnect/i);
-  assert.match(res.reply, /Send the fresh wc: WalletConnect link or WalletConnect QR/i);
-  assert.doesNotMatch(res.reply, /TON mnemonic phrase|TON private key/i);
-});
-
-test("email OTP can still generate and link a dedicated EVM wallet locally after OTP verification", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
-  const persisted = { email: [] as string[], login: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    persistEmailAddress: async (emailAddress) => {
-      persisted.email.push(emailAddress);
-    },
-    persistEvmLoginKey: async (loginKey) => {
-      persisted.login.push(loginKey);
-    },
-  });
-
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "email OTP", deps);
-  assert.equal(res.session.stage, "awaiting_email_address");
-
-  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
-  assert.equal(res.session.stage, "awaiting_email_otp");
-
-  res = await advanceTransferFlow(res.session, "123456", deps);
-  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.equal(res.session.auth.mode, "evm");
-  assert.equal(res.session.auth.choice, "generated_evm");
-  assert.ok(client.calls.includes("generateAndLinkWallet"));
-  assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
-  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-});
-
-test("generated TON wallet choice creates the wallet directly without asking for email OTP first", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "tonstarter" });
-  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedTonWallet: async () => ({
-      address: "0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      privateKey: VALID_TON_PRIVATE_KEY,
-      walletVersion: "v4",
-    }),
-    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      persisted.tonPrivateKey.push(tonPrivateKey);
-    },
-    persistTonAddress: async (tonAddress) => {
-      persisted.tonAddress.push(tonAddress);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-    persistAuthChoice: async (choice) => {
-      persisted.authChoice.push(choice);
-    },
-  });
-
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.equal(res.session.auth.mode, "ton");
-  assert.equal(res.session.auth.choice, "generated_ton");
-  assert.doesNotMatch(res.reply, /What email address should I use/i);
-  assert.equal(client.calls.includes("requestEmailOTP"), false);
-  assert.equal(client.calls.includes("generateAndLinkTonWallet"), false);
-  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
-  assert.deepEqual(persisted.tonAddress, ["0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
-  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
-});
-
-test("generated TON wallet can be exported into a local wallet file without exposing the secret in chat", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "tonstarter" });
-  const exported: LoginWalletExportRequest[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedTonWallet: async () => ({
-      address: "0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      privateKey: VALID_TON_PRIVATE_KEY,
-      walletVersion: "v4",
-      mnemonic: VALID_TON_MNEMONIC,
-    }),
-    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      process.env.UNIGOX_TON_PRIVATE_KEY = tonPrivateKey;
-    },
-    persistTonMnemonic: async (mnemonic) => {
-      process.env.UNIGOX_TON_MNEMONIC = mnemonic;
-    },
-    persistTonAddress: async (tonAddress) => {
-      process.env.UNIGOX_TON_ADDRESS = tonAddress;
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      process.env.UNIGOX_TON_WALLET_VERSION = tonWalletVersion;
-    },
-    persistAuthChoice: async (choice) => {
-      process.env.UNIGOX_LOGIN_WALLET_ORIGIN = choice;
-    },
-    exportLoginWalletFile: async (wallet) => {
-      exported.push(wallet);
-      return {
-        walletType: wallet.walletType,
-        origin: wallet.origin,
-        filePath: "/tmp/generated-ton-wallet.json",
-        address: wallet.address,
-        walletVersion: wallet.walletVersion,
-        includesMnemonic: Boolean(wallet.mnemonic),
-      };
-    },
-  });
-
-  await withEnv({
-    UNIGOX_TON_PRIVATE_KEY: undefined,
-    UNIGOX_TON_MNEMONIC: undefined,
-    UNIGOX_TON_ADDRESS: undefined,
-    UNIGOX_TON_WALLET_VERSION: undefined,
-    UNIGOX_LOGIN_WALLET_ORIGIN: undefined,
-  }, async () => {
-    let res = await startTransferFlow("send 20 EUR to mom", deps);
-    res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
-    assert.equal(res.session.stage, "awaiting_payment_method");
-
-    res = await advanceTransferFlow(res.session, "export this wallet", deps);
-    assert.equal(res.session.stage, "awaiting_payment_method");
-    assert.match(res.reply, /wrote your dedicated TON login wallet to a local file/i);
-    assert.match(res.reply, /\/tmp\/generated-ton-wallet\.json/i);
-    assert.ok(res.events.some((event) => event.type === "wallet_exported"));
-  });
-
-  assert.equal(exported.length, 1);
-  assert.equal(exported[0].walletType, "ton");
-  assert.equal(exported[0].origin, "generated_ton");
-  assert.equal(exported[0].privateKey, VALID_TON_PRIVATE_KEY);
-  assert.equal(exported[0].mnemonic, VALID_TON_MNEMONIC);
-  assert.equal(exported[0].address, "0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
-  assert.equal(exported[0].walletVersion, "v4");
-});
-
-test("generated EVM wallet export works for natural phrasing about the wallet created on this device", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "evmstarter" });
-  const exported: LoginWalletExportRequest[] = [];
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedEvmWallet: async () => ({
-      address: "0x1111111111111111111111111111111111111111",
-      privateKey: VALID_LOGIN_KEY,
-    }),
-    verifyEvmLoginKey: async () => ({ success: true, username: "evmstarter" }),
-    persistEvmLoginKey: async (loginKey) => {
-      process.env.UNIGOX_EVM_LOGIN_PRIVATE_KEY = loginKey;
-    },
-    persistAuthChoice: async (choice) => {
-      process.env.UNIGOX_LOGIN_WALLET_ORIGIN = choice;
-    },
-    exportLoginWalletFile: async (wallet) => {
-      exported.push(wallet);
-      return {
-        walletType: wallet.walletType,
-        origin: wallet.origin,
-        filePath: "/tmp/generated-evm-wallet.json",
-        address: wallet.address,
-        includesMnemonic: false,
-      };
-    },
-  });
-
-  await withEnv({
-    UNIGOX_EVM_LOGIN_PRIVATE_KEY: undefined,
-    UNIGOX_LOGIN_WALLET_ORIGIN: undefined,
-  }, async () => {
-    let res = await startTransferFlow("send 20 EUR to mom", deps);
-    res = await advanceTransferFlow(res.session, "Create dedicated EVM wallet", deps);
-    assert.equal(res.session.stage, "awaiting_payment_method");
-
-    res = await advanceTransferFlow(res.session, "I am asking you to export the wallet you created for me", deps);
-    assert.equal(res.session.stage, "awaiting_payment_method");
-    assert.match(res.reply, /wrote your dedicated EVM login wallet to a local file/i);
-    assert.match(res.reply, /\/tmp\/generated-evm-wallet\.json/i);
-    assert.ok(res.events.some((event) => event.type === "wallet_exported"));
-  });
-
-  assert.equal(exported.length, 1);
-  assert.equal(exported[0].walletType, "evm");
-  assert.equal(exported[0].origin, "generated_evm");
-  assert.equal(exported[0].privateKey, VALID_LOGIN_KEY);
-  assert.equal(exported[0].address, "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A");
-});
-
-test("manual wallet auth cannot be auto-exported as a generated wallet backup", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "manualuser" });
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: true, authMode: "ton", choice: "ton", emailFallbackAvailable: false },
-  });
-
-  await withEnv({
-    UNIGOX_LOGIN_WALLET_ORIGIN: "ton",
-    UNIGOX_TON_PRIVATE_KEY: VALID_TON_PRIVATE_KEY,
-  }, async () => {
-    const res = await startTransferFlow("export this wallet", deps);
-    assert.match(res.reply, /only auto-export a generated login wallet/i);
-    assert.equal(res.events.some((event) => event.type === "wallet_exported"), false);
-  });
-});
-
-test("generated TON wallet choice overrides a stale email-address step instead of asking for email again", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "tonstarter" });
-  const persisted = { tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    generateDedicatedTonWallet: async () => ({
-      address: "0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      privateKey: VALID_TON_PRIVATE_KEY,
-      walletVersion: "v4",
-    }),
-    verifyTonLogin: async () => ({ success: true, username: "tonstarter", tonWalletVersion: "v4" }),
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      persisted.tonPrivateKey.push(tonPrivateKey);
-    },
-    persistTonAddress: async (tonAddress) => {
-      persisted.tonAddress.push(tonAddress);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-    persistAuthChoice: async (choice) => {
-      persisted.authChoice.push(choice);
-    },
-  });
-
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "email OTP", deps);
-  assert.equal(res.session.stage, "awaiting_email_address");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet on this device", deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.equal(res.session.auth.mode, "ton");
-  assert.equal(res.session.auth.choice, "generated_ton");
-  assert.doesNotMatch(res.reply, /What email address should I use/i);
-  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
-  assert.deepEqual(persisted.tonAddress, ["0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
-  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
-});
-
-test("email OTP can still generate and link a dedicated TON wallet locally after OTP verification", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient({ username: "emailuser", verifyEmailOtpToken: "email-login-token" });
-  const persisted = { email: [] as string[], tonPrivateKey: [] as string[], tonAddress: [] as string[], tonWalletVersion: [] as string[], authChoice: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    persistEmailAddress: async (emailAddress) => {
-      persisted.email.push(emailAddress);
-    },
-    persistTonPrivateKey: async (tonPrivateKey) => {
-      persisted.tonPrivateKey.push(tonPrivateKey);
-    },
-    persistTonAddress: async (tonAddress) => {
-      persisted.tonAddress.push(tonAddress);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-    persistAuthChoice: async (choice) => {
-      persisted.authChoice.push(choice);
-    },
-  });
-
-  let res = await startTransferFlow("send 20 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "email OTP", deps);
-  assert.equal(res.session.stage, "awaiting_email_address");
-
-  res = await advanceTransferFlow(res.session, "eyesonaleks@gmail.com", deps);
-  res = await advanceTransferFlow(res.session, "123456", deps);
-  assert.equal(res.session.stage, "awaiting_wallet_setup_choice");
-
-  res = await advanceTransferFlow(res.session, "Create dedicated TON wallet", deps);
-
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.equal(res.session.auth.mode, "ton");
-  assert.equal(res.session.auth.choice, "generated_ton");
-  assert.ok(client.calls.includes("generateAndLinkTonWallet"));
-  assert.deepEqual(persisted.email, ["eyesonaleks@gmail.com"]);
-  assert.deepEqual(persisted.tonPrivateKey, [VALID_TON_PRIVATE_KEY]);
-  assert.deepEqual(persisted.tonAddress, ["0:1111111111111111111111111111111111111111111111111111111111111111"]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v4"]);
-  assert.deepEqual(persisted.authChoice, ["generated_ton"]);
-});
-
-
-
-
-test("failed EVM login verification stays on the login-key step and does not ask for the signing key", async () => {
+test("saving a contact needs no Partner API settings", async () => {
   const { file } = makeTempContactsFile();
   const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyEvmLoginKey: async () => ({ success: false, message: "invalid key" }),
-  });
+  const deps = makeDeps(file, client, { authState: { hasReplayableAuth: false, missingSettings: ["UNIGOX_API_KEY"] } });
 
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "evm", deps);
-  res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
-  // No longer blocks for cleanup — proceeds directly with advisory
-  assert.equal(res.session.stage, "awaiting_evm_login_key");
-  assert.match(res.reply, /sensitive data/i);
-  assert.match(res.reply, /didn't work/i);
-  assert.doesNotMatch(res.reply, /UNIGOX EVM signing key/i);
+  const res = await startTransferFlow("save a new contact John for EUR", deps);
+
+  assert.notEqual(res.session.stage, "awaiting_setup");
+  assert.deepEqual(client.calls, []);
 });
 
-
-
-test("invalid text at the login-key step is rejected before secret-cleanup handling", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "evm", deps);
-  res = await advanceTransferFlow(res.session, "done", deps);
-  assert.equal(res.session.stage, "awaiting_evm_login_key");
-
-  res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_evm_login_key");
-  assert.match(res.reply, /doesn’t look like a valid EVM private key/i);
-  assert.doesNotMatch(res.reply, /delete the message/i);
-  assert.equal(res.session.auth.pendingSecret, undefined);
-});
-
-
-
-
-test("automatic secret deletion hook skips manual cleanup confirmation", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { login: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyEvmLoginKey: async (loginKey) => ({ success: loginKey === VALID_LOGIN_KEY, username: "autodelete" }),
-    persistEvmLoginKey: async (loginKey) => {
-      persisted.login.push(loginKey);
-    },
-    handleSensitiveInput: async () => ({ deleted: true, note: "Deleted automatically." }),
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "evm", deps);
-  res = await advanceTransferFlow(res.session, "done", deps);
-  res = await advanceTransferFlow(res.session, VALID_LOGIN_KEY, deps);
-
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.ok(res.events.some((event) => event.type === "secret_message_deleted"));
-  assert.deepEqual(persisted.login, [VALID_LOGIN_KEY]);
-});
-
-
-
-test("legacy pending TON mnemonic still finalizes correctly after cleanup confirmation", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const persisted = { tonMnemonic: [] as string[], tonWalletVersion: [] as string[] };
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    verifyTonLogin: async ({ mnemonic, tonAddress }) => ({
-      success: mnemonic === VALID_TON_MNEMONIC && tonAddress === "0:1234",
-      username: "tonuser",
-      tonWalletVersion: "v5r1",
-    }),
-    persistTonMnemonic: async (mnemonic) => {
-      persisted.tonMnemonic.push(mnemonic);
-    },
-    persistTonWalletVersion: async (tonWalletVersion) => {
-      persisted.tonWalletVersion.push(tonWalletVersion);
-    },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res.session.stage = "awaiting_secret_cleanup_confirmation";
-  res.session.auth.tonAddress = "0:1234";
-  res.session.auth.pendingSecret = {
-    kind: "ton_mnemonic",
-    value: VALID_TON_MNEMONIC,
+test("detectAuthState reports which Partner API settings are missing", () => {
+  const complete = {
+    UNIGOX_API_KEY: "test-key",
+    UNIGOX_WALLET_PRIVATE_KEY: "0x1111111111111111111111111111111111111111111111111111111111111111",
+    UNIGOX_XAI_RPC_URL: "https://rpc.example.test",
+    UNIGOX_SENDER_EMAIL: "sender@example.test",
   };
 
-  res = await advanceTransferFlow(res.session, "deleted", deps);
-  assert.equal(res.session.stage, "awaiting_payment_method");
-  assert.deepEqual(persisted.tonMnemonic, [VALID_TON_MNEMONIC]);
-  assert.deepEqual(persisted.tonWalletVersion, ["v5r1"]);
-  assert.equal(res.session.auth.pendingSecret, undefined);
-});
-
-test("TonConnect can be started from the TON auth-method step and stays pending until the wallet approves it", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    startTonConnectLogin: async () => ({
-      universalLink: "https://wallet.example/connect",
-      manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-      expiresAt: "2026-04-02T12:00:00.000Z",
-      payloadToken: "payload-token",
-    }),
-    checkTonConnectLogin: async () => ({
-      status: "pending",
-    }),
+  withEnv(complete, () => {
+    assert.deepEqual(detectAuthState(), { hasReplayableAuth: true, missingSettings: [] });
   });
-
-  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "ton", deps);
-  res = await advanceTransferFlow(res.session, tonAddress, deps);
-  res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  assert.equal(res.session.stage, "awaiting_ton_auth_method");
-
-  res = await advanceTransferFlow(res.session, "TonConnect QR", deps);
-  assert.equal(res.session.stage, "awaiting_tonconnect_completion");
-  assert.match(res.reply, /fresh TonConnect login link is ready/i);
-  assert.match(res.reply, /wallet\.example\/connect/i);
-  assert.equal(res.session.auth.tonConnect?.payloadToken, "payload-token");
-
-  res = await advanceTransferFlow(res.session, "status", deps);
-  assert.equal(res.session.stage, "awaiting_tonconnect_completion");
-  assert.match(res.reply, /still waiting for the TonConnect approval/i);
-  assert.match(res.reply, /wallet\.example\/connect/i);
+  withEnv({ ...complete, UNIGOX_WALLET_PRIVATE_KEY: undefined, UNIGOX_SENDER_EMAIL: " " }, () => {
+    assert.deepEqual(detectAuthState(), {
+      hasReplayableAuth: false,
+      missingSettings: ["UNIGOX_WALLET_PRIVATE_KEY", "UNIGOX_SENDER_EMAIL"],
+    });
+  });
 });
 
-test("TonConnect refuses a wallet approval if it comes back for a different TON address", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-    startTonConnectLogin: async () => ({
-      universalLink: "https://wallet.example/connect",
-      manifestUrl: "https://www.unigox.com/api/tonconnect-manifest",
-      expiresAt: "2026-04-02T12:00:00.000Z",
-      payloadToken: "payload-token",
-    }),
-    checkTonConnectLogin: async () => ({
-      status: "connected",
-      walletAddress: "0:different",
-      network: "-239",
-      publicKey: "abcd1234",
-      proof: {
-        timestamp: 1,
-        domain: { lengthBytes: 16, value: "www.unigox.com" },
-        signature: "signature",
-        payload: "payload",
+test("a failed receipt confirmation keeps the escrow locked and does not show the backend's error text", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
       },
-    }),
+    },
+    _meta: { lastUpdated: "" },
   });
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+    confirmFiatReceivedError: "INVALID_STATUS: order b2c3 at /api/v1/partner/orders is not confirmable",
+  });
+  const deps = makeDeps(file, client);
 
-  const tonAddress = "UQDcx3iPA77JqK6a5tHK8PsE77HDdt_SGsx7O9IjWpMQAVEK";
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
 
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "ton", deps);
-  res = await advanceTransferFlow(res.session, tonAddress, deps);
-  res = await advanceTransferFlow(res.session, "this address is correct", deps);
-  res = await advanceTransferFlow(res.session, "TonConnect QR", deps);
-  res = await advanceTransferFlow(res.session, "connected", deps);
+  res = await advanceTransferFlow(res.session, "received", deps);
 
-  assert.equal(res.session.stage, "awaiting_ton_address");
-  assert.match(res.reply, /different wallet or address version/i);
-  assert.match(res.reply, /Send the exact TON address/i);
+  assert.equal(res.session.stage, "awaiting_manual_settlement_followup");
+  assert.match(res.reply, /did not accept the receipt confirmation just now, so nothing was released/i);
+  assert.doesNotMatch(res.reply, /INVALID_STATUS|\/api\/v1|b2c3/);
+  assert.match(res.session.execution.lastError ?? "", /INVALID_STATUS/);
 });
 
-test("natural TON auth-choice phrasing is accepted without forcing the exact button label", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
+test("without a price nothing is placed, and a later retry still shows the live price before placing", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
   });
+  const client = makeClient({ waitMode: "new_price" });
+  let priced = false;
+  const pricedQuote = client.getPreflightQuote!.bind(client);
+  client.getPreflightQuote = async (params) => (priced ? pricedQuote(params) : undefined);
+  const deps = makeDeps(file, client);
 
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
 
-  res = await advanceTransferFlow(res.session, "Lets do TON", deps);
-  assert.equal(res.session.stage, "awaiting_ton_address");
-  assert.match(res.reply, /TON address shown by the wallet/i);
+  assert.equal(res.session.stage, "awaiting_no_match_resolution");
+  assert.match(res.reply, /couldn't get a price for this transfer right now, so nothing was placed/i);
+  assert.ok(!client.calls.includes("createTradeRequest"));
+
+  priced = true;
+  res = await advanceTransferFlow(res.session, "retry", deps);
+
+  assert.equal(res.session.stage, "awaiting_new_price_confirmation");
+  assert.equal(client.lastCreateTradeRequestParams?.cryptoAmount, 0);
+  assert.match(res.reply, /I have a live price for this transfer/i);
+  assert.doesNotMatch(res.reply, /original quote/i);
+  assert.ok(!client.calls.includes("waitForTradeMatch"));
 });
-
-test("user can switch auth method from a stuck TON address step back to auth choice", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-
-  res = await advanceTransferFlow(res.session, "Lets do TON", deps);
-  assert.equal(res.session.stage, "awaiting_ton_address");
-
-  res = await advanceTransferFlow(res.session, "actually use a different wallet", deps);
-  assert.equal(res.session.stage, "awaiting_auth_choice");
-  assert.match(res.reply, /different sign-in method/i);
-  assert.equal(res.session.auth.choice, undefined);
-  assert.equal(res.session.auth.mode, undefined);
-});
-
-
-test("raw 0: TON address form is accepted and preserved in the confirmation prompt", async () => {
-  const { file } = makeTempContactsFile();
-  const client = makeClient();
-  const deps = makeDeps(file, client, {
-    authState: { hasReplayableAuth: false, emailFallbackAvailable: false },
-  });
-
-  const rawTonAddress = "0:942dcad7691db2159cd34ac9045ec697f6ce009b659eec939e7b89ef88cb090e";
-
-  let res = await startTransferFlow("send 50 EUR to mom", deps);
-  res = await advanceTransferFlow(res.session, "ton", deps);
-  res = await advanceTransferFlow(res.session, rawTonAddress, deps);
-
-  assert.equal(res.session.stage, "awaiting_ton_address_confirmation");
-  assert.ok(res.reply.includes(rawTonAddress));
-  assert.equal(res.session.auth.tonAddressDisplay, rawTonAddress);
-  assert.equal(res.session.auth.tonAddress, rawTonAddress);
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
