@@ -3049,3 +3049,42 @@ test("detectAuthState reports which Partner API settings are missing", () => {
     });
   });
 });
+
+test("a failed receipt confirmation keeps the escrow locked and does not show the backend's error text", async () => {
+  const { file } = makeTempContactsFile({
+    contacts: {
+      mom: {
+        name: "Mom",
+        aliases: ["mom"],
+        paymentMethods: {
+          EUR: {
+            method: "Revolut",
+            methodId: 2,
+            methodSlug: "revolut",
+            networkId: 47,
+            network: "Revolut Username",
+            networkSlug: "revolut-username",
+            details: { revtag: "mom_ok" },
+          },
+        },
+      },
+    },
+    _meta: { lastUpdated: "" },
+  });
+  const client = makeClient({
+    matchedTradeStatus: "fiat_payment_proof_submitted_by_buyer",
+    confirmFiatReceivedError: "INVALID_STATUS: order b2c3 at /api/v1/partner/orders is not confirmable",
+  });
+  const deps = makeDeps(file, client);
+
+  let res = await startTransferFlow("send 25 EUR to mom", deps);
+  res = await advanceTransferFlow(res.session, "confirm", deps);
+  assert.equal(res.session.stage, "awaiting_receipt_confirmation");
+
+  res = await advanceTransferFlow(res.session, "received", deps);
+
+  assert.equal(res.session.stage, "awaiting_manual_settlement_followup");
+  assert.match(res.reply, /did not accept the receipt confirmation just now, so nothing was released/i);
+  assert.doesNotMatch(res.reply, /INVALID_STATUS|\/api\/v1|b2c3/);
+  assert.match(res.session.execution.lastError ?? "", /INVALID_STATUS/);
+});

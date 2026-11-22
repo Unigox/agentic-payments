@@ -39,14 +39,14 @@
 - **aliases**: all names the user might call this person (including relationship terms)
 - **paymentMethods**: one entry per currency, each with:
   - **method**: human-readable method name
-  - **methodId**: UNIGOX payment_method_id
-  - **methodSlug**: live API slug for re-resolving the frontend/API field config later
-  - **networkId**: UNIGOX payment_network_id
+  - **methodId**: numeric institution id reported by the catalogue; informational, `0` when unknown
+  - **methodSlug**: institution slug (`institution_id` on the Partner API); this is what the skill matches on
+  - **networkId**: numeric rail id reported by the catalogue; informational, `0` when unknown
   - **network**: human-readable network name
-  - **networkSlug**: live API slug for the exact payout network (important when one method has multiple networks)
-  - **selectedFormatId**: optional resolved format ID when the network exposes multiple frontend/API formats
+  - **networkSlug**: rail slug on the Partner API (important when one institution can be paid over several rails)
+  - **selectedFormatId**: optional rail format id when the rail has several formats
   - **details**: key-value pairs required by the method
-  - **lastValidatedAt**: optional timestamp of the last successful frontend/API validation
+  - **lastValidatedAt**: optional timestamp of the last successful validation against the live field rules
 
 ## Example
 

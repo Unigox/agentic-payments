@@ -3170,7 +3170,7 @@ async function maybeHandleSettlementTurn(
       session.stage = "awaiting_manual_settlement_followup";
       return reply(
         withUpdate(session, deps),
-        `${deferred.prompt} Confirmation attempt failed: ${message}`,
+        `${deferred.prompt} UNIGOX did not accept the receipt confirmation just now, so nothing was released. Ask me for status and try again.`,
         deferred.options,
         [...events, ...deferred.events.map(mapSettlementEvent)]
       );
@@ -3428,10 +3428,10 @@ async function maybeHandleOutstandingTradeReminderTurn(
       }]
     );
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    session.execution.lastError = error instanceof Error ? error.message : String(error);
     return reply(
       withUpdate(session, deps),
-      `I tried to confirm receipt for ${amountLabel} to ${outstanding.recipient}, but the signed confirm-payment step failed: ${message}`,
+      `I tried to confirm receipt for ${amountLabel} to ${outstanding.recipient}, but UNIGOX did not accept the confirmation just now, so nothing was released. Please try again in a moment.`,
     );
   }
 }

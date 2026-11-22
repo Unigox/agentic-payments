@@ -1,101 +1,35 @@
-# Payment Detail Field Validators
+# Payment Detail Field Validation
 
-For this skill, the **frontend + payment-network API are the source of truth** for both:
-1. which fields to request
-2. how those fields should be validated
+## Source of truth
 
-Do not invent country-specific rules when the network config already exposes them.
+Field rules come from the rail definition returned by `GET /api/v1/supported/payment-rails`. Each field has:
 
-## Source of Truth Flow
+- `key`: the name to send inside `details`
+- `label`, `placeholder`: text shown when asking for the value
+- `required`
+- `pattern`: a regular expression, when the rail publishes one
+- `options`: allowed values for choice fields
 
-Use this order:
+## What the skill checks locally
 
-1. `getPaymentMethodsForCurrency(currency)`
-2. `getPaymentMethodFieldConfig({ currency, methodSlug, networkSlug? })`
-3. `validatePaymentDetailInput(details, fields, { countryCode, formatId })`
+`validatePaymentDetailInput(details, fields)` in `scripts/payment-catalogue.ts`:
 
-What the helper does:
-- resolves the correct format using the same frontend rules:
-  - `paymentMethodFormats`
-  - `paymentMethodTypeFormats`
-  - single-format fallback
-- validates against each field’s API-exposed `validators[]`
-- falls back to frontend validator-name behavior only when the API gives a `validatorName` without a regex `pattern`
+1. trims each value
+2. normalizes a few fields the way their patterns expect:
+   - `iban`, `swift_code`, `ifsc_code`: spaces removed, upper-cased
+   - `revtag`: leading `@` removed
+3. reports a missing required field
+4. reports a value that does not match the field's `pattern`
 
-## Frontend-Aligned Validation Behavior
+A field without a pattern is accepted as typed. A pattern the JavaScript engine cannot compile is skipped.
 
-Validation is field-config driven.
-For each field:
-- if `required=true`, non-empty input is mandatory
-- if `validators[]` is present, apply those validators in order
-- if no validators are present, accept the non-empty value as-is
+## What UNIGOX checks
 
-## Named Validator Fallbacks
+Saving payment details (`POST /api/v1/partner/users/{user_uuid}/payment-details`) validates the fields again
+for the corridor. The local check exists so the user is told about a typo at the field, not after confirmation.
+The API remains the authority.
 
-These are only used when the API returns a validator name without an inline regex pattern.
-That mirrors how the frontend adapter resolves validator names.
+## No local rule tables
 
-Currently relevant fallback names for this skill expansion:
-
-| Validator Name | Frontend-Aligned Rule |
-|---|---|
-| `indiaBankAccount` | digits only, length 10-16 |
-| `indiaPhone` | accepts `+91XXXXXXXXXX`, `91XXXXXXXXXX`, or `XXXXXXXXXX` |
-| `ifscCode` | `^[A-Z]{4}0[A-Z0-9]{6}$` |
-| `upiId` | `^[a-zA-Z0-9._-]+@[a-zA-Z0-9]+$` |
-| `fullName` | `^[a-zA-ZÀ-ÿ\u0100-\u017F\u0400-\u04FF\s'-]{2,50}$` |
-
-When the API already sends a regex pattern, that regex wins.
-
-## What This Means for Current Currencies
-
-### INR
-- `upi-india` exposes frontend/API validators for:
-  - `upi_id`
-  - `full_name`
-  - `mobile_number` via `indiaPhone`
-- `imps-neft-india` exposes frontend/API validators for:
-  - `ifsc_code`
-  - `account_number` via `indiaBankAccount`
-  - `full_name`
-
-### NGN
-- `nip-nigeria` exposes frontend/API validators for:
-  - `phone_number` on mobile-money formats
-  - `full_name`
-- Bank-account `account_number` currently has **no explicit validator** in the frontend/API config, so the skill should not impose extra hardcoded length rules.
-
-### KES
-- `pesalink` exposes frontend/API validators for:
-  - `phone_number` on mobile-money formats
-  - `paybill` on `mpesa-paybill`
-  - `full_name`
-- `mpesa-paybill.account_number` currently has **no explicit validator** in the frontend/API config, so it remains free-form.
-
-### GHS
-- `ghipss` exposes frontend/API validators for:
-  - `phone_number` on mobile-money formats
-  - `full_name`
-- Bank-account `account_number` currently has **no explicit validator** in the frontend/API config.
-
-## Minimal Normalization
-
-The helper performs a few safe normalizations before validation/storage:
-- `revtag` → strips leading `@`
-- `iban` → removes spaces, uppercases
-- `swift_code` → removes spaces, uppercases
-- `ifsc_code` → removes spaces, uppercases
-
-These are convenience normalizations only; validation still follows the frontend/API-derived rules above.
-
-## Important Gap to Call Out
-
-The backend API does **not** always serialize the full validator implementation.
-Sometimes it only sends:
-- `validatorName`
-- `message`
-
-without a regex `pattern`.
-
-In those cases, the skill uses the existing frontend validator semantics for that validator name.
-That is the only place where validation is not fully API-serialized, and it stays aligned to the frontend instead of ad-hoc local guesses.
+The skill keeps no per-country or per-validator rule tables. If a rail's rules change, the next catalogue read
+picks them up.

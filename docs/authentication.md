@@ -1,101 +1,82 @@
-# Authentication & Wallet Setup
+# Settings and credentials
 
 ## Overview
 
-Agentic Payments needs one thing to work: a way to sign in to UNIGOX on behalf of your agent. On first run, the skill walks you through it. This page explains the options.
+Agentic Payments talks to the public [UNIGOX Partner API](https://developers.unigox.com). There is no sign-in
+step in chat. The skill reads four settings from the machine it runs on:
 
-## How signing works
+| Setting | Required | What it is |
+|---------|----------|------------|
+| `UNIGOX_API_KEY` | yes | Partner API key, sent as the `X-API-Key` header. Issued after business onboarding at [unigox.com/business](https://unigox.com/business). |
+| `UNIGOX_WALLET_PRIVATE_KEY` | yes | Private key of your UNIGOX partner wallet (`0x` + 64 hex characters). Signs escrow funding and refunds locally. Never sent to UNIGOX. |
+| `UNIGOX_XAI_RPC_URL` | yes | JSON-RPC URL of an XAI mainnet node (chain id 660279). Used only to read the wallet's USDC and USDT balance. |
+| `UNIGOX_SENDER_EMAIL` | yes | Email of the one KYC-verified person this installation sends for. |
+| `UNIGOX_API_URL` | no | API base URL. Defaults to production, `https://api.unigox.com`. Set `https://api-staging.unigox.com` to test with a staging key. |
 
-Once you're signed in (SIWE / TON proof / email OTP), the skill captures the Auth0 idToken from your UNIGOX session and forwards it to the **privy-signing backend** at `https://privy-signing-prod-at922.ondigitalocean.app`. That backend handles all on-chain signing for you — funding trade escrow, releasing escrow, and any other signed action — using your idToken as Bearer auth. There is no second key for you to manage. If you need to point the skill at a different signing backend, set `PRIVY_SIGNING_URL`.
+Without the four required settings the skill can still save contacts, but it will not place a transfer. It
+answers a send request with the names of the settings that are missing.
 
-If you want a visual walkthrough of the setup flow, watch:
-
-- [Agentic Payments setup video](https://youtu.be/KRcdmkPhAtI)
-
----
-
-## Sign-In Methods
-
-When the skill starts, it offers these sign-in paths:
-
-| Method | What it does | Best for |
-|--------|-------------|----------|
-| **EVM wallet connection** | Use an existing EVM wallet you already have | Users with MetaMask, Phantom, etc. |
-| **TON wallet connection** | Use an existing TON wallet | Users with Tonkeeper, etc. |
-| **Create dedicated EVM wallet** | Generate a new isolated EVM wallet locally | Beginners / cleanest setup |
-| **Create dedicated TON wallet** | Generate a new isolated TON wallet locally | Beginners who prefer TON |
-| **Email OTP** | Sign in with a one-time code to your email | Onboarding or recovery |
-
-The **dedicated wallet** options are the easiest path: the skill creates an isolated login wallet on your machine with no manual key handling required.
+**Never paste a key into chat.** The skill does not ask for keys and does not accept them as messages.
 
 ---
 
-## EVM Wallet Setup
+## Where to put them
 
-### Existing EVM wallet
+### Claude Desktop
 
-Provide the private key for the EVM wallet you already use on UNIGOX. The skill stores it locally as `UNIGOX_EVM_LOGIN_PRIVATE_KEY`.
+Open the extension's settings after installing the `.mcpb` bundle. Claude Desktop asks for the four values and
+stores the two keys as sensitive fields.
 
-### Generated EVM wallet
+### Codex, OpenClaw, OpenAI SDK, command line
 
-The skill creates a new EVM wallet locally. No key pasting needed. The key is stored as `UNIGOX_EVM_LOGIN_PRIVATE_KEY` automatically.
+Copy `.env.example` in the repository root to `.env` and fill it in. The skill reads, in this order:
 
-You can export the generated wallet later by saying `export this wallet` — this writes a local backup file (default: `~/Downloads/Agentic Payments/`), it does not echo secrets into chat.
+1. the process environment
+2. the file named by `SEND_MONEY_ENV_PATH`, if set
+3. `.env` in the skill directory
+4. `~/.openclaw/.env`
 
----
-
-## TON Wallet Setup
-
-### Existing TON wallet
-
-Two paths:
-- **Agent-side derivation**: provide the raw TON address plus either the mnemonic phrase or TON private key. The skill matches the wallet version automatically.
-- **TonConnect link/QR**: the skill creates a TonConnect deep link you open in your wallet.
-
-### Generated TON wallet
-
-The skill creates a new TON wallet locally and stores `UNIGOX_TON_PRIVATE_KEY`, `UNIGOX_TON_ADDRESS`, and `UNIGOX_TON_WALLET_VERSION`.
+`.env` is git-ignored. Do not commit it.
 
 ---
 
-## Email Authentication
+## The partner wallet key
 
-Useful for onboarding when no wallet is ready. You can link a wallet later.
+Your partner account has one wallet on the XAI chain. Every payout is funded by a signature from that wallet's
+key. See [Funding your wallet](https://developers.unigox.com/tutorials/funding-your-wallet).
+
+- The key controls the wallet's **whole balance**. Use a partner account that holds only what the agent is
+  allowed to spend, and top it up as needed.
+- The skill checks that the API expects the same wallet address as the key before it signs anything. If they
+  differ, it signs nothing.
+- If you are unsure how to obtain the key for your partner wallet, ask UNIGOX support.
 
 ---
 
-## Browser login helper
+## The sender and KYC
 
-If unigox.com shows a login QR or link while you're trying to use the site directly:
-- **EVM wallet**: paste the `wc:` WalletConnect link or share a QR screenshot — the skill can approve the browser login locally
-- **TON wallet**: paste the `tc://` TonConnect link or share a QR screenshot — the skill can approve the browser login locally
+`UNIGOX_SENDER_EMAIL` identifies the person the money is sent for. The skill registers that person with the
+Partner API on first use. UNIGOX requires the sender to pass identity verification (KYC) before every transfer,
+whatever the amount. The skill starts it when needed: it asks for the full legal name and country and returns a
+verification link. Once UNIGOX approves, the transfer continues.
+
+One installation serves one sender. The Partner API does not allow several real people to share one sender.
+
+---
+
+## What the skill does with the wallet key
+
+| Action | When | What is signed |
+|--------|------|----------------|
+| Fund escrow | After you confirm a transfer and a provider accepts it | An EIP-712 request built by UNIGOX that moves exactly the order amount to that order's escrow |
+| Refund | When a funded order ends without a payout | A Safe transaction built by UNIGOX that returns the escrow to your partner wallet |
+
+Nothing else is signed. UNIGOX relays both transactions and pays the gas.
 
 ---
 
 ## Security
 
-- Use a **newly created / isolated wallet** for UNIGOX. Never use your main wallet.
-- Do not hold large amounts. Treat it as a spending wallet, not a vault.
-- Secure your login key. Anyone with access can authenticate as the agent.
-- After pasting a key in chat, delete that message if your platform supports it.
-
----
-
-## Environment Variables Reference
-
-| Variable | Description |
-|----------|-------------|
-| `UNIGOX_EVM_LOGIN_PRIVATE_KEY` | EVM login wallet private key |
-| `UNIGOX_EVM_LOGIN_WALLET_ORIGIN` | Auth origin (`evm` or `generated_evm`) |
-| `UNIGOX_TON_PRIVATE_KEY` | TON wallet private key |
-| `UNIGOX_TON_ADDRESS` | TON wallet address |
-| `UNIGOX_TON_MNEMONIC` | TON wallet mnemonic (alternative to private key) |
-| `UNIGOX_TON_WALLET_VERSION` | Matched TON wallet version |
-| `UNIGOX_TON_NETWORK` | TON network id (defaults to `-239` mainnet) |
-| `UNIGOX_TON_LOGIN_WALLET_ORIGIN` | Auth origin (`ton` or `generated_ton`) |
-| `UNIGOX_LOGIN_WALLET_ORIGIN` | Combined login-wallet origin marker |
-| `UNIGOX_EMAIL` | Email for OTP auth |
-| `WALLETCONNECT_PROJECT_ID` | Optional WalletConnect project ID override |
-| `PRIVY_SIGNING_URL` | Optional override for the privy-signing backend; defaults to `https://privy-signing-prod-at922.ondigitalocean.app` |
-
-These are stored in `.env` in the project root (or `~/.openclaw/.env` as fallback).
+- Keep `.env` readable only by you.
+- Treat the partner wallet as a spending wallet, not a vault.
+- If the machine is lost or shared, ask UNIGOX to replace the API key and move the wallet balance.

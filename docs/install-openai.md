@@ -37,11 +37,11 @@ response = client.chat.completions.create(
 
 When the model returns a `send_money_turn` tool call:
 
-1. Extract the `text` (and optional `image_path`, `session_key`, `reset`) arguments
+1. Extract the `text` (and optional `session_key`, `reset`) arguments
 2. Pass them to the local `send_money_turn` runner
 3. Return the runner's `reply` and `options` back to the model as the tool result
 4. Keep the same `session_key` across turns so the flow resumes instead of restarting
 
 ## Next Steps
 
-- [Configure authentication](authentication.md)
+- [Settings and credentials](authentication.md): copy `.env.example` to `.env` and fill it in

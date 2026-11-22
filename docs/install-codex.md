@@ -51,4 +51,4 @@ bash scripts/install-codex-skill.sh
 
 ## Next Steps
 
-- [Configure authentication](authentication.md)
+- [Settings and credentials](authentication.md): copy `.env.example` to `.env` and fill it in
